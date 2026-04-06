@@ -22,6 +22,21 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Simple password protection
+const AUTH_PASSWORD = process.env.APP_PASSWORD || "Rickee09!";
+const AUTH_TOKEN = Buffer.from(`admin:${AUTH_PASSWORD}`).toString("base64");
+
+app.use((req, res, next) => {
+  // Skip auth for API routes called by the app itself
+  if (req.path.startsWith("/api")) return next();
+
+  const auth = req.headers["authorization"];
+  if (auth && auth === `Basic ${AUTH_TOKEN}`) return next();
+
+  res.setHeader("WWW-Authenticate", 'Basic realm="Trading Bot"');
+  res.status(401).send("Unauthorized");
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
