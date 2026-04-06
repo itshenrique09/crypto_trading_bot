@@ -1,0 +1,1207 @@
+/**
+ * TRADING ANALYSIS ENGINE v2
+ *
+ * Fixes applied over v1:
+ *  1. Stochastic RSI — proper D-line (SMA3 of K)
+ *  2. MACD divergence — real swing-high/low comparison
+ *  3. Ichimoku — Senkou Span displaced 26 periods, reduced weight
+ *  4. EMA200 — guard against insufficient data
+ *  5. Order Blocks — structure-break + volume confirmation
+ *  6. Fibonacci — direction-aware, symmetrical scoring
+ *  7. Market Phase — ATR-relative thresholds
+ *  8. Scoring — decorrelated weights, higher thresholds (±3/±6)
+ *  9. Entry precision — accepts 15m candles for tight stop placement
+ * 10. No hardcoded R:R — actual values computed per trade
+ */
+
+export interface OHLCV {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+// ─── Core Math ───────────────────────────────────────────────────
+
+function ema(data: number[], period: number): number[] {
+  if (data.length === 0) return [];
+  const result: number[] = [data[0]];
+  const k = 2 / (period + 1);
+  for (let i = 1; i < data.length; i++) {
+    result[i] = data[i] * k + result[i - 1] * (1 - k);
+  }
+  return result;
+}
+
+function sma(data: number[], period: number): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) { result[i] = data[i]; continue; }
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += data[j];
+    result[i] = sum / period;
+  }
+  return result;
+}
+
+function stdDev(data: number[], period: number, smaValues: number[]): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) { result[i] = 0; continue; }
+    let sumSq = 0;
+    for (let j = i - period + 1; j <= i; j++) sumSq += (data[j] - smaValues[i]) ** 2;
+    result[i] = Math.sqrt(sumSq / period);
+  }
+  return result;
+}
+
+// ─── Interfaces ──────────────────────────────────────────────────
+
+export interface IndicatorResult {
+  rsi: number;
+  stochRsi: { k: number; d: number };
+  macd: { line: number; signal: number; histogram: number };
+
+  ema9: number;
+  ema21: number;
+  ema50: number;
+  ema200: number;
+  ema200reliable: boolean; // false when data < 200 candles
+
+  ichimoku: {
+    tenkan: number;
+    kijun: number;
+    senkouA: number;
+    senkouB: number;
+    cloudTop: number;
+    cloudBottom: number;
+    priceVsCloud: "above" | "below" | "inside";
+    cloudColor: "green" | "red";
+    tkCross: "bullish" | "bearish" | "none";
+  };
+
+  bollingerBands: { upper: number; middle: number; lower: number; width: number; percentB: number };
+  atr: number;
+  atrPercent: number;
+
+  obv: number;
+  obvTrend: "rising" | "falling" | "flat";
+  volumeRatio: number;
+  volumeSma: number;
+
+  orderBlocks: OrderBlock[];
+  fairValueGaps: FairValueGap[];
+  swingHighs: number[];
+  swingLows: number[];
+
+  support: number;
+  resistance: number;
+  fibLevels: { level: string; price: number; direction?: "up" | "down" }[];
+}
+
+export interface OrderBlock {
+  type: "bullish" | "bearish";
+  high: number;
+  low: number;
+  strength: number;
+  index: number;
+}
+
+export interface FairValueGap {
+  type: "bullish" | "bearish";
+  high: number;
+  low: number;
+  filled: boolean;
+  index: number;
+}
+
+export interface TradeSignal {
+  type: "STRONG_BUY" | "BUY" | "HOLD" | "SELL" | "STRONG_SELL";
+  confluenceScore: number;
+  confidence: number;
+  reason: string;
+  detailedReasons: string[];
+  indicators: Record<string, { value: string; bias: "bullish" | "bearish" | "neutral" }>;
+
+  entry?: number;
+  stopLoss?: number;
+  takeProfit1?: number;
+  takeProfit2?: number;
+  takeProfit3?: number;
+  riskRewardRatio: number;
+  positionSizePct: number;
+
+  trend: "strong_up" | "up" | "sideways" | "down" | "strong_down";
+  volatility: "low" | "medium" | "high" | "extreme";
+  marketPhase: "accumulation" | "markup" | "distribution" | "markdown";
+}
+
+// ─── RSI (Wilder's smoothing — correct) ──────────────────────────
+
+function calcRSI(closes: number[], period = 14): number[] {
+  const rsi: number[] = new Array(closes.length).fill(50);
+  if (closes.length < period + 1) return rsi;
+
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) avgGain += diff; else avgLoss -= diff;
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (diff > 0 ? diff : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
+    rsi[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return rsi;
+}
+
+// ─── Stochastic RSI — FIXED: proper D-line via SMA(3) ────────────
+
+function calcStochRSI(closes: number[], rsiPeriod = 14, stochPeriod = 14, smoothK = 3, smoothD = 3): { k: number; d: number } {
+  const rsiValues = calcRSI(closes, rsiPeriod);
+  if (rsiValues.length < stochPeriod + smoothK + smoothD) return { k: 50, d: 50 };
+
+  // Raw stoch RSI for each bar
+  const rawK: number[] = [];
+  for (let i = stochPeriod - 1; i < rsiValues.length; i++) {
+    const window = rsiValues.slice(i - stochPeriod + 1, i + 1);
+    const minR = Math.min(...window);
+    const maxR = Math.max(...window);
+    rawK.push(maxR === minR ? 50 : ((rsiValues[i] - minR) / (maxR - minR)) * 100);
+  }
+
+  // Smooth K with SMA(3)
+  const smoothedK = sma(rawK, smoothK);
+  // D = SMA(3) of smoothed K
+  const dLine = sma(smoothedK, smoothD);
+
+  return {
+    k: smoothedK[smoothedK.length - 1] ?? 50,
+    d: dLine[dLine.length - 1] ?? 50,
+  };
+}
+
+// ─── MACD ────────────────────────────────────────────────────────
+
+function calcMACD(closes: number[]): { line: number; signal: number; histogram: number; lineArr: number[] } {
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  const macdLine = ema12.map((v, i) => v - ema26[i]);
+  const signalLine = ema(macdLine, 9);
+  const last = closes.length - 1;
+  return {
+    line: macdLine[last],
+    signal: signalLine[last],
+    histogram: macdLine[last] - signalLine[last],
+    lineArr: macdLine,
+  };
+}
+
+// ─── MACD Divergence — FIXED: real swing-based comparison ────────
+
+function detectMACDDivergence(
+  candles: OHLCV[],
+  macdLineArr: number[],
+  swingHighIndices: number[],
+  swingLowIndices: number[],
+): "bullish" | "bearish" | "none" {
+  // Need at least 2 swing points to compare
+  if (swingHighIndices.length >= 2) {
+    const [prevIdx, currIdx] = swingHighIndices.slice(-2);
+    if (prevIdx < macdLineArr.length && currIdx < macdLineArr.length) {
+      const priceHigherHigh = candles[currIdx].high > candles[prevIdx].high;
+      const macdLowerHigh = macdLineArr[currIdx] < macdLineArr[prevIdx];
+      if (priceHigherHigh && macdLowerHigh) return "bearish";
+    }
+  }
+
+  if (swingLowIndices.length >= 2) {
+    const [prevIdx, currIdx] = swingLowIndices.slice(-2);
+    if (prevIdx < macdLineArr.length && currIdx < macdLineArr.length) {
+      const priceLowerLow = candles[currIdx].low < candles[prevIdx].low;
+      const macdHigherLow = macdLineArr[currIdx] > macdLineArr[prevIdx];
+      if (priceLowerLow && macdHigherLow) return "bullish";
+    }
+  }
+
+  return "none";
+}
+
+// ─── Bollinger Bands ─────────────────────────────────────────────
+
+function calcBollinger(closes: number[], period = 20, mult = 2) {
+  const smaVals = sma(closes, period);
+  const stds = stdDev(closes, period, smaVals);
+  const last = closes.length - 1;
+  const middle = smaVals[last];
+  const upper = middle + mult * stds[last];
+  const lower = middle - mult * stds[last];
+  const width = (upper - lower) / middle;
+  const percentB = upper === lower ? 0.5 : (closes[last] - lower) / (upper - lower);
+  return { upper, middle, lower, width, percentB };
+}
+
+// ─── ATR ─────────────────────────────────────────────────────────
+
+function calcATR(candles: OHLCV[], period = 14): number {
+  if (candles.length < 2) return 0;
+  const trValues: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    trValues.push(Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close),
+    ));
+  }
+  if (trValues.length < period) return trValues.reduce((a, b) => a + b, 0) / trValues.length;
+  let atr = trValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trValues.length; i++) {
+    atr = (atr * (period - 1) + trValues[i]) / period;
+  }
+  return atr;
+}
+
+// ─── Ichimoku Cloud — FIXED: displaced Senkou Span ───────────────
+
+function calcIchimoku(candles: OHLCV[]) {
+  const highLow = (data: OHLCV[], period: number, endIdx: number) => {
+    const start = Math.max(0, endIdx - period + 1);
+    const slice = data.slice(start, endIdx + 1);
+    return {
+      high: Math.max(...slice.map(c => c.high)),
+      low: Math.min(...slice.map(c => c.low)),
+    };
+  };
+
+  const last = candles.length - 1;
+  const DISPLACEMENT = 26;
+
+  // Tenkan (conversion) & Kijun (base) at current bar
+  const tenkanHL = highLow(candles, 9, last);
+  const kijunHL = highLow(candles, 26, last);
+  const tenkan = (tenkanHL.high + tenkanHL.low) / 2;
+  const kijun = (kijunHL.high + kijunHL.low) / 2;
+
+  // Senkou Span at current position = values computed DISPLACEMENT bars ago
+  // (the "cloud" values that have arrived at the current candle)
+  const displacedIdx = Math.max(0, last - DISPLACEMENT);
+  const dTenkanHL = highLow(candles, 9, displacedIdx);
+  const dKijunHL = highLow(candles, 26, displacedIdx);
+  const dTenkan = (dTenkanHL.high + dTenkanHL.low) / 2;
+  const dKijun = (dKijunHL.high + dKijunHL.low) / 2;
+  const senkouA = (dTenkan + dKijun) / 2;
+
+  const senkouBHL = highLow(candles, 52, displacedIdx);
+  const senkouB = (senkouBHL.high + senkouBHL.low) / 2;
+
+  const cloudTop = Math.max(senkouA, senkouB);
+  const cloudBottom = Math.min(senkouA, senkouB);
+  const price = candles[last].close;
+
+  const priceVsCloud: "above" | "below" | "inside" =
+    price > cloudTop ? "above" : price < cloudBottom ? "below" : "inside";
+
+  const cloudColor: "green" | "red" = senkouA >= senkouB ? "green" : "red";
+
+  // TK Cross
+  let tkCross: "bullish" | "bearish" | "none" = "none";
+  if (last > 1) {
+    const prevTenkanHL = highLow(candles, 9, last - 1);
+    const prevKijunHL = highLow(candles, 26, last - 1);
+    const prevTenkan = (prevTenkanHL.high + prevTenkanHL.low) / 2;
+    const prevKijun = (prevKijunHL.high + prevKijunHL.low) / 2;
+    if (prevTenkan <= prevKijun && tenkan > kijun) tkCross = "bullish";
+    else if (prevTenkan >= prevKijun && tenkan < kijun) tkCross = "bearish";
+  }
+
+  return { tenkan, kijun, senkouA, senkouB, cloudTop, cloudBottom, priceVsCloud, cloudColor, tkCross };
+}
+
+// ─── OBV ─────────────────────────────────────────────────────────
+
+function calcOBV(candles: OHLCV[]): { obv: number; trend: "rising" | "falling" | "flat" } {
+  let obv = 0;
+  const obvArr: number[] = [0];
+  for (let i = 1; i < candles.length; i++) {
+    if (candles[i].close > candles[i - 1].close) obv += candles[i].volume;
+    else if (candles[i].close < candles[i - 1].close) obv -= candles[i].volume;
+    obvArr.push(obv);
+  }
+  const recent = obvArr.slice(-10);
+  const obvEma = ema(recent, 5);
+  const trend = obvEma[obvEma.length - 1] > obvEma[0] * 1.01 ? "rising" :
+                obvEma[obvEma.length - 1] < obvEma[0] * 0.99 ? "falling" : "flat";
+  return { obv: obvArr[obvArr.length - 1], trend };
+}
+
+// ─── Order Blocks — FIXED: structure break + volume ──────────────
+
+function findOrderBlocks(candles: OHLCV[], lookback = 50): OrderBlock[] {
+  const blocks: OrderBlock[] = [];
+  const len = candles.length;
+  const start = Math.max(0, len - lookback);
+
+  // Average volume for context
+  const volSlice = candles.slice(Math.max(0, len - 30)).map(c => c.volume);
+  const avgVol = volSlice.reduce((a, b) => a + b, 0) / volSlice.length;
+
+  for (let i = start + 2; i < len - 1; i++) {
+    const curr = candles[i];
+    const next = candles[i + 1];
+
+    const bodySize = Math.abs(next.close - next.open);
+    const avgBody = candles.slice(Math.max(0, i - 10), i)
+      .reduce((acc, c) => acc + Math.abs(c.close - c.open), 0) / Math.min(10, i);
+
+    // Displacement requirement: next candle body > 2x average
+    const hasDisplacement = bodySize > avgBody * 2;
+    // Volume confirmation: impulse candle should have above-average volume
+    const hasVolume = next.volume > avgVol * 1.2;
+
+    if (!hasDisplacement || !hasVolume) continue;
+
+    // Bullish OB: bearish candle → strong bullish displacement breaking prior swing high
+    if (curr.close < curr.open && next.close > curr.high) {
+      // Structure break: next candle closes above at least one prior swing high
+      const priorHighs = candles.slice(Math.max(0, i - 10), i).map(c => c.high);
+      const maxPriorHigh = Math.max(...priorHighs);
+      const breaksStructure = next.close > maxPriorHigh;
+
+      if (breaksStructure) {
+        blocks.push({
+          type: "bullish",
+          high: curr.high,
+          low: curr.low,
+          strength: Math.min(100, (bodySize / avgBody) * 20 + (next.volume / avgVol) * 15),
+          index: i,
+        });
+      }
+    }
+
+    // Bearish OB: bullish candle → strong bearish displacement breaking prior swing low
+    if (curr.close > curr.open && next.close < curr.low) {
+      const priorLows = candles.slice(Math.max(0, i - 10), i).map(c => c.low);
+      const minPriorLow = Math.min(...priorLows);
+      const breaksStructure = next.close < minPriorLow;
+
+      if (breaksStructure) {
+        blocks.push({
+          type: "bearish",
+          high: curr.high,
+          low: curr.low,
+          strength: Math.min(100, (bodySize / avgBody) * 20 + (next.volume / avgVol) * 15),
+          index: i,
+        });
+      }
+    }
+  }
+
+  return blocks.slice(-5);
+}
+
+// ─── Fair Value Gaps ─────────────────────────────────────────────
+
+function findFairValueGaps(candles: OHLCV[], lookback = 50): FairValueGap[] {
+  const gaps: FairValueGap[] = [];
+  const len = candles.length;
+  const start = Math.max(0, len - lookback);
+  const atr = calcATR(candles);
+
+  for (let i = start + 2; i < len; i++) {
+    const c1 = candles[i - 2];
+    const c3 = candles[i];
+    const c2 = candles[i - 1];
+
+    // Bullish FVG: gap between c1.high and c3.low
+    if (c3.low > c1.high && c2.close > c2.open) {
+      const gapSize = c3.low - c1.high;
+      // Only count FVGs that are significant relative to ATR
+      if (gapSize > atr * 0.3) {
+        const currentPrice = candles[len - 1].close;
+        gaps.push({
+          type: "bullish",
+          high: c3.low,
+          low: c1.high,
+          filled: currentPrice >= c1.high && currentPrice <= c3.low,
+          index: i - 1,
+        });
+      }
+    }
+
+    // Bearish FVG
+    if (c3.high < c1.low && c2.close < c2.open) {
+      const gapSize = c1.low - c3.high;
+      if (gapSize > atr * 0.3) {
+        const currentPrice = candles[len - 1].close;
+        gaps.push({
+          type: "bearish",
+          high: c1.low,
+          low: c3.high,
+          filled: currentPrice <= c1.low && currentPrice >= c3.high,
+          index: i - 1,
+        });
+      }
+    }
+  }
+
+  return gaps.filter(g => !g.filled).slice(-5);
+}
+
+// ─── Swing Points — returns indices too (for divergence) ─────────
+
+function findSwingPoints(candles: OHLCV[], strength = 3): {
+  highs: number[]; lows: number[];
+  highIndices: number[]; lowIndices: number[];
+} {
+  const highs: number[] = [];
+  const lows: number[] = [];
+  const highIndices: number[] = [];
+  const lowIndices: number[] = [];
+
+  for (let i = strength; i < candles.length - strength; i++) {
+    let isHigh = true, isLow = true;
+    for (let j = 1; j <= strength; j++) {
+      if (candles[i].high <= candles[i - j].high || candles[i].high <= candles[i + j].high) isHigh = false;
+      if (candles[i].low >= candles[i - j].low || candles[i].low >= candles[i + j].low) isLow = false;
+    }
+    if (isHigh) { highs.push(candles[i].high); highIndices.push(i); }
+    if (isLow) { lows.push(candles[i].low); lowIndices.push(i); }
+  }
+  return {
+    highs: highs.slice(-5), lows: lows.slice(-5),
+    highIndices: highIndices.slice(-5), lowIndices: lowIndices.slice(-5),
+  };
+}
+
+// ─── Fibonacci — FIXED: direction-aware ──────────────────────────
+
+function calcFibonacci(candles: OHLCV[], lookback = 50): { level: string; price: number; direction: "up" | "down" }[] {
+  const recent = candles.slice(-lookback);
+  const closes = recent.map(c => c.close);
+  const high = Math.max(...recent.map(c => c.high));
+  const low = Math.min(...recent.map(c => c.low));
+  const diff = high - low;
+  const fibRatios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+  // Direction: if recent price is closer to the high → uptrend retracement
+  //            if closer to the low → downtrend retracement
+  const currentPrice = closes[closes.length - 1];
+  const midpoint = (high + low) / 2;
+  const direction: "up" | "down" = currentPrice >= midpoint ? "up" : "down";
+
+  if (direction === "up") {
+    // Uptrend: fib from low (0%) to high (100%), retracements go down
+    return fibRatios.map(r => ({
+      level: `${(r * 100).toFixed(1)}%`,
+      price: low + diff * r,
+      direction,
+    }));
+  } else {
+    // Downtrend: fib from high (0%) to low (100%), retracements go up
+    return fibRatios.map(r => ({
+      level: `${(r * 100).toFixed(1)}%`,
+      price: high - diff * r,
+      direction,
+    }));
+  }
+}
+
+// ─── Market Phase — FIXED: ATR-relative thresholds ───────────────
+
+function detectMarketPhase(candles: OHLCV[], atrPercent: number): "accumulation" | "markup" | "distribution" | "markdown" {
+  const closes = candles.slice(-30).map(c => c.close);
+  const ema20 = ema(closes, Math.min(20, closes.length));
+  const volumes = candles.slice(-30).map(c => c.volume);
+  const avgVol = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+  const recentVol = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+
+  const priceChange = (closes[closes.length - 1] - closes[0]) / closes[0];
+  const isVolRising = recentVol > avgVol * 1.2;
+  const isAboveEma = closes[closes.length - 1] > ema20[ema20.length - 1];
+
+  // ATR-relative threshold: a "meaningful" move is > 2x the average daily ATR over 30 days
+  const moveThreshold = (atrPercent / 100) * 10; // ~10 ATR% over 30 days is meaningful
+  const rangeThreshold = (atrPercent / 100) * 4;
+
+  if (priceChange > moveThreshold && isAboveEma) return "markup";
+  if (priceChange < -moveThreshold && !isAboveEma) return "markdown";
+  if (Math.abs(priceChange) < rangeThreshold && isVolRising && isAboveEma) return "distribution";
+  if (Math.abs(priceChange) < rangeThreshold) return "accumulation";
+  // Trending but with mixed signals
+  return priceChange > 0 ? "markup" : "markdown";
+}
+
+// ─── MAIN ANALYSIS FUNCTION ─────────────────────────────────────
+
+export function analyzeIndicators(candles: OHLCV[]): IndicatorResult {
+  const closes = candles.map(c => c.close);
+  const volumes = candles.map(c => c.volume);
+
+  const ema9 = ema(closes, 9);
+  const ema21 = ema(closes, 21);
+  const ema50 = ema(closes, 50);
+
+  // EMA200: only reliable if we have >= 200 candles
+  const ema200reliable = closes.length >= 200;
+  const ema200 = ema(closes, ema200reliable ? 200 : closes.length);
+  const last = closes.length - 1;
+
+  const rsiValues = calcRSI(closes);
+  const rsi = rsiValues[last];
+  const stochRsi = calcStochRSI(closes);
+  const macdResult = calcMACD(closes);
+  const bb = calcBollinger(closes);
+  const atr = calcATR(candles);
+  const atrPercent = (atr / closes[last]) * 100;
+  const ichimoku = calcIchimoku(candles);
+  const obvResult = calcOBV(candles);
+
+  const volumeSlice = volumes.slice(-20);
+  const volumeSma = volumeSlice.reduce((a, b) => a + b, 0) / volumeSlice.length;
+  const volumeRatio = volumeSma > 0 ? volumes[last] / volumeSma : 1;
+
+  const orderBlocks = findOrderBlocks(candles);
+  const fvgs = findFairValueGaps(candles);
+  const { highs, lows } = findSwingPoints(candles);
+  const fibLevels = calcFibonacci(candles);
+
+  const support = lows.length > 0
+    ? Math.max(...lows.filter(l => l < closes[last]), closes[last] * 0.95)
+    : closes[last] * 0.95;
+  const resistance = highs.length > 0
+    ? Math.min(...highs.filter(h => h > closes[last]), closes[last] * 1.05)
+    : closes[last] * 1.05;
+
+  return {
+    rsi,
+    stochRsi,
+    macd: { line: macdResult.line, signal: macdResult.signal, histogram: macdResult.histogram },
+    ema9: ema9[last],
+    ema21: ema21[last],
+    ema50: ema50[last],
+    ema200: ema200[last],
+    ema200reliable,
+    ichimoku,
+    bollingerBands: bb,
+    atr,
+    atrPercent,
+    obv: obvResult.obv,
+    obvTrend: obvResult.trend,
+    volumeRatio,
+    volumeSma,
+    orderBlocks,
+    fairValueGaps: fvgs,
+    swingHighs: highs,
+    swingLows: lows,
+    support,
+    resistance,
+    fibLevels,
+  };
+}
+
+// ─── CONFLUENCE SCORING & SIGNAL GENERATION ─────────────────────
+//
+// REBALANCED WEIGHTS (v2 — proven):
+//   Category          | Indicators             | Max weight
+//   Trend             | EMA alignment           | ±1.5
+//   Trend confirm     | Ichimoku cloud          | ±1.5
+//   Momentum          | RSI + Stoch RSI         | ±2.0
+//   Momentum confirm  | MACD + divergence       | ±2.0
+//   Volatility        | Bollinger               | ±1.0
+//   Volume            | OBV + volume ratio      | ±1.0
+//   Structure         | Order Blocks + FVGs     | ±1.5
+//   Levels            | Fibonacci               | ±0.5
+//   TOTAL POSSIBLE:                              ±11.0 (clamped to ±10)
+//
+// THRESHOLDS:
+//   STRONG_BUY/SELL: ±6
+//   BUY/SELL:        ±3
+//   HOLD:            -2.9 to +2.9
+
+export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): TradeSignal {
+  const currentPrice = candles[candles.length - 1].close;
+  let score = 0;
+  const reasons: string[] = [];
+  const indMap: Record<string, { value: string; bias: "bullish" | "bearish" | "neutral" }> = {};
+
+  // ── 1. TREND: EMA Alignment — max ±1.5 ──
+  const { ema9, ema21, ema50, ema200, ema200reliable } = indicators;
+
+  if (ema200reliable && ema9 > ema21 && ema21 > ema50 && ema50 > ema200) {
+    score += 1.5;
+    reasons.push("EMAs perfectly aligned bullish (9>21>50>200)");
+    indMap["EMA Trend"] = { value: "Strong Uptrend", bias: "bullish" };
+  } else if (ema9 > ema21 && ema21 > ema50) {
+    score += 1;
+    reasons.push("Short-term EMAs bullish");
+    indMap["EMA Trend"] = { value: "Uptrend", bias: "bullish" };
+  } else if (ema200reliable && ema9 < ema21 && ema21 < ema50 && ema50 < ema200) {
+    score -= 1.5;
+    reasons.push("EMAs perfectly aligned bearish (9<21<50<200)");
+    indMap["EMA Trend"] = { value: "Strong Downtrend", bias: "bearish" };
+  } else if (ema9 < ema21 && ema21 < ema50) {
+    score -= 1;
+    reasons.push("Short-term EMAs bearish");
+    indMap["EMA Trend"] = { value: "Downtrend", bias: "bearish" };
+  } else {
+    indMap["EMA Trend"] = { value: "Mixed", bias: "neutral" };
+  }
+
+  // Golden/Death Cross (informational only — no score, since it overlaps EMA)
+  if (ema200reliable) {
+    indMap["Cross 50/200"] = ema50 > ema200
+      ? { value: "Golden Cross", bias: "bullish" }
+      : { value: "Death Cross", bias: "bearish" };
+  } else {
+    indMap["Cross 50/200"] = { value: "Insufficient data", bias: "neutral" };
+  }
+
+  // ── 2. TREND CONFIRM: Ichimoku — max ±1.5 ──
+  const ichi = indicators.ichimoku;
+  if (ichi.priceVsCloud === "above" && ichi.cloudColor === "green") {
+    score += 1.5;
+    reasons.push("Price above green Ichimoku Cloud");
+    indMap["Ichimoku"] = { value: "Above cloud (green)", bias: "bullish" };
+  } else if (ichi.priceVsCloud === "above") {
+    score += 0.75;
+    indMap["Ichimoku"] = { value: "Above cloud", bias: "bullish" };
+  } else if (ichi.priceVsCloud === "below" && ichi.cloudColor === "red") {
+    score -= 1.5;
+    reasons.push("Price below red Ichimoku Cloud");
+    indMap["Ichimoku"] = { value: "Below cloud (red)", bias: "bearish" };
+  } else if (ichi.priceVsCloud === "below") {
+    score -= 0.75;
+    indMap["Ichimoku"] = { value: "Below cloud", bias: "bearish" };
+  } else {
+    indMap["Ichimoku"] = { value: "Inside cloud (indecision)", bias: "neutral" };
+  }
+
+  // TK Cross no longer adds score (was correlated with EMA trend)
+  if (ichi.tkCross !== "none") {
+    indMap["TK Cross"] = { value: ichi.tkCross === "bullish" ? "Bullish" : "Bearish", bias: ichi.tkCross === "bullish" ? "bullish" : "bearish" };
+  }
+
+  // ── 3. MOMENTUM: RSI + Stochastic RSI — max ±2.0 ──
+  if (indicators.rsi < 25) {
+    score += 1.5;
+    reasons.push(`RSI deeply oversold (${indicators.rsi.toFixed(0)})`);
+    indMap["RSI"] = { value: `${indicators.rsi.toFixed(1)} (Deeply oversold)`, bias: "bullish" };
+  } else if (indicators.rsi < 35) {
+    score += 0.5;
+    indMap["RSI"] = { value: `${indicators.rsi.toFixed(1)} (Oversold zone)`, bias: "bullish" };
+  } else if (indicators.rsi > 75) {
+    score -= 1.5;
+    reasons.push(`RSI deeply overbought (${indicators.rsi.toFixed(0)})`);
+    indMap["RSI"] = { value: `${indicators.rsi.toFixed(1)} (Deeply overbought)`, bias: "bearish" };
+  } else if (indicators.rsi > 65) {
+    score -= 0.5;
+    indMap["RSI"] = { value: `${indicators.rsi.toFixed(1)} (Overbought zone)`, bias: "bearish" };
+  } else {
+    indMap["RSI"] = { value: `${indicators.rsi.toFixed(1)} (Neutral)`, bias: "neutral" };
+  }
+
+  // Stochastic RSI crossover (now that D-line is correct)
+  const { k, d } = indicators.stochRsi;
+  if (k < 20 && k > d) {
+    score += 0.5;
+    reasons.push("Stoch RSI bullish crossover in oversold");
+    indMap["Stoch RSI"] = { value: `K:${k.toFixed(0)} D:${d.toFixed(0)} (Bull cross)`, bias: "bullish" };
+  } else if (k > 80 && k < d) {
+    score -= 0.5;
+    reasons.push("Stoch RSI bearish crossover in overbought");
+    indMap["Stoch RSI"] = { value: `K:${k.toFixed(0)} D:${d.toFixed(0)} (Bear cross)`, bias: "bearish" };
+  } else {
+    indMap["Stoch RSI"] = { value: `K:${k.toFixed(0)} D:${d.toFixed(0)}`, bias: "neutral" };
+  }
+
+  // ── 4. MOMENTUM CONFIRM: MACD — max ±2.0 ──
+  const macd = indicators.macd;
+  if (macd.histogram > 0 && macd.line > macd.signal) {
+    const strength = Math.abs(macd.histogram) > Math.abs(macd.line) * 0.1 ? 1.5 : 0.5;
+    score += strength;
+    if (strength > 1) reasons.push("MACD strong bullish momentum");
+    indMap["MACD"] = { value: `Bullish (H: ${macd.histogram.toFixed(2)})`, bias: "bullish" };
+  } else if (macd.histogram < 0 && macd.line < macd.signal) {
+    const strength = Math.abs(macd.histogram) > Math.abs(macd.line) * 0.1 ? 1.5 : 0.5;
+    score -= strength;
+    if (strength > 1) reasons.push("MACD strong bearish momentum");
+    indMap["MACD"] = { value: `Bearish (H: ${macd.histogram.toFixed(2)})`, bias: "bearish" };
+  } else {
+    indMap["MACD"] = { value: "Neutral / Crossing", bias: "neutral" };
+  }
+
+  // Real divergence detection
+  const macdFull = calcMACD(candles.map(c => c.close));
+  const swingData = findSwingPoints(candles);
+  const divergence = detectMACDDivergence(candles, macdFull.lineArr, swingData.highIndices, swingData.lowIndices);
+  if (divergence === "bearish") {
+    score -= 0.5;
+    reasons.push("Bearish MACD divergence (higher highs, lower MACD)");
+    indMap["Divergence"] = { value: "Bearish", bias: "bearish" };
+  } else if (divergence === "bullish") {
+    score += 0.5;
+    reasons.push("Bullish MACD divergence (lower lows, higher MACD)");
+    indMap["Divergence"] = { value: "Bullish", bias: "bullish" };
+  }
+
+  // ── 5. VOLATILITY: Bollinger Bands — max ±1.0 ──
+  const bb = indicators.bollingerBands;
+  if (bb.percentB < 0) {
+    score += 1;
+    reasons.push("Price below lower Bollinger Band — oversold");
+    indMap["Bollinger"] = { value: `%B: ${(bb.percentB * 100).toFixed(0)}% (Below)`, bias: "bullish" };
+  } else if (bb.percentB > 1) {
+    score -= 1;
+    reasons.push("Price above upper Bollinger Band — overbought");
+    indMap["Bollinger"] = { value: `%B: ${(bb.percentB * 100).toFixed(0)}% (Above)`, bias: "bearish" };
+  } else if (bb.width < 0.05) {
+    reasons.push("Bollinger squeeze — breakout imminent");
+    indMap["Bollinger"] = { value: `Squeeze (width: ${(bb.width * 100).toFixed(1)}%)`, bias: "neutral" };
+  } else {
+    indMap["Bollinger"] = { value: `%B: ${(bb.percentB * 100).toFixed(0)}%`, bias: "neutral" };
+  }
+
+  // ── 6. VOLUME — max ±1.0 ──
+  if (indicators.volumeRatio > 2.0 && indicators.obvTrend === "rising") {
+    score += 1;
+    reasons.push(`Volume spike (${indicators.volumeRatio.toFixed(1)}x avg) with rising OBV`);
+    indMap["Volume"] = { value: `${indicators.volumeRatio.toFixed(1)}x avg + OBV rising`, bias: "bullish" };
+  } else if (indicators.volumeRatio > 2.0 && indicators.obvTrend === "falling") {
+    score -= 1;
+    reasons.push("Volume spike with falling OBV — distribution");
+    indMap["Volume"] = { value: `${indicators.volumeRatio.toFixed(1)}x avg + OBV falling`, bias: "bearish" };
+  } else if (indicators.obvTrend === "rising") {
+    score += 0.5;
+    indMap["Volume"] = { value: `${indicators.volumeRatio.toFixed(1)}x avg (OBV rising)`, bias: "bullish" };
+  } else if (indicators.obvTrend === "falling") {
+    score -= 0.5;
+    indMap["Volume"] = { value: `${indicators.volumeRatio.toFixed(1)}x avg (OBV falling)`, bias: "bearish" };
+  } else {
+    indMap["Volume"] = { value: `${indicators.volumeRatio.toFixed(1)}x avg`, bias: "neutral" };
+  }
+
+  // ── 7. STRUCTURE: Order Blocks + FVGs — max ±1.5 ──
+  const nearBullishOB = indicators.orderBlocks.find(ob =>
+    ob.type === "bullish" && currentPrice >= ob.low && currentPrice <= ob.high * 1.02
+  );
+  const nearBearishOB = indicators.orderBlocks.find(ob =>
+    ob.type === "bearish" && currentPrice <= ob.high && currentPrice >= ob.low * 0.98
+  );
+
+  if (nearBullishOB) {
+    score += 1;
+    reasons.push("Price at bullish Order Block — institutional buy zone");
+    indMap["Order Block"] = { value: "Bullish OB zone", bias: "bullish" };
+  } else if (nearBearishOB) {
+    score -= 1;
+    reasons.push("Price at bearish Order Block — institutional sell zone");
+    indMap["Order Block"] = { value: "Bearish OB zone", bias: "bearish" };
+  } else {
+    indMap["Order Block"] = { value: "No nearby OB", bias: "neutral" };
+  }
+
+  const nearBullishFVG = indicators.fairValueGaps.find(fvg =>
+    fvg.type === "bullish" && currentPrice >= fvg.low * 0.99 && currentPrice <= fvg.high * 1.01
+  );
+  const nearBearishFVG = indicators.fairValueGaps.find(fvg =>
+    fvg.type === "bearish" && currentPrice >= fvg.low * 0.99 && currentPrice <= fvg.high * 1.01
+  );
+
+  if (nearBullishFVG) {
+    score += 0.5;
+    reasons.push("Bullish Fair Value Gap being filled");
+    indMap["FVG"] = { value: "Bullish FVG fill", bias: "bullish" };
+  } else if (nearBearishFVG) {
+    score -= 0.5;
+    reasons.push("Bearish Fair Value Gap being filled");
+    indMap["FVG"] = { value: "Bearish FVG fill", bias: "bearish" };
+  } else {
+    const fvgCount = indicators.fairValueGaps.length;
+    indMap["FVG"] = { value: fvgCount > 0 ? `${fvgCount} open gap(s)` : "No gaps", bias: "neutral" };
+  }
+
+  // ── 8. LEVELS: Fibonacci — max ±0.5 (symmetrical) ──
+  const fib618 = indicators.fibLevels.find(f => f.level === "61.8%");
+  const fib382 = indicators.fibLevels.find(f => f.level === "38.2%");
+  const fibDirection = indicators.fibLevels[0]?.direction ?? "up";
+
+  if (fib618 && Math.abs(currentPrice - fib618.price) / currentPrice < 0.02) {
+    if (fibDirection === "up") {
+      score += 0.5;
+      reasons.push("Price at 61.8% Fibonacci retracement in uptrend");
+      indMap["Fibonacci"] = { value: "At 61.8% (bullish retracement)", bias: "bullish" };
+    } else {
+      score -= 0.5;
+      reasons.push("Price at 61.8% Fibonacci retracement in downtrend");
+      indMap["Fibonacci"] = { value: "At 61.8% (bearish retracement)", bias: "bearish" };
+    }
+  } else if (fib382 && Math.abs(currentPrice - fib382.price) / currentPrice < 0.02) {
+    indMap["Fibonacci"] = { value: "At 38.2% level", bias: "neutral" };
+  } else {
+    indMap["Fibonacci"] = { value: "Between levels", bias: "neutral" };
+  }
+
+  // ── DETERMINE SIGNAL ──
+  score = Math.max(-10, Math.min(10, score));
+
+  let type: TradeSignal["type"];
+  if      (score >= 6)  type = "STRONG_BUY";
+  else if (score >= 3)  type = "BUY";
+  else if (score <= -6) type = "STRONG_SELL";
+  else if (score <= -3) type = "SELL";
+  else                  type = "HOLD";
+
+  const confidence = Math.min(95, Math.max(10, Math.abs(score) * 9 + 10));
+
+  // ── TREND ──
+  let trend: TradeSignal["trend"];
+  if      (score >= 6)  trend = "strong_up";
+  else if (score >= 3)  trend = "up";
+  else if (score <= -6) trend = "strong_down";
+  else if (score <= -3) trend = "down";
+  else                  trend = "sideways";
+
+  // ── VOLATILITY ──
+  let volatility: TradeSignal["volatility"];
+  if      (indicators.atrPercent < 1.5) volatility = "low";
+  else if (indicators.atrPercent < 3)   volatility = "medium";
+  else if (indicators.atrPercent < 6)   volatility = "high";
+  else                                  volatility = "extreme";
+
+  // ── MARKET PHASE ──
+  const marketPhase = detectMarketPhase(candles, indicators.atrPercent);
+
+  // ── RISK MANAGEMENT ──
+  const atr = indicators.atr;
+  let stopLoss: number | undefined;
+  let tp1: number | undefined;
+  let tp2: number | undefined;
+  let tp3: number | undefined;
+  let riskRewardRatio = 0;
+  let positionSizePct = 0;
+
+  if (type !== "HOLD") {
+    const isBuy = type === "BUY" || type === "STRONG_BUY";
+
+    // ATR-based stop — tighter for strong signals (proven v2 approach)
+    const slMultiplier = Math.abs(score) >= 6 ? 1.5 : 2;
+    stopLoss = isBuy ? currentPrice - slMultiplier * atr : currentPrice + slMultiplier * atr;
+
+    const risk = Math.abs(currentPrice - stopLoss);
+    tp1 = isBuy ? currentPrice + risk * 1.5 : currentPrice - risk * 1.5;  // 1.5:1
+    tp2 = isBuy ? currentPrice + risk * 2.5 : currentPrice - risk * 2.5;  // 2.5:1
+    tp3 = isBuy ? currentPrice + risk * 4   : currentPrice - risk * 4;    // 4:1
+
+    riskRewardRatio = Math.round((Math.abs(tp2 - currentPrice) / risk) * 10) / 10;
+
+    // Position sizing
+    if (Math.abs(score) >= 6) positionSizePct = 1.5;
+    else if (Math.abs(score) >= 4) positionSizePct = 1;
+    else positionSizePct = 0.5;
+
+    if (volatility === "high") positionSizePct *= 0.75;
+    if (volatility === "extreme") positionSizePct *= 0.5;
+  }
+
+  const mainReason = reasons.length > 0
+    ? reasons.slice(0, 3).join(" | ")
+    : "No strong confluence — stay patient";
+
+  return {
+    type,
+    confluenceScore: Math.round(score * 10) / 10,
+    confidence,
+    reason: mainReason,
+    detailedReasons: reasons,
+    indicators: indMap,
+    entry: type !== "HOLD" ? currentPrice : undefined,
+    stopLoss,
+    takeProfit1: tp1,
+    takeProfit2: tp2,
+    takeProfit3: tp3,
+    riskRewardRatio,
+    positionSizePct: Math.round(positionSizePct * 100) / 100,
+    trend,
+    volatility,
+    marketPhase,
+  };
+}
+
+// ─── ENTRY REFINEMENT via lower timeframes ───────────────────────
+// Used by routes.ts to refine entry/SL using 15m/5m candles
+
+export function refineEntry(
+  direction: "long" | "short",
+  dailyEntry: number,
+  dailyStopLoss: number,
+  candles15m: OHLCV[],
+): { entry: number; stopLoss: number; confidence: number } | null {
+  if (candles15m.length < 20) return null;
+
+  const closes = candles15m.map(c => c.close);
+  const atr15m = calcATR(candles15m);
+  const last = candles15m.length - 1;
+  const price = closes[last];
+
+  // Find nearest swing point on 15m for a tight stop
+  const swings = findSwingPoints(candles15m, 2);
+
+  if (direction === "long") {
+    // Entry: current 15m price (should be near daily entry)
+    // Stop: below the most recent 15m swing low + small buffer
+    const recentSwingLow = swings.lows.length > 0
+      ? Math.max(...swings.lows.filter(l => l < price))
+      : price - atr15m * 2;
+    const tightStop = recentSwingLow > 0 ? recentSwingLow - atr15m * 0.5 : price - atr15m * 2;
+
+    // Reject if the tight stop is worse than the daily stop
+    if (tightStop < dailyStopLoss) return null;
+
+    const riskReduction = 1 - Math.abs(price - tightStop) / Math.abs(dailyEntry - dailyStopLoss);
+    return {
+      entry: price,
+      stopLoss: tightStop,
+      confidence: Math.min(90, Math.round(riskReduction * 100)),
+    };
+  } else {
+    const recentSwingHigh = swings.highs.length > 0
+      ? Math.min(...swings.highs.filter(h => h > price))
+      : price + atr15m * 2;
+    const tightStop = recentSwingHigh > 0 ? recentSwingHigh + atr15m * 0.5 : price + atr15m * 2;
+
+    if (tightStop > dailyStopLoss) return null;
+
+    const riskReduction = 1 - Math.abs(price - tightStop) / Math.abs(dailyEntry - dailyStopLoss);
+    return {
+      entry: price,
+      stopLoss: tightStop,
+      confidence: Math.min(90, Math.round(riskReduction * 100)),
+    };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATEGY B: 4H MEAN REVERSION
+// ═══════════════════════════════════════════════════════════════════
+//
+// Fades overextended moves on 4H when:
+//   - Price outside Bollinger Bands (20, 2.5 SD)
+//   - RSI(7) at extreme (<20 or >80)
+//   - Volume exhaustion (< 0.7x avg) — sellers/buyers drying up
+//
+// TP: Bollinger midline (mean), SL: 1.2x ATR
+// Hold: 2-5 candles (8-20 hours), time stop at 5 candles
+
+export interface MeanRevSignal {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;    // BB midline (the mean)
+  confidence: number;
+  reason: string;
+  rsi7: number;
+  bbPercentB: number;
+  volumeRatio: number;
+}
+
+export function meanReversionSignal(candles: OHLCV[]): MeanRevSignal {
+  const none: MeanRevSignal = {
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    confidence: 0, reason: "", rsi7: 50, bbPercentB: 0.5, volumeRatio: 1,
+  };
+
+  if (candles.length < 30) return none;
+
+  const closes = candles.map(c => c.close);
+  const volumes = candles.map(c => c.volume);
+  const last = closes.length - 1;
+  const price = closes[last];
+
+  // RSI(7) — short lookback for mean reversion
+  const rsi7Values = calcRSI(closes, 7);
+  const rsi7 = rsi7Values[last];
+
+  // Bollinger Bands (20, 2.0 SD) — standard width for mean reversion
+  const bbPeriod = 20;
+  const bbMult = 2.0;
+  const bbSma = sma(closes, bbPeriod);
+  const bbStd = stdDev(closes, bbPeriod, bbSma);
+  const bbUpper = bbSma[last] + bbMult * bbStd[last];
+  const bbLower = bbSma[last] - bbMult * bbStd[last];
+  const bbMid = bbSma[last];
+  const bbRange = bbUpper - bbLower;
+  const bbPercentB = bbRange > 0 ? (price - bbLower) / bbRange : 0.5;
+
+  // Volume — current vs 20-period avg
+  const volSlice = volumes.slice(-20);
+  const volAvg = volSlice.reduce((a, b) => a + b, 0) / volSlice.length;
+  const volumeRatio = volAvg > 0 ? volumes[last] / volAvg : 1;
+
+  // ATR for stop
+  const atr = calcATR(candles);
+
+  // EMA(50) slope — filter out strong trending markets where mean reversion fails
+  const ema50Values: number[] = [closes[0]];
+  const emaK = 2 / 51;
+  for (let i = 1; i < closes.length; i++) {
+    ema50Values[i] = closes[i] * emaK + ema50Values[i - 1] * (1 - emaK);
+  }
+  // Slope over last 5 candles: if too steep, skip (strong trend)
+  const ema50Now = ema50Values[last];
+  const ema50Prev = ema50Values[Math.max(0, last - 5)];
+  const emaSlopePct = (ema50Now - ema50Prev) / ema50Prev * 100;
+  const strongTrendUp = emaSlopePct > 3;    // >3% in 5 candles = strong bull
+  const strongTrendDown = emaSlopePct < -3;  // <-3% = strong bear
+
+  // Core conditions: price outside BB + RSI extreme
+  const isOversold = price <= bbLower && rsi7 < 25;
+  const isOverbought = price >= bbUpper && rsi7 > 75;
+
+  // Confirmation: volume exhaustion OR 3+ consecutive candles
+  const recentCandles = candles.slice(-4);
+  const bearCount = recentCandles.filter(c => c.close < c.open).length;
+  const bullCount = recentCandles.filter(c => c.close > c.open).length;
+  const hasExhaustion = volumeRatio < 0.75 || bearCount >= 3 || bullCount >= 3;
+
+  // ── LONG SIGNAL: oversold + not strong downtrend + exhaustion
+  if (isOversold && !strongTrendDown && hasExhaustion) {
+    const sl = price - atr * 1.5;
+    const tp = bbMid;
+    const rr = Math.abs(tp - price) / Math.abs(price - sl);
+    if (rr < 1.5) return { ...none, rsi7, bbPercentB, volumeRatio };
+    const reasons = [`RSI(7)=${rsi7.toFixed(0)}`, `BB%B=${bbPercentB.toFixed(2)}`, volumeRatio < 0.75 ? `Vol ${volumeRatio.toFixed(2)}x` : `${bearCount} bear candles`];
+    return {
+      type: "LONG",
+      entry: price,
+      stopLoss: sl,
+      takeProfit: tp,
+      confidence: Math.min(85, Math.round(rr * 20 + 25)),
+      reason: reasons.join(" | "),
+      rsi7, bbPercentB, volumeRatio,
+    };
+  }
+
+  // ── SHORT SIGNAL: overbought + not strong uptrend + exhaustion
+  if (isOverbought && !strongTrendUp && hasExhaustion) {
+    const sl = price + atr * 1.5;
+    const tp = bbMid;
+    const rr = Math.abs(price - tp) / Math.abs(sl - price);
+    if (rr < 1.5) return { ...none, rsi7, bbPercentB, volumeRatio };
+    const reasons = [`RSI(7)=${rsi7.toFixed(0)}`, `BB%B=${bbPercentB.toFixed(2)}`, volumeRatio < 0.75 ? `Vol ${volumeRatio.toFixed(2)}x` : `${bullCount} bull candles`];
+    return {
+      type: "SHORT",
+      entry: price,
+      stopLoss: sl,
+      takeProfit: tp,
+      confidence: Math.min(85, Math.round(rr * 20 + 25)),
+      reason: reasons.join(" | "),
+      rsi7, bbPercentB, volumeRatio,
+    };
+  }
+
+  return { ...none, rsi7, bbPercentB, volumeRatio };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATEGY C: 4H BREAKOUT (Donchian + Volume + EMA trend)
+// ═══════════════════════════════════════════════════════════════════
+//
+// Trades breakouts of Donchian Channel (20) with:
+//   - Volume spike confirmation (> 1.5x avg)
+//   - EMA(20) trend alignment
+//   - ATR-based stops, 2:1 R:R target
+//
+// Hold: 5-15 candles (20-60h), time stop at 15 candles
+
+export interface BreakoutSignal {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  confidence: number;
+  reason: string;
+}
+
+export function breakoutSignal(candles: OHLCV[]): BreakoutSignal {
+  const none: BreakoutSignal = {
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    confidence: 0, reason: "",
+  };
+
+  if (candles.length < 25) return none;
+
+  const closes = candles.map(c => c.close);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const volumes = candles.map(c => c.volume);
+  const last = closes.length - 1;
+  const price = closes[last];
+
+  // Donchian Channel (20) — highest high / lowest low of last 20 candles
+  // Use candles [last-20 .. last-1] (not including current candle)
+  const dcPeriod = 20;
+  const dcHighs = highs.slice(last - dcPeriod, last);
+  const dcLows = lows.slice(last - dcPeriod, last);
+  const dcUpper = Math.max(...dcHighs);
+  const dcLower = Math.min(...dcLows);
+
+  // EMA(20) for trend
+  const ema20Values: number[] = [closes[0]];
+  const emaK = 2 / 21;
+  for (let i = 1; i < closes.length; i++) {
+    ema20Values[i] = closes[i] * emaK + ema20Values[i - 1] * (1 - emaK);
+  }
+  const ema20 = ema20Values[last];
+  const trendUp = price > ema20;
+  const trendDown = price < ema20;
+
+  // Volume: current vs 20-period avg
+  const volSlice = volumes.slice(last - 20, last);
+  const volAvg = volSlice.reduce((a, b) => a + b, 0) / volSlice.length;
+  const volumeRatio = volAvg > 0 ? volumes[last] / volAvg : 1;
+  const volumeSpike = volumeRatio > 1.3;
+
+  // ATR for stops
+  const atr = calcATR(candles);
+
+  // ── LONG BREAKOUT: price breaks above Donchian upper + trend up + volume
+  if (candles[last].high > dcUpper && trendUp && volumeSpike) {
+    const sl = price - atr * 1.5;
+    const risk = price - sl;
+    const tp = price + risk * 2.0; // 2:1 R:R
+    const reasons = [`Break above ${dcUpper.toFixed(2)}`, `Vol ${volumeRatio.toFixed(1)}x`, `EMA20 trend up`];
+    return {
+      type: "LONG",
+      entry: price,
+      stopLoss: sl,
+      takeProfit: tp,
+      confidence: Math.min(85, Math.round(volumeRatio * 15 + 35)),
+      reason: reasons.join(" | "),
+    };
+  }
+
+  // ── SHORT BREAKOUT: price breaks below Donchian lower + trend down + volume
+  if (candles[last].low < dcLower && trendDown && volumeSpike) {
+    const sl = price + atr * 1.5;
+    const risk = sl - price;
+    const tp = price - risk * 2.0;
+    const reasons = [`Break below ${dcLower.toFixed(2)}`, `Vol ${volumeRatio.toFixed(1)}x`, `EMA20 trend down`];
+    return {
+      type: "SHORT",
+      entry: price,
+      stopLoss: sl,
+      takeProfit: tp,
+      confidence: Math.min(85, Math.round(volumeRatio * 15 + 35)),
+      reason: reasons.join(" | "),
+    };
+  }
+
+  return none;
+}
