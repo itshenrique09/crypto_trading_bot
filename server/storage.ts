@@ -120,7 +120,8 @@ export interface JournalEntry {
   take_profit1: number;
   take_profit2: number | null;
   confluence_score: number | null;
-  mode: string;          // 'signal' | 'auto'
+  mode: string;          // 'signal' | 'auto' | 'paper'
+  strategy: string;      // 'v2-swing' | 'mean-reversion' | 'breakout'
   followed: string;      // 'pending' | 'yes' | 'no'
   outcome: string;       // 'open' | 'win' | 'loss' | 'breakeven'
   exit_price: number | null;
@@ -139,6 +140,7 @@ export interface InsertJournal {
   take_profit2?: number;
   confluence_score?: number;
   mode: string;
+  strategy?: string;
   followed?: string;
   notes?: string;
 }
@@ -150,14 +152,15 @@ export async function getJournal(): Promise<JournalEntry[]> {
 
 export async function addJournalEntry(entry: InsertJournal): Promise<JournalEntry> {
   const db = await getDb();
-  const followed = entry.mode === "auto" ? "yes" : (entry.followed || "pending");
+  const followed = entry.mode === "auto" || entry.mode === "paper" ? "yes" : (entry.followed || "pending");
+  const strategy = entry.strategy || "v2-swing";
   db.run(
-    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, followed, outcome, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, strategy, followed, outcome, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
     [
       entry.symbol, entry.direction, entry.entry_price, entry.stop_loss,
       entry.take_profit1, entry.take_profit2 || null, entry.confluence_score || null,
-      entry.mode, followed, entry.notes || "", new Date().toISOString(),
+      entry.mode, strategy, followed, entry.notes || "", new Date().toISOString(),
     ]
   );
   persist(db);

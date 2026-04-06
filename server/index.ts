@@ -27,6 +27,8 @@ const AUTH_PASSWORD = process.env.APP_PASSWORD || "Rickee09!";
 const AUTH_TOKEN = Buffer.from(`admin:${AUTH_PASSWORD}`).toString("base64");
 
 app.use((req, res, next) => {
+  // Skip auth in development
+  if (process.env.NODE_ENV === "development") return next();
   // Skip auth for API routes called by the app itself
   if (req.path.startsWith("/api")) return next();
 

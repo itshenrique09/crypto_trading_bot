@@ -19,8 +19,9 @@ import PriceChart from "@/components/PriceChart";
 import ConfluenceMeter from "@/components/ConfluenceMeter";
 
 export default function AnalysisPage() {
-  const [, params] = useRoute("/analyze/:symbol");
-  const symbol = params?.symbol || "BTC";
+  const [, marketParams] = useRoute("/market/:symbol");
+  const [, analyzeParams] = useRoute("/analyze/:symbol");
+  const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
   const [backtestRequested, setBacktestRequested] = useState(false);
   const [signalLogged, setSignalLogged] = useState(false);
 
@@ -63,7 +64,7 @@ export default function AnalysisPage() {
         <Card className="p-8 text-center max-w-md">
           <AlertTriangle className="w-8 h-8 text-red-400 mx-auto mb-3" />
           <p className="text-sm text-muted-foreground">Failed to analyze {symbol}. CoinGecko API rate limit may apply.</p>
-          <Link href="/">
+          <Link href="/market">
             <button className="mt-4 text-xs text-emerald-400 hover:underline">Back to market</button>
           </Link>
         </Card>
@@ -82,7 +83,7 @@ export default function AnalysisPage() {
       <header className="border-b border-border/50 sticky top-0 z-50 bg-background/80 backdrop-blur-md">
         <div className="max-w-[1600px] mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Link href="/">
+            <Link href="/market">
               <button data-testid="button-back" className="p-1.5 rounded hover:bg-card transition-colors">
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -124,12 +125,6 @@ export default function AnalysisPage() {
                 </span>
               </div>
             )}
-            <Link href="/journal">
-              <a className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-colors">
-                <BookOpen className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-medium">Journal</span>
-              </a>
-            </Link>
           </div>
         </div>
       </header>
@@ -432,7 +427,7 @@ export default function AnalysisPage() {
                         <div className="flex items-center gap-2 text-emerald-400 text-[10px]">
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           <span>Signal logged to journal</span>
-                          <Link href="/journal">
+                          <Link href="/paper">
                             <a className="underline hover:text-emerald-300 ml-1">View Journal</a>
                           </Link>
                         </div>

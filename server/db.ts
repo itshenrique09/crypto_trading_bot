@@ -70,6 +70,11 @@ export async function getDb(): Promise<Database> {
     );
   `);
 
+  // Migration: add strategy column to journal
+  try {
+    _db.run("ALTER TABLE journal ADD COLUMN strategy TEXT NOT NULL DEFAULT 'v2-swing'");
+  } catch { /* column already exists */ }
+
   // Default mode = signal
   const existing = rowsToObjectsSync<{ key: string; value: string }>(_db, "SELECT * FROM bot_settings WHERE key = 'mode'");
   if (existing.length === 0) {

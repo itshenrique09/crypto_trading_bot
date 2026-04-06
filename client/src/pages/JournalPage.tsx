@@ -8,13 +8,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   ArrowLeft, BookOpen, CheckCircle2, XCircle, Clock,
   TrendingUp, TrendingDown, Minus, Zap, Radio,
-  Trash2, Filter, AlertTriangle, FlaskConical, Play, Square, Loader2, Activity
+  Trash2, Filter, AlertTriangle, FlaskConical, Play, Square, Loader2, Activity,
+  ToggleLeft, ToggleRight
 } from "lucide-react";
 import { formatPrice, getSignalColor } from "@/lib/utils";
 
 interface PaperPrice {
   id: number;
   symbol: string;
+  strategy: string;
   currentPrice: number;
   unrealizedPnl: number;
   progressPct: number;
@@ -31,6 +33,7 @@ interface JournalEntry {
   take_profit2: number | null;
   confluence_score: number | null;
   mode: string;
+  strategy: string;
   followed: string;
   outcome: string;
   exit_price: number | null;
@@ -40,10 +43,29 @@ interface JournalEntry {
   closed_at: string | null;
 }
 
+interface StrategyInfo {
+  id: string;
+  name: string;
+  description: string;
+  interval: string;
+  enabled: boolean;
+}
+
+const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  "v2-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
+  "mean-reversion": { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
+  "breakout": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
+};
+
+function getStratColor(id: string) {
+  return STRATEGY_COLORS[id] || { bg: "bg-gray-500/10", text: "text-gray-400", border: "border-gray-500/30" };
+}
+
 export default function JournalPage() {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<"all" | "open" | "win" | "loss">("all");
   const [modeFilter, setModeFilter] = useState<"all" | "signal" | "auto" | "paper">("all");
+  const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [closingId, setClosingId] = useState<number | null>(null);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
 
@@ -57,6 +79,15 @@ export default function JournalPage() {
   });
 
   const currentMode = modeData?.mode || "signal";
+
+  // Fetch strategies
+  const { data: strategies = [] } = useQuery<StrategyInfo[]>({
+    queryKey: ["/api/strategies"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/strategies");
+      return res.json();
+    },
+  });
 
   // Fetch journal (poll while paper running to catch auto-closed trades)
   const { data: journal = [], isLoading } = useQuery({
@@ -121,6 +152,16 @@ export default function JournalPage() {
     },
   });
 
+  // Toggle strategy on/off
+  const toggleStrategyMutation = useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
+    },
+  });
+
   const cycleMode = () => {
     const modes = ["signal", "auto", "paper"];
     const nextIdx = (modes.indexOf(currentMode) + 1) % modes.length;
@@ -149,6 +190,7 @@ export default function JournalPage() {
   const filtered = (journal as JournalEntry[]).filter(e => {
     if (filter !== "all" && e.outcome !== filter && !(filter === "open" && e.outcome === "open")) return false;
     if (modeFilter !== "all" && e.mode !== modeFilter) return false;
+    if (strategyFilter !== "all" && (e.strategy || "v2-swing") !== strategyFilter) return false;
     return true;
   });
 
@@ -157,14 +199,9 @@ export default function JournalPage() {
   const closed = all.filter(e => e.outcome !== "open");
   const wins = closed.filter(e => e.outcome === "win");
   const losses = closed.filter(e => e.outcome === "loss");
-  const followedTrades = all.filter(e => e.followed === "yes");
-  const followedClosed = followedTrades.filter(e => e.outcome !== "open");
-  const followedWins = followedClosed.filter(e => e.outcome === "win");
   const totalPnl = closed.reduce((s, e) => s + (e.pnl_pct || 0), 0);
-  const followedPnl = followedClosed.reduce((s, e) => s + (e.pnl_pct || 0), 0);
   const paperTrades = all.filter(e => e.mode === "paper");
   const paperClosed = paperTrades.filter(e => e.outcome !== "open");
-  const paperWins = paperClosed.filter(e => e.outcome === "win");
   const paperPnl = paperClosed.reduce((s, e) => s + (e.pnl_pct || 0), 0);
 
   const handleClose = (id: number) => {
@@ -238,8 +275,7 @@ export default function JournalPage() {
               <div>
                 <p className="text-xs font-semibold text-blue-400">Signal Mode</p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  O bot analisa e dá calls. Cada signal aparece no journal como "Pending" — clicas "Segui" ou "Ignorei" para registar.
-                  Quando fechas a trade, registas o resultado.
+                  O bot analisa e da calls. Cada signal aparece no journal como "Pending" — clicas "Segui" ou "Ignorei" para registar.
                 </p>
               </div>
             </div>
@@ -250,7 +286,7 @@ export default function JournalPage() {
               <div>
                 <p className="text-xs font-semibold text-emerald-400">Auto Mode</p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Execução automática de trades na exchange.
+                  Execucao automatica de trades na exchange.
                 </p>
                 <div className="flex items-center gap-1.5 mt-1.5 text-[10px] text-amber-400">
                   <AlertTriangle className="w-3 h-3" />
@@ -290,14 +326,41 @@ export default function JournalPage() {
                   )}
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  O bot analisa top {paperStatusData?.coinsScanned || 30} coins por volume (MEXC), verifica trades a cada 30s, scan novos sinais a cada 3 min.
-                  Zero risco — serve para treinar e validar a estratégia em tempo real.
+                  Multi-estrategia — cada estrategia activa corre em paralelo nas top {paperStatusData?.coinsScanned || 30} coins por volume.
+                  Check a cada 30s, scan a cada 3 min.
                 </p>
+
+                {/* Strategy toggles */}
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {strategies.map(s => {
+                    const c = getStratColor(s.id);
+                    const counts = paperStatusData?.strategyCounts?.[s.id];
+                    return (
+                      <button
+                        key={s.id}
+                        onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !s.enabled })}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-medium transition-all border ${
+                          s.enabled
+                            ? `${c.bg} ${c.border} ${c.text}`
+                            : "bg-card/30 border-border/20 text-muted-foreground opacity-50"
+                        }`}
+                      >
+                        {s.enabled ? <ToggleRight className="w-3 h-3" /> : <ToggleLeft className="w-3 h-3" />}
+                        {s.name}
+                        {counts && counts.total > 0 && (
+                          <span className="text-[9px] opacity-70">({counts.open}/{counts.total})</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
                 {paperRunning && (
-                  <div className="flex items-center gap-1.5 mt-1.5">
+                  <div className="flex items-center gap-1.5 mt-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-orange-400 animate-pulse" />
                     <span className="text-[10px] text-orange-400 font-medium">
                       Engine activo — {paperStatusData?.openTrades || 0} trades abertas
+                      {strategies.filter(s => s.enabled).length > 0 && ` · ${strategies.filter(s => s.enabled).length} estrategias`}
                     </span>
                   </div>
                 )}
@@ -310,10 +373,10 @@ export default function JournalPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
           <StatCard label="Total Trades" value={`${all.length}`} color="text-blue-400" />
           <StatCard label="Open" value={`${all.filter(e => e.outcome === "open").length}`} color="text-yellow-400" />
-          <StatCard label="Win Rate" value={closed.length > 0 ? `${Math.round((wins.length / closed.length) * 100)}%` : "—"} color={wins.length >= losses.length ? "text-emerald-400" : "text-red-400"} />
+          <StatCard label="Win Rate" value={closed.length > 0 ? `${Math.round((wins.length / closed.length) * 100)}%` : "--"} color={wins.length >= losses.length ? "text-emerald-400" : "text-red-400"} />
           <StatCard label="Total P&L" value={`${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}%`} color={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
           <StatCard label="Paper Trades" value={`${paperTrades.length}`} color="text-orange-400" />
-          <StatCard label="Paper P&L" value={paperClosed.length > 0 ? `${paperPnl > 0 ? "+" : ""}${paperPnl.toFixed(2)}%` : "—"} color={paperPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
+          <StatCard label="Paper P&L" value={paperClosed.length > 0 ? `${paperPnl > 0 ? "+" : ""}${paperPnl.toFixed(2)}%` : "--"} color={paperPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
         </div>
 
         {/* Filters */}
@@ -346,6 +409,27 @@ export default function JournalPage() {
               {f === "all" ? "All Modes" : f === "signal" ? "Signal" : f === "paper" ? "Paper" : "Auto"}
             </button>
           ))}
+          {strategies.length > 1 && (
+            <>
+              <span className="text-border/40 mx-1">|</span>
+              {[{ id: "all", name: "All Strats" }, ...strategies].map(s => {
+                const c = s.id !== "all" ? getStratColor(s.id) : null;
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => setStrategyFilter(s.id)}
+                    className={`text-[10px] px-2.5 py-1 rounded-md transition-all ${
+                      strategyFilter === s.id
+                        ? c ? `${c.bg} border ${c.border} ${c.text} font-medium` : "bg-purple-500/30 border border-purple-500/50 text-purple-300 font-medium"
+                        : "bg-card/50 border border-border/30 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {s.name}
+                  </button>
+                );
+              })}
+            </>
+          )}
         </div>
 
         {/* Journal Entries */}
@@ -365,7 +449,9 @@ export default function JournalPage() {
           </Card>
         )}
 
-        {filtered.map((entry) => (
+        {filtered.map((entry) => {
+          const sc = getStratColor(entry.strategy || "v2-swing");
+          return (
           <Card key={entry.id} className="border-border/50 bg-card/50 p-3">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
@@ -381,6 +467,10 @@ export default function JournalPage() {
                 <Link href={`/analyze/${entry.symbol}`}>
                   <a className="text-sm font-bold hover:text-purple-400 transition-colors">{entry.symbol}</a>
                 </Link>
+                {/* Strategy badge */}
+                <span className={`text-[9px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
+                  {strategies.find(s => s.id === (entry.strategy || "v2-swing"))?.name || entry.strategy || "v2 Swing"}
+                </span>
                 {/* Mode */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${
                   entry.mode === "auto" ? "bg-emerald-500/10 text-emerald-400" :
@@ -461,7 +551,7 @@ export default function JournalPage() {
                       {isProfit ? "+" : ""}{p.unrealizedPnl}%
                     </span>
                   </div>
-                  {/* Progress bar: SL ← Entry → TP */}
+                  {/* Progress bar: SL <- Entry -> TP */}
                   <div className="relative h-2 rounded-full bg-border/30 overflow-hidden">
                     {p.progressPct >= 0 ? (
                       <div
@@ -505,7 +595,7 @@ export default function JournalPage() {
                     </button>
                   </>
                 )}
-                {entry.followed === "yes" && (
+                {entry.followed === "yes" && entry.mode === "signal" && (
                   <span className="text-[10px] text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Followed</span>
                 )}
                 {entry.followed === "no" && (
@@ -562,7 +652,7 @@ export default function JournalPage() {
             {entry.outcome !== "open" && entry.exit_price != null && (
               <div className="flex items-center gap-3 pt-2 border-t border-border/20 text-[10px] text-muted-foreground">
                 <span>Exit: <span className="font-mono text-foreground">${formatPrice(entry.exit_price)}</span></span>
-                {entry.followed === "yes" && <span className="text-emerald-400">Followed</span>}
+                {entry.followed === "yes" && entry.mode === "signal" && <span className="text-emerald-400">Followed</span>}
                 {entry.followed === "no" && <span className="text-muted-foreground">Ignored</span>}
                 {entry.closed_at && (
                   <span>Closed: {new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
@@ -575,7 +665,8 @@ export default function JournalPage() {
               <p className="text-[10px] text-muted-foreground mt-1 italic">"{entry.notes}"</p>
             )}
           </Card>
-        ))}
+          );
+        })}
       </main>
     </div>
   );

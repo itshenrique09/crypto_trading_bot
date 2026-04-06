@@ -8,6 +8,8 @@ import {
   getSetting, setSetting,
 } from "./storage";
 import { analyzeIndicators, generateSignal, refineEntry, meanReversionSignal, breakoutSignal, type OHLCV } from "./analysis";
+import { getAllStrategies, getStrategyIds } from "./strategies/registry";
+import type { Strategy } from "./strategies/types";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
@@ -876,6 +878,56 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Strategy Management ──────────────────────────────────────────
+
+  app.get("/api/strategies", async (_req, res) => {
+    const all = getAllStrategies();
+    const enabledJson = await getSetting("enabled_strategies");
+    const enabled: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    res.json(all.map(s => ({
+      id: s.id, name: s.name, description: s.description,
+      interval: s.interval, enabled: enabled.includes(s.id),
+    })));
+  });
+
+  app.put("/api/strategies/:id/toggle", async (req, res) => {
+    const { id } = req.params;
+    const { enabled } = req.body;
+    const all = getAllStrategies();
+    const enabledJson = await getSetting("enabled_strategies");
+    let enabledList: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    if (enabled) { if (!enabledList.includes(id)) enabledList.push(id); }
+    else { enabledList = enabledList.filter((s: string) => s !== id); }
+    await setSetting("enabled_strategies", JSON.stringify(enabledList));
+    res.json({ id, enabled });
+  });
+
+  // Per-strategy stats
+  app.get("/api/journal/stats", async (_req, res) => {
+    const journal = await getJournal();
+    const strategies = getAllStrategies();
+    const stats = strategies.map(s => {
+      const trades = journal.filter(e => e.strategy === s.id);
+      const paper = trades.filter(e => e.mode === "paper");
+      const closed = paper.filter(e => e.outcome !== "open");
+      const wins = closed.filter(e => e.outcome === "win");
+      const totalPnl = closed.reduce((sum, e) => sum + (e.pnl_pct || 0), 0);
+      return {
+        strategyId: s.id,
+        strategyName: s.name,
+        totalTrades: paper.length,
+        openTrades: paper.filter(e => e.outcome === "open").length,
+        closedTrades: closed.length,
+        wins: wins.length,
+        losses: closed.filter(e => e.outcome === "loss").length,
+        winRate: closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null,
+        totalPnl: Math.round(totalPnl * 100) / 100,
+        avgPnl: closed.length > 0 ? Math.round((totalPnl / closed.length) * 100) / 100 : null,
+      };
+    });
+    res.json(stats);
+  });
+
   // ── Paper Trading Engine ─────────────────────────────────────────
   //
   // Server-side intervals: check every 30s, scan every 3min
@@ -904,6 +956,13 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch {
       return cachedTopCoins?.coins || ["BTC", "ETH", "SOL", "XRP", "BNB", "AVAX", "LINK", "ADA"];
     }
+  }
+
+  async function getEnabledStrategies(): Promise<Strategy[]> {
+    const all = getAllStrategies();
+    const enabledJson = await getSetting("enabled_strategies");
+    const enabledIds: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    return all.filter(s => enabledIds.includes(s.id));
   }
 
   // Server-side paper trading loop
@@ -963,36 +1022,58 @@ export async function registerRoutes(server: Server, app: Express) {
       const coins = await getTopCoinsByVolume(30);
       paperStatus.coinsScanned = coins.length;
 
+      const strategies = await getEnabledStrategies();
+      if (strategies.length === 0) return;
+
       const journal = await getJournal();
-      const openPaperSymbols = new Set(
-        journal.filter(e => e.mode === "paper" && e.outcome === "open").map(e => e.symbol)
+      // Track open trades per (symbol, strategy) to avoid duplicates
+      const openPairs = new Set(
+        journal
+          .filter(e => e.mode === "paper" && e.outcome === "open")
+          .map(e => `${e.symbol}:${e.strategy}`)
       );
 
+      // Group strategies by interval to avoid fetching same candles twice
+      const byInterval: Record<string, Strategy[]> = {};
+      for (const s of strategies) {
+        if (!byInterval[s.interval]) byInterval[s.interval] = [];
+        byInterval[s.interval].push(s);
+      }
+
       for (const sym of coins) {
-        if (openPaperSymbols.has(sym)) continue;
-        try {
-          const candles = await fetchBinanceKlines(sym, "4h", 100);
-          if (candles.length < 90) continue;
+        for (const [interval, strats] of Object.entries(byInterval)) {
+          let candles: OHLCV[] | null = null;
 
-          const ind = analyzeIndicators(candles);
-          const sig = generateSignal(candles, ind);
+          for (const strat of strats) {
+            if (openPairs.has(`${sym}:${strat.id}`)) continue;
 
-          if (sig.type === "HOLD" || !sig.entry || !sig.stopLoss || !sig.takeProfit1 || !sig.takeProfit2) continue;
+            try {
+              // Lazy-fetch candles for this interval
+              if (!candles) {
+                const limit = Math.max(...strats.map(s => s.minCandles)) + 10;
+                candles = await fetchBinanceKlines(sym, interval, limit);
+              }
+              if (candles.length < strat.minCandles) continue;
 
-          const direction = (sig.type === "BUY" || sig.type === "STRONG_BUY") ? "LONG" : "SHORT";
-          await addJournalEntry({
-            symbol: sym,
-            direction,
-            entry_price: sig.entry,
-            stop_loss: sig.stopLoss,
-            take_profit1: sig.takeProfit1,
-            take_profit2: sig.takeProfit2,
-            confluence_score: sig.confluenceScore,
-            mode: "paper",
-            followed: "yes",
-            notes: `Paper — ${sig.type} score ${sig.confluenceScore}`,
-          });
-        } catch { /* skip */ }
+              const signal = strat.analyze(candles);
+              if (!signal) continue;
+
+              await addJournalEntry({
+                symbol: sym,
+                direction: signal.direction,
+                entry_price: signal.entry,
+                stop_loss: signal.stopLoss,
+                take_profit1: signal.takeProfit1,
+                take_profit2: signal.takeProfit2,
+                confluence_score: signal.confluenceScore,
+                mode: "paper",
+                strategy: strat.id,
+                followed: "yes",
+                notes: `Paper [${strat.name}] — ${signal.reason}`,
+              });
+            } catch { /* skip */ }
+          }
+        }
       }
       paperStatus.lastScan = new Date().toISOString();
     } catch { /* silent */ }
@@ -1028,11 +1109,19 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/paper/status", async (_req, res) => {
     const journal = await getJournal();
-    const openPaper = journal.filter(e => e.mode === "paper" && e.outcome === "open");
+    const paperTrades = journal.filter(e => e.mode === "paper");
+    const openPaper = paperTrades.filter(e => e.outcome === "open");
+    const strategies = getAllStrategies();
+    const strategyCounts: Record<string, { open: number; total: number }> = {};
+    for (const s of strategies) {
+      const stTrades = paperTrades.filter(e => e.strategy === s.id);
+      strategyCounts[s.id] = { open: stTrades.filter(e => e.outcome === "open").length, total: stTrades.length };
+    }
     res.json({
       ...paperStatus,
       openTrades: openPaper.length,
-      totalPaperTrades: journal.filter(e => e.mode === "paper").length,
+      totalPaperTrades: paperTrades.length,
+      strategyCounts,
     });
   });
 
@@ -1069,6 +1158,7 @@ export async function registerRoutes(server: Server, app: Express) {
         return {
           id: trade.id,
           symbol: trade.symbol,
+          strategy: trade.strategy || "v2-swing",
           currentPrice: Math.round(currentPrice * 10000) / 10000,
           unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
           progressPct: Math.round(progressPct * 10) / 10,
