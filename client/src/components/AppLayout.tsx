@@ -1,9 +1,9 @@
 import { useLocation } from "wouter";
-import { Activity, FlaskConical, BarChart3, GitCompareArrows, Bot } from "lucide-react";
+import { LayoutDashboard, FlaskConical, BarChart3, GitCompareArrows, Bot } from "lucide-react";
 
 const NAV_ITEMS = [
-  { path: "/", label: "Dashboard", icon: Activity },
-  { path: "/paper", label: "Paper Trading", icon: FlaskConical },
+  { path: "/", label: "Dashboard", icon: LayoutDashboard },
+  { path: "/paper", label: "Trades", icon: FlaskConical },
   { path: "/market", label: "Market", icon: BarChart3 },
   { path: "/compare", label: "Compare", icon: GitCompareArrows },
 ];
@@ -18,42 +18,50 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      {/* Desktop Top Navigation Bar — hidden on mobile */}
-      <header className="hidden sm:block sticky top-0 z-50 bg-background/95 backdrop-blur-md border-b border-border/40">
-        <div className="max-w-[1400px] mx-auto px-6 flex items-center h-12">
-          <button onClick={() => setLocation("/")} className="flex items-center gap-2 mr-8 shrink-0">
-            <Bot className="w-5 h-5 text-purple-400" />
-            <span className="text-sm font-bold tracking-tight">CryptoBot</span>
-          </button>
-          <nav className="flex items-center gap-1">
-            {NAV_ITEMS.map(item => {
-              const active = isActive(item);
-              return (
-                <button
-                  key={item.path}
-                  onClick={() => setLocation(item.path)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                    active
-                      ? "bg-purple-500/15 text-purple-400"
-                      : "text-muted-foreground hover:text-foreground hover:bg-card/60"
-                  }`}
-                >
-                  <item.icon className="w-3.5 h-3.5" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-      </header>
+      {/* Desktop Sidebar — hidden on mobile */}
+      <aside className="hidden md:flex fixed left-0 top-0 bottom-0 w-[200px] flex-col z-50 bg-background border-r border-border/30">
+        {/* Logo */}
+        <button onClick={() => setLocation("/")} className="flex items-center gap-2.5 px-5 h-14 border-b border-border/20 shrink-0 hover:bg-card/30 transition-colors">
+          <div className="w-7 h-7 rounded-lg bg-purple-500/15 flex items-center justify-center">
+            <Bot className="w-4 h-4 text-purple-400" />
+          </div>
+          <span className="text-sm font-bold tracking-tight">CryptoBot</span>
+        </button>
 
-      {/* Page Content */}
-      <main className="pb-16 sm:pb-4">
+        {/* Nav items */}
+        <nav className="flex-1 px-3 py-4 space-y-1">
+          {NAV_ITEMS.map(item => {
+            const active = isActive(item);
+            return (
+              <button
+                key={item.path}
+                onClick={() => setLocation(item.path)}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-all ${
+                  active
+                    ? "bg-purple-500/15 text-purple-400"
+                    : "text-muted-foreground hover:text-foreground hover:bg-card/50"
+                }`}
+              >
+                <item.icon className={`w-4 h-4 ${active ? "text-purple-400" : ""}`} />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Footer */}
+        <div className="px-4 py-3 border-t border-border/20">
+          <p className="text-[10px] text-muted-foreground/50">Paper Trading Bot</p>
+        </div>
+      </aside>
+
+      {/* Page Content — offset for sidebar on desktop */}
+      <main className="md:ml-[200px] pb-16 md:pb-0 min-h-screen">
         {children}
       </main>
 
-      {/* Mobile Bottom Bar — only on mobile */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 h-14 bg-background/95 backdrop-blur-xl border-t border-border/40 flex items-center justify-around z-50">
+      {/* Mobile Bottom Bar */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 h-14 bg-background/95 backdrop-blur-xl border-t border-border/40 flex items-center justify-around z-50">
         {NAV_ITEMS.map(item => {
           const active = isActive(item);
           return (

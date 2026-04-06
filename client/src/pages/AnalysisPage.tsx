@@ -78,10 +78,10 @@ export default function AnalysisPage() {
   const combined = analysis?.combined;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div>
       {/* Header */}
-      <header className="border-b border-border/50 sticky top-0 z-50 bg-background/80 backdrop-blur-md">
-        <div className="max-w-[1600px] mx-auto px-4 py-3 flex items-center justify-between">
+      <header className="border-b border-border/30 sticky top-0 z-40 bg-background/90 backdrop-blur-md">
+        <div className="max-w-[1600px] mx-auto px-4 md:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Link href="/market">
               <button data-testid="button-back" className="p-1.5 rounded hover:bg-card transition-colors">
@@ -129,7 +129,7 @@ export default function AnalysisPage() {
         </div>
       </header>
 
-      <main className="max-w-[1600px] mx-auto px-4 py-4">
+      <main className="max-w-[1600px] mx-auto px-4 md:px-6 py-4">
         {isLoading ? (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 space-y-4">
@@ -427,9 +427,7 @@ export default function AnalysisPage() {
                         <div className="flex items-center gap-2 text-emerald-400 text-[10px]">
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           <span>Signal logged to journal</span>
-                          <Link href="/paper">
-                            <a className="underline hover:text-emerald-300 ml-1">View Journal</a>
-                          </Link>
+                          <Link href="/paper" className="underline hover:text-emerald-300 ml-1">View Trades</Link>
                         </div>
                       ) : (
                         <button

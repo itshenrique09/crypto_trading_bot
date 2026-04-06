@@ -3,10 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  FlaskConical, Play, Square, Loader2,
-  ToggleLeft, ToggleRight, Filter
-} from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -30,6 +27,7 @@ export default function PaperTradingPage() {
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [closingId, setClosingId] = useState<number | null>(null);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
+  const [sortBy, setSortBy] = useState<"date" | "pnl">("date");
 
   const { data: strategies = [] } = useQuery<StrategyInfo[]>({
     queryKey: ["/api/strategies"],
@@ -65,23 +63,6 @@ export default function PaperTradingPage() {
 
   const priceMap = new Map(paperPrices.map(p => [p.id, p]));
 
-  const paperStartMutation = useMutation({
-    mutationFn: async () => { await apiRequest("POST", "/api/paper/start"); },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
-  });
-
-  const paperStopMutation = useMutation({
-    mutationFn: async () => { await apiRequest("POST", "/api/paper/stop"); },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
-  });
-
-  const toggleStrategyMutation = useMutation({
-    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
-      await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled });
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/strategies"] }),
-  });
-
   const updateMutation = useMutation({
     mutationFn: async ({ id, updates }: { id: number; updates: any }) => {
       await apiRequest("PATCH", `/api/journal/${id}`, updates);
@@ -100,8 +81,17 @@ export default function PaperTradingPage() {
   const wins = closedTrades.filter(e => e.outcome === "win");
   const totalPnl = closedTrades.reduce((s, e) => s + (e.pnl_pct || 0), 0);
 
-  const displayTrades = (tab === "open" ? openTrades : closedTrades)
+  let displayTrades = (tab === "open" ? openTrades : closedTrades)
     .filter(e => strategyFilter === "all" || (e.strategy || "v2-swing") === strategyFilter);
+
+  // Sort
+  if (sortBy === "pnl" && tab === "open") {
+    displayTrades = [...displayTrades].sort((a, b) => {
+      const pA = priceMap.get(a.id)?.unrealizedPnl ?? 0;
+      const pB = priceMap.get(b.id)?.unrealizedPnl ?? 0;
+      return pB - pA;
+    });
+  }
 
   const handleClose = (id: number) => {
     const entry = paperTrades.find(e => e.id === id);
@@ -119,98 +109,61 @@ export default function PaperTradingPage() {
     setCloseForm({ exit_price: "", outcome: "win" });
   };
 
+  const activeStrats = stratStats.filter(s => s.totalTrades > 0);
+
   return (
-    <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-6 space-y-6">
-      {/* Engine Control */}
-      <Card className={`p-4 sm:p-5 ${paperRunning ? "border-emerald-500/30 bg-emerald-950/20" : "border-border/40"}`}>
-        <div className="flex items-center justify-between gap-4 mb-4">
-          <div className="flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${paperRunning ? "bg-emerald-500/15" : "bg-muted/20"}`}>
-              <FlaskConical className={`w-5 h-5 ${paperRunning ? "text-emerald-400" : "text-muted-foreground"}`} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold">{paperRunning ? "Engine Running" : "Engine Stopped"}</p>
-                {paperRunning && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {paperRunning
-                  ? `${paperStatus?.coinsScanned || 0} coins · scan every 3min${paperStatus?.lastScan ? ` · last ${new Date(paperStatus.lastScan).toLocaleTimeString()}` : ""}`
-                  : "Click Start to begin scanning for signals"
-                }
-              </p>
-            </div>
-          </div>
-          {paperRunning ? (
-            <button
-              onClick={() => paperStopMutation.mutate()}
-              disabled={paperStopMutation.isPending}
-              className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg text-xs bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 font-medium transition-colors"
-            >
-              {paperStopMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />} Stop
-            </button>
-          ) : (
-            <button
-              onClick={() => paperStartMutation.mutate()}
-              disabled={paperStartMutation.isPending}
-              className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg text-xs bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 font-medium transition-colors"
-            >
-              {paperStartMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} Start
-            </button>
-          )}
+    <div className="p-4 md:p-6 space-y-5 max-w-[1400px]">
+      {/* Page Header + Summary Strip */}
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-bold tracking-tight">Paper Trades</h1>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            {paperRunning
+              ? <span className="text-emerald-400">Engine running</span>
+              : <span className="text-muted-foreground/60">Engine stopped</span>
+            }
+            {" · "}{paperTrades.length} total · {openTrades.length} open · {closedTrades.length} closed
+          </p>
         </div>
 
-        {/* Strategy Toggles */}
-        <div className="flex flex-wrap gap-2 pt-3 border-t border-border/20">
-          <span className="text-xs text-muted-foreground self-center mr-1">Strategies:</span>
-          {strategies.map(s => {
-            const c = getStratColor(s.id);
-            const counts = paperStatus?.strategyCounts?.[s.id];
-            return (
-              <button
-                key={s.id}
-                onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !s.enabled })}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
-                  s.enabled
-                    ? `${c.bg} ${c.border} ${c.text}`
-                    : "bg-card/30 border-border/20 text-muted-foreground/50"
-                }`}
-              >
-                {s.enabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-                {s.name}
-                {counts && counts.total > 0 && (
-                  <span className="text-[10px] opacity-70 ml-0.5">{counts.open}/{counts.total}</span>
-                )}
-              </button>
-            );
-          })}
+        {/* Quick stats pills */}
+        <div className="flex items-center gap-3 text-[11px]">
+          <span className="px-2.5 py-1 rounded-md bg-card/50 border border-border/20">
+            WR: <span className={`font-bold ${wins.length >= closedTrades.length - wins.length ? "text-emerald-400" : "text-red-400"}`}>
+              {closedTrades.length > 0 ? `${Math.round((wins.length / closedTrades.length) * 100)}%` : "--"}
+            </span>
+          </span>
+          <span className="px-2.5 py-1 rounded-md bg-card/50 border border-border/20">
+            P&L: <span className={`font-bold ${totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {closedTrades.length > 0 ? `${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}%` : "--"}
+            </span>
+          </span>
+          <span className="px-2.5 py-1 rounded-md bg-card/50 border border-border/20">
+            Avg: <span className={`font-bold ${totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {closedTrades.length > 0 ? `${(totalPnl / closedTrades.length).toFixed(2)}%` : "--"}
+            </span>
+          </span>
         </div>
-      </Card>
-
-      {/* Stats Row */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <MiniStat label="Total" value={paperTrades.length} />
-        <MiniStat label="Open" value={openTrades.length} color="text-yellow-400" />
-        <MiniStat label="Win Rate" value={closedTrades.length > 0 ? `${Math.round((wins.length / closedTrades.length) * 100)}%` : "--"} color={wins.length >= closedTrades.length - wins.length ? "text-emerald-400" : "text-red-400"} />
-        <MiniStat label="Total P&L" value={closedTrades.length > 0 ? `${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}%` : "--"} color={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
-        <MiniStat label="Avg P&L" value={closedTrades.length > 0 ? `${(totalPnl / closedTrades.length).toFixed(2)}%` : "--"} color={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
       </div>
 
-      {/* Strategy Mini Stats */}
-      {stratStats.filter(s => s.totalTrades > 0).length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {stratStats.filter(s => s.totalTrades > 0).map(s => {
+      {/* Strategy Mini Stats — only if there's data */}
+      {activeStrats.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {activeStrats.map(s => {
             const sc = getStratColor(s.strategyId);
             return (
-              <Card key={s.strategyId} className={`p-3 border ${sc.border} ${sc.bg}`}>
-                <div className="flex items-center justify-between mb-1.5">
+              <Card key={s.strategyId} className={`px-3 py-2.5 border ${sc.border} ${sc.bg} flex items-center justify-between`}>
+                <div className="flex items-center gap-2">
                   <span className={`text-xs font-bold ${sc.text}`}>{s.strategyName}</span>
-                  <span className="text-[10px] text-muted-foreground">{s.totalTrades} trades</span>
+                  <span className="text-[10px] text-muted-foreground/60">{s.totalTrades} trades</span>
                 </div>
-                <div className="flex items-center gap-4 text-xs">
-                  <span className="text-muted-foreground">WR: <b className={s.winRate !== null && s.winRate >= 50 ? "text-emerald-400" : "text-red-400"}>{s.winRate ?? "--"}%</b></span>
-                  <span className="text-muted-foreground">P&L: <b className={s.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}>{s.totalPnl > 0 ? "+" : ""}{s.totalPnl.toFixed(2)}%</b></span>
-                  <span className="text-muted-foreground"><b className="text-emerald-400">{s.wins}</b>W / <b className="text-red-400">{s.losses}</b>L</span>
+                <div className="flex items-center gap-3 text-[11px]">
+                  <span className={s.winRate != null && s.winRate >= 50 ? "text-emerald-400" : "text-red-400"}>
+                    {s.winRate ?? "--"}%
+                  </span>
+                  <span className={`font-bold font-mono ${s.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {s.totalPnl > 0 ? "+" : ""}{s.totalPnl.toFixed(2)}%
+                  </span>
                 </div>
               </Card>
             );
@@ -218,57 +171,72 @@ export default function PaperTradingPage() {
         </div>
       )}
 
-      {/* Tabs + Filters */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="flex items-center bg-card/40 border border-border/30 rounded-lg p-0.5">
-          <button
-            onClick={() => setTab("open")}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-              tab === "open" ? "bg-purple-500/20 text-purple-400" : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Open ({openTrades.length})
-          </button>
-          <button
-            onClick={() => setTab("closed")}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-              tab === "closed" ? "bg-purple-500/20 text-purple-400" : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            History ({closedTrades.length})
-          </button>
+      {/* Toolbar: Tabs + Filters + Sort */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          {/* Tab switcher */}
+          <div className="flex items-center bg-card/40 border border-border/30 rounded-lg p-0.5">
+            <button
+              onClick={() => setTab("open")}
+              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                tab === "open" ? "bg-purple-500/20 text-purple-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Open ({openTrades.length})
+            </button>
+            <button
+              onClick={() => setTab("closed")}
+              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                tab === "closed" ? "bg-purple-500/20 text-purple-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              History ({closedTrades.length})
+            </button>
+          </div>
+
+          {/* Strategy filter */}
+          {strategies.length > 1 && (
+            <div className="flex items-center gap-1.5">
+              <Filter className="w-3.5 h-3.5 text-muted-foreground/50" />
+              <select
+                value={strategyFilter}
+                onChange={e => setStrategyFilter(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-md bg-card/40 border border-border/30 text-foreground cursor-pointer"
+              >
+                <option value="all">All Strategies</option>
+                {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+          )}
         </div>
 
-        {strategies.length > 1 && (
-          <div className="flex items-center gap-1.5">
-            <Filter className="w-3.5 h-3.5 text-muted-foreground" />
-            <select
-              value={strategyFilter}
-              onChange={e => setStrategyFilter(e.target.value)}
-              className="text-xs px-2 py-1.5 rounded-md bg-card/40 border border-border/30 text-foreground"
-            >
-              <option value="all">All Strategies</option>
-              {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
+        {/* Sort */}
+        {tab === "open" && openTrades.length > 1 && (
+          <button
+            onClick={() => setSortBy(s => s === "date" ? "pnl" : "date")}
+            className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <ArrowUpDown className="w-3 h-3" />
+            Sort: {sortBy === "date" ? "Date" : "P&L"}
+          </button>
         )}
       </div>
 
       {/* Trade List */}
       {isLoading ? (
-        <div className="space-y-3">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)}</div>
+        <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)}</div>
       ) : displayTrades.length === 0 ? (
-        <Card className="border-border/40 py-12 text-center">
-          <FlaskConical className="w-10 h-10 text-muted-foreground/20 mx-auto mb-3" />
+        <Card className="border-border/30 border-dashed py-14 text-center">
+          <FlaskConical className="w-10 h-10 text-muted-foreground/15 mx-auto mb-3" />
           <p className="text-sm text-muted-foreground">{tab === "open" ? "No open trades" : "No closed trades"}</p>
           {tab === "open" && !paperRunning && (
-            <p className="text-xs text-muted-foreground/60 mt-1">Start the engine to begin scanning for signals</p>
+            <p className="text-[11px] text-muted-foreground/50 mt-1">Start the engine from the Dashboard to begin scanning</p>
           )}
         </Card>
       ) : (
         <div className="space-y-2">
           {displayTrades.map(entry => (
-            <Card key={entry.id} className="border-border/30">
+            <Card key={entry.id} className="border-border/20 hover:border-border/40 transition-colors">
               <TradeRow
                 entry={entry}
                 strategies={strategies}
@@ -286,14 +254,5 @@ export default function PaperTradingPage() {
         </div>
       )}
     </div>
-  );
-}
-
-function MiniStat({ label, value, color }: { label: string; value: string | number; color?: string }) {
-  return (
-    <Card className="border-border/40 px-3 py-2.5">
-      <span className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-0.5">{label}</span>
-      <span className={`text-base font-bold ${color || "text-foreground"}`}>{value}</span>
-    </Card>
   );
 }
