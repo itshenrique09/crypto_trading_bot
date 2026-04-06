@@ -338,6 +338,67 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   });
 
+  // ── Multi-strategy signals for a coin ─────────────────────────────
+  app.get("/api/signals/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const candles4h = await fetchBinanceKlines(symbol, "4h", 300);
+      if (candles4h.length < 50) {
+        return res.status(400).json({ error: "Not enough data" });
+      }
+
+      const ind = analyzeIndicators(candles4h);
+      const swingSig = generateSignal(candles4h, ind);
+      const mrSig = meanReversionSignal(candles4h);
+      const boSig = breakoutSignal(candles4h);
+
+      res.json({
+        symbol: symbol.toUpperCase(),
+        currentPrice: candles4h[candles4h.length - 1].close,
+        strategies: [
+          {
+            id: "v2-swing",
+            name: "v2 Swing",
+            signal: swingSig.type,
+            score: Math.round(swingSig.confluenceScore * 10) / 10,
+            confidence: swingSig.confidence,
+            reason: swingSig.reason,
+            entry: swingSig.entry,
+            stopLoss: swingSig.stopLoss,
+            takeProfit: swingSig.takeProfit1,
+            trend: swingSig.trend,
+          },
+          {
+            id: "mean-reversion",
+            name: "Mean Reversion",
+            signal: mrSig.type === "NONE" ? "HOLD" : mrSig.type === "LONG" ? "BUY" : "SELL",
+            score: mrSig.confidence / 10,
+            confidence: mrSig.confidence,
+            reason: mrSig.reason || "No signal",
+            entry: mrSig.entry || undefined,
+            stopLoss: mrSig.stopLoss || undefined,
+            takeProfit: mrSig.takeProfit || undefined,
+            rsi7: mrSig.rsi7,
+            bbPercentB: mrSig.bbPercentB,
+          },
+          {
+            id: "breakout",
+            name: "Breakout",
+            signal: boSig.type === "NONE" ? "HOLD" : boSig.type === "LONG" ? "BUY" : "SELL",
+            score: boSig.confidence / 10,
+            confidence: boSig.confidence,
+            reason: boSig.reason || "No signal",
+            entry: boSig.entry || undefined,
+            stopLoss: boSig.stopLoss || undefined,
+            takeProfit: boSig.takeProfit || undefined,
+          },
+        ],
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Backtesting — v2 proven logic ────────────────────────────────
   //
   // Signal from 1D, evaluate on 1D (proven: 65% WR, PF 3.82)

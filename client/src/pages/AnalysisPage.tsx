@@ -9,19 +9,36 @@ import {
   ArrowLeft, TrendingUp, TrendingDown, Shield, Target,
   AlertTriangle, Activity, BarChart3, Gauge, Layers,
   ChevronDown, ChevronUp, Minus, Zap, Clock, DollarSign,
-  FlaskConical, CheckCircle2, XCircle, Timer, BookOpen, Send
+  FlaskConical, CheckCircle2, XCircle, Timer, Send
 } from "lucide-react";
 import {
   formatPrice, formatCompact, formatPercent, getChangeColor,
   getSignalColor, getSignalBg, getBiasColor, getBiasBg
 } from "@/lib/utils";
+import { getStratColor } from "@/lib/types";
 import PriceChart from "@/components/PriceChart";
 import ConfluenceMeter from "@/components/ConfluenceMeter";
+
+interface StrategySignal {
+  id: string;
+  name: string;
+  signal: string;
+  score: number;
+  confidence: number;
+  reason: string;
+  entry?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  trend?: string;
+  rsi7?: number;
+  bbPercentB?: number;
+}
 
 export default function AnalysisPage() {
   const [, marketParams] = useRoute("/market/:symbol");
   const [, analyzeParams] = useRoute("/analyze/:symbol");
   const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
+  const [backtestTab, setBacktestTab] = useState<"v2-swing" | "mean-reversion" | "breakout">("v2-swing");
   const [backtestRequested, setBacktestRequested] = useState(false);
   const [signalLogged, setSignalLogged] = useState(false);
 
@@ -49,10 +66,26 @@ export default function AnalysisPage() {
     },
   });
 
-  const { data: backtest, isLoading: backtestLoading } = useQuery({
-    queryKey: ["/api/backtest", symbol],
+  // Multi-strategy signals
+  const { data: multiSignals } = useQuery({
+    queryKey: ["/api/signals", symbol],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/backtest/${symbol}`);
+      const res = await apiRequest("GET", `/api/signals/${symbol}`);
+      return res.json();
+    },
+  });
+
+  // Backtests — one per strategy
+  const backtestEndpoints: Record<string, string> = {
+    "v2-swing": `/api/backtest/${symbol}`,
+    "mean-reversion": `/api/backtest-meanrev/${symbol}`,
+    "breakout": `/api/backtest-breakout/${symbol}`,
+  };
+
+  const { data: backtest, isLoading: backtestLoading } = useQuery({
+    queryKey: ["/api/backtest", backtestTab, symbol],
+    queryFn: async () => {
+      const res = await apiRequest("GET", backtestEndpoints[backtestTab]);
       return res.json();
     },
     enabled: backtestRequested,
@@ -60,13 +93,11 @@ export default function AnalysisPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <Card className="p-8 text-center max-w-md">
+      <div className="flex items-center justify-center py-24">
+        <Card className="p-8 text-center max-w-md border-border/30">
           <AlertTriangle className="w-8 h-8 text-red-400 mx-auto mb-3" />
-          <p className="text-sm text-muted-foreground">Failed to analyze {symbol}. CoinGecko API rate limit may apply.</p>
-          <Link href="/market">
-            <button className="mt-4 text-xs text-emerald-400 hover:underline">Back to market</button>
-          </Link>
+          <p className="text-sm text-muted-foreground">Failed to analyze {symbol}. API rate limit may apply.</p>
+          <Link href="/market" className="mt-4 text-xs text-purple-400 hover:underline inline-block">Back to market</Link>
         </Card>
       </div>
     );
@@ -76,6 +107,7 @@ export default function AnalysisPage() {
   const indicators = analysis?.indicators;
   const timeframes = analysis?.timeframes;
   const combined = analysis?.combined;
+  const stratSignals: StrategySignal[] = multiSignals?.strategies || [];
 
   return (
     <div>
@@ -84,7 +116,7 @@ export default function AnalysisPage() {
         <div className="max-w-[1600px] mx-auto px-4 md:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Link href="/market">
-              <button data-testid="button-back" className="p-1.5 rounded hover:bg-card transition-colors">
+              <button className="p-1.5 rounded hover:bg-card transition-colors">
                 <ArrowLeft className="w-4 h-4" />
               </button>
             </Link>
@@ -146,12 +178,59 @@ export default function AnalysisPage() {
             {/* Left Column - Chart + Market Stats */}
             <div className="lg:col-span-2 space-y-4">
 
-              {/* Strategy Overview: 4H Signal + 1D Trend Filter */}
+              {/* ── Multi-Strategy Signals ─────────────────────── */}
+              {stratSignals.length > 0 && (
+                <Card className="border-border/30 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold">Strategy Signals</span>
+                    <span className="text-[10px] text-muted-foreground/50 ml-auto">All strategies · 4H candles</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {stratSignals.map(s => {
+                      const sc = getStratColor(s.id);
+                      const isActive = s.signal !== "HOLD";
+                      return (
+                        <div key={s.id} className={`rounded-lg border p-3 transition-all ${
+                          isActive ? `${getSignalBg(s.signal)} border-opacity-60` : "border-border/20 bg-card/20"
+                        }`}>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${sc.bg} ${sc.text}`}>{s.name}</span>
+                            <span className="text-[10px] text-muted-foreground/50">{s.confidence}%</span>
+                          </div>
+                          <p className={`text-sm font-bold mb-1 ${getSignalColor(s.signal)}`}>
+                            {s.signal.replace("_", " ")}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground leading-relaxed">{s.reason || "No signal conditions met"}</p>
+                          {isActive && s.entry && s.stopLoss && s.takeProfit && (
+                            <div className="mt-2 pt-2 border-t border-border/15 space-y-0.5 text-[10px] font-mono">
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground/50">Entry</span>
+                                <span>${formatPrice(s.entry)}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-red-400/50">SL</span>
+                                <span className="text-red-400">${formatPrice(s.stopLoss)}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-emerald-400/50">TP</span>
+                                <span className="text-emerald-400">${formatPrice(s.takeProfit)}</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+
+              {/* ── v2 Swing: 4H Signal + 1D Trend Filter ──────── */}
               {(timeframes || isLoading) && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Clock className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-semibold">Swing Strategy — 4H Signal + 1D Trend Filter</span>
+                    <span className="text-xs font-bold">v2 Swing — 4H Signal + 1D Trend Filter</span>
                     {combined && (
                       <Badge variant="outline" className="ml-auto text-[10px]">
                         {combined.trendAligned
@@ -161,84 +240,78 @@ export default function AnalysisPage() {
                       </Badge>
                     )}
                   </div>
-                  {isLoading ? (
-                    <div className="grid grid-cols-3 gap-3">
-                      {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-20 w-full rounded-md" />)}
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      {/* 4H Signal Card — PRIMARY */}
-                      {timeframes?.["4h"] && (
-                        <div className={`rounded-md border-2 p-3 ${getSignalBg(timeframes["4h"].signalType)} border-cyan-500/40`}>
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[10px] text-cyan-400 font-medium uppercase tracking-wider">{timeframes["4h"].label}</span>
-                            <span className="text-[10px] font-mono text-muted-foreground">{timeframes["4h"].confluenceScore > 0 ? "+" : ""}{timeframes["4h"].confluenceScore}</span>
-                          </div>
-                          <p className={`text-xs font-bold ${getSignalColor(timeframes["4h"].signalType)}`}>
-                            {timeframes["4h"].signalType.replace("_", " ")}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1 capitalize">{timeframes["4h"].trend.replace("_", " ")}</p>
-                          <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all ${timeframes["4h"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-                              style={{ width: `${Math.abs(timeframes["4h"].confluenceScore) * 10}%`, marginLeft: timeframes["4h"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["4h"].confluenceScore) * 10}%` : "0" }}
-                            />
-                          </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {/* 4H Signal Card */}
+                    {timeframes?.["4h"] && (
+                      <div className={`rounded-md border-2 p-3 ${getSignalBg(timeframes["4h"].signalType)} border-cyan-500/40`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] text-cyan-400 font-medium uppercase tracking-wider">{timeframes["4h"].label}</span>
+                          <span className="text-[10px] font-mono text-muted-foreground">{timeframes["4h"].confluenceScore > 0 ? "+" : ""}{timeframes["4h"].confluenceScore}</span>
                         </div>
-                      )}
-                      {/* 1D Trend Card — FILTER */}
-                      {timeframes?.["1d"] && (
-                        <div className={`rounded-md border p-3 ${getSignalBg(timeframes["1d"].signalType)}`}>
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">{timeframes["1d"].label}</span>
-                            <span className="text-[10px] font-mono text-muted-foreground">{timeframes["1d"].confluenceScore > 0 ? "+" : ""}{timeframes["1d"].confluenceScore}</span>
-                          </div>
-                          <p className={`text-xs font-bold ${getSignalColor(timeframes["1d"].signalType)}`}>
-                            {timeframes["1d"].signalType.replace("_", " ")}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            Daily trend: <span className={combined?.dailyTrend === "up" ? "text-emerald-400" : combined?.dailyTrend === "down" ? "text-red-400" : "text-muted-foreground"}>{combined?.dailyTrend?.toUpperCase()}</span>
-                          </p>
-                          <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all ${timeframes["1d"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-                              style={{ width: `${Math.abs(timeframes["1d"].confluenceScore) * 10}%`, marginLeft: timeframes["1d"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["1d"].confluenceScore) * 10}%` : "0" }}
-                            />
-                          </div>
+                        <p className={`text-xs font-bold ${getSignalColor(timeframes["4h"].signalType)}`}>
+                          {timeframes["4h"].signalType.replace("_", " ")}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1 capitalize">{timeframes["4h"].trend.replace("_", " ")}</p>
+                        <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${timeframes["4h"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+                            style={{ width: `${Math.abs(timeframes["4h"].confluenceScore) * 10}%`, marginLeft: timeframes["4h"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["4h"].confluenceScore) * 10}%` : "0" }}
+                          />
                         </div>
-                      )}
-                      {/* Final Signal Card */}
-                      {combined && (
-                        <div className={`rounded-md border p-3 ${getSignalBg(combined.signal)}`}>
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Final Signal</span>
-                            <span className="text-[10px] font-mono text-muted-foreground">{combined.score > 0 ? "+" : ""}{combined.score}</span>
-                          </div>
-                          <p className={`text-xs font-bold ${getSignalColor(combined.signal)}`}>
-                            {combined.signal.replace("_", " ")}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            {combined.trendAligned ? `${combined.confidence}% confidence` : "Filtered by daily trend"}
-                          </p>
-                          <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all ${combined.score >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-                              style={{ width: `${Math.abs(combined.score) * 10}%`, marginLeft: combined.score < 0 ? `${100 - Math.abs(combined.score) * 10}%` : "0" }}
-                            />
-                          </div>
+                      </div>
+                    )}
+                    {/* 1D Trend Card */}
+                    {timeframes?.["1d"] && (
+                      <div className={`rounded-md border p-3 ${getSignalBg(timeframes["1d"].signalType)}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">{timeframes["1d"].label}</span>
+                          <span className="text-[10px] font-mono text-muted-foreground">{timeframes["1d"].confluenceScore > 0 ? "+" : ""}{timeframes["1d"].confluenceScore}</span>
                         </div>
-                      )}
-                    </div>
-                  )}
+                        <p className={`text-xs font-bold ${getSignalColor(timeframes["1d"].signalType)}`}>
+                          {timeframes["1d"].signalType.replace("_", " ")}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          Daily trend: <span className={combined?.dailyTrend === "up" ? "text-emerald-400" : combined?.dailyTrend === "down" ? "text-red-400" : "text-muted-foreground"}>{combined?.dailyTrend?.toUpperCase()}</span>
+                        </p>
+                        <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${timeframes["1d"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+                            style={{ width: `${Math.abs(timeframes["1d"].confluenceScore) * 10}%`, marginLeft: timeframes["1d"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["1d"].confluenceScore) * 10}%` : "0" }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {/* Final Signal Card */}
+                    {combined && (
+                      <div className={`rounded-md border p-3 ${getSignalBg(combined.signal)}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Final Signal</span>
+                          <span className="text-[10px] font-mono text-muted-foreground">{combined.score > 0 ? "+" : ""}{combined.score}</span>
+                        </div>
+                        <p className={`text-xs font-bold ${getSignalColor(combined.signal)}`}>
+                          {combined.signal.replace("_", " ")}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          {combined.trendAligned ? `${combined.confidence}% confidence` : "Filtered by daily trend"}
+                        </p>
+                        <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${combined.score >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+                            style={{ width: `${Math.abs(combined.score) * 10}%`, marginLeft: combined.score < 0 ? `${100 - Math.abs(combined.score) * 10}%` : "0" }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </Card>
               )}
 
               {/* Price Chart */}
-              <Card className="border-border/50 bg-card/50 p-4">
+              <Card className="border-border/30 p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <BarChart3 className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold">Price Chart (90d)</span>
+                    <span className="text-xs font-bold">Price Chart (90d)</span>
                   </div>
                   {signal && (
                     <div className="flex items-center gap-3 text-[10px]">
@@ -275,14 +348,14 @@ export default function AnalysisPage() {
 
               {/* Indicator Details Grid */}
               {indicators && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Layers className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold">Indicator Breakdown</span>
+                    <span className="text-xs font-bold">Indicator Breakdown</span>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                     {signal && Object.entries(signal.indicators).map(([name, data]: [string, any]) => (
-                      <div key={name} className={`rounded-md p-2.5 border border-border/30 ${getBiasBg(data.bias)}`}>
+                      <div key={name} className={`rounded-md p-2.5 border border-border/20 ${getBiasBg(data.bias)}`}>
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">{name}</span>
                           <BiasIcon bias={data.bias} />
@@ -297,10 +370,10 @@ export default function AnalysisPage() {
               {/* Smart Money & Fibonacci */}
               {indicators && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <Card className="border-border/50 bg-card/50 p-4">
+                  <Card className="border-border/30 p-4">
                     <div className="flex items-center gap-2 mb-3">
                       <Zap className="w-4 h-4 text-purple-400" />
-                      <span className="text-xs font-semibold">Smart Money Concepts</span>
+                      <span className="text-xs font-bold">Smart Money Concepts</span>
                     </div>
                     <div className="space-y-2 text-xs">
                       <div className="flex justify-between">
@@ -313,7 +386,7 @@ export default function AnalysisPage() {
                           <span>${formatPrice(ob.low)} - ${formatPrice(ob.high)}</span>
                         </div>
                       ))}
-                      <div className="flex justify-between pt-1 border-t border-border/20">
+                      <div className="flex justify-between pt-1 border-t border-border/15">
                         <span className="text-muted-foreground">Fair Value Gaps</span>
                         <span>{indicators.fairValueGaps?.length || 0} open</span>
                       </div>
@@ -323,7 +396,7 @@ export default function AnalysisPage() {
                           <span>${formatPrice(fvg.low)} - ${formatPrice(fvg.high)}</span>
                         </div>
                       ))}
-                      <div className="flex justify-between pt-1 border-t border-border/20">
+                      <div className="flex justify-between pt-1 border-t border-border/15">
                         <span className="text-muted-foreground">Support</span>
                         <span className="text-emerald-400">${formatPrice(indicators.support)}</span>
                       </div>
@@ -334,10 +407,10 @@ export default function AnalysisPage() {
                     </div>
                   </Card>
 
-                  <Card className="border-border/50 bg-card/50 p-4">
+                  <Card className="border-border/30 p-4">
                     <div className="flex items-center gap-2 mb-3">
                       <Target className="w-4 h-4 text-amber-400" />
-                      <span className="text-xs font-semibold">Fibonacci Retracement</span>
+                      <span className="text-xs font-bold">Fibonacci Retracement</span>
                     </div>
                     <div className="space-y-1.5 text-xs">
                       {indicators.fibLevels?.map((fib: any) => {
@@ -356,7 +429,7 @@ export default function AnalysisPage() {
               )}
             </div>
 
-            {/* Right Column - Signal + Risk */}
+            {/* Right Column */}
             <div className="space-y-4">
               {/* Confluence Meter */}
               {signal && (
@@ -364,7 +437,7 @@ export default function AnalysisPage() {
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <Gauge className="w-4 h-4 text-emerald-400" />
-                      <span className="text-xs font-semibold">Confluence Score</span>
+                      <span className="text-xs font-bold">Confluence Score</span>
                     </div>
                     <Badge variant="outline" className={`text-[10px] ${getSignalColor(signal.type)}`}>
                       {signal.confidence}% confident
@@ -382,10 +455,10 @@ export default function AnalysisPage() {
 
               {/* Risk Management */}
               {signal && signal.type !== "HOLD" && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Shield className="w-4 h-4 text-blue-400" />
-                    <span className="text-xs font-semibold">Risk Management</span>
+                    <span className="text-xs font-bold">Risk Management</span>
                   </div>
                   <div className="space-y-2 text-xs">
                     <RiskRow label="Entry (4H)" value={`$${formatPrice(signal.entry)}`} color="text-foreground" icon={<DollarSign className="w-3 h-3" />} />
@@ -404,13 +477,13 @@ export default function AnalysisPage() {
                       </div>
                     )}
 
-                    <div className="border-t border-border/20 pt-2">
+                    <div className="border-t border-border/15 pt-2">
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Take Profit Levels</p>
                       <RiskRow label="TP1 (1.5:1 R:R)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400/70" icon={<Target className="w-3 h-3" />} />
                       <RiskRow label="TP2 (2.5:1 R:R)" value={`$${formatPrice(signal.takeProfit2)}`} color="text-emerald-400/85" icon={<Target className="w-3 h-3" />} />
                       <RiskRow label="TP3 (4:1 R:R)" value={`$${formatPrice(signal.takeProfit3)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
                     </div>
-                    <div className="border-t border-border/20 pt-2 space-y-1.5">
+                    <div className="border-t border-border/15 pt-2 space-y-1.5">
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Risk/Reward</span>
                         <span className="font-semibold text-blue-400">1:{signal.riskRewardRatio}</span>
@@ -422,7 +495,7 @@ export default function AnalysisPage() {
                     </div>
 
                     {/* Log Signal to Journal */}
-                    <div className="border-t border-border/20 pt-3">
+                    <div className="border-t border-border/15 pt-3">
                       {signalLogged ? (
                         <div className="flex items-center gap-2 text-emerald-400 text-[10px]">
                           <CheckCircle2 className="w-3.5 h-3.5" />
@@ -446,10 +519,10 @@ export default function AnalysisPage() {
 
               {/* Analysis Reasons */}
               {signal && signal.detailedReasons?.length > 0 && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Activity className="w-4 h-4 text-amber-400" />
-                    <span className="text-xs font-semibold">Analysis Reasons</span>
+                    <span className="text-xs font-bold">Analysis Reasons</span>
                   </div>
                   <ul className="space-y-1.5">
                     {signal.detailedReasons.map((reason: string, i: number) => (
@@ -470,64 +543,34 @@ export default function AnalysisPage() {
 
               {/* Ichimoku Summary */}
               {indicators?.ichimoku && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Layers className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-semibold">Ichimoku Cloud</span>
+                    <span className="text-xs font-bold">Ichimoku Cloud</span>
                   </div>
                   <div className="space-y-1.5 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Tenkan-sen</span>
-                      <span className="font-mono">${formatPrice(indicators.ichimoku.tenkan)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Kijun-sen</span>
-                      <span className="font-mono">${formatPrice(indicators.ichimoku.kijun)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Cloud Top</span>
-                      <span className="font-mono">${formatPrice(indicators.ichimoku.cloudTop)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Cloud Bottom</span>
-                      <span className="font-mono">${formatPrice(indicators.ichimoku.cloudBottom)}</span>
-                    </div>
-                    <div className="flex justify-between pt-1 border-t border-border/20">
+                    <div className="flex justify-between"><span className="text-muted-foreground">Tenkan-sen</span><span className="font-mono">${formatPrice(indicators.ichimoku.tenkan)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Kijun-sen</span><span className="font-mono">${formatPrice(indicators.ichimoku.kijun)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Cloud Top</span><span className="font-mono">${formatPrice(indicators.ichimoku.cloudTop)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Cloud Bottom</span><span className="font-mono">${formatPrice(indicators.ichimoku.cloudBottom)}</span></div>
+                    <div className="flex justify-between pt-1 border-t border-border/15">
                       <span className="text-muted-foreground">Price vs Cloud</span>
-                      <span className={
-                        indicators.ichimoku.priceVsCloud === "above" ? "text-emerald-400 font-medium" :
-                        indicators.ichimoku.priceVsCloud === "below" ? "text-red-400 font-medium" :
-                        "text-yellow-400 font-medium"
-                      }>
+                      <span className={indicators.ichimoku.priceVsCloud === "above" ? "text-emerald-400 font-medium" : indicators.ichimoku.priceVsCloud === "below" ? "text-red-400 font-medium" : "text-yellow-400 font-medium"}>
                         {indicators.ichimoku.priceVsCloud.charAt(0).toUpperCase() + indicators.ichimoku.priceVsCloud.slice(1)}
                       </span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Cloud Color</span>
-                      <span className={indicators.ichimoku.cloudColor === "green" ? "text-emerald-400" : "text-red-400"}>
-                        {indicators.ichimoku.cloudColor.charAt(0).toUpperCase() + indicators.ichimoku.cloudColor.slice(1)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">TK Cross</span>
-                      <span className={
-                        indicators.ichimoku.tkCross === "bullish" ? "text-emerald-400" :
-                        indicators.ichimoku.tkCross === "bearish" ? "text-red-400" :
-                        "text-muted-foreground"
-                      }>
-                        {indicators.ichimoku.tkCross.charAt(0).toUpperCase() + indicators.ichimoku.tkCross.slice(1)}
-                      </span>
-                    </div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Cloud Color</span><span className={indicators.ichimoku.cloudColor === "green" ? "text-emerald-400" : "text-red-400"}>{indicators.ichimoku.cloudColor.charAt(0).toUpperCase() + indicators.ichimoku.cloudColor.slice(1)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">TK Cross</span><span className={indicators.ichimoku.tkCross === "bullish" ? "text-emerald-400" : indicators.ichimoku.tkCross === "bearish" ? "text-red-400" : "text-muted-foreground"}>{indicators.ichimoku.tkCross.charAt(0).toUpperCase() + indicators.ichimoku.tkCross.slice(1)}</span></div>
                   </div>
                 </Card>
               )}
 
               {/* Raw Numbers */}
               {indicators && (
-                <Card className="border-border/50 bg-card/50 p-4">
+                <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <BarChart3 className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-xs font-semibold">Raw Indicator Values</span>
+                    <span className="text-xs font-bold">Raw Indicator Values</span>
                   </div>
                   <div className="space-y-1.5 text-xs font-mono">
                     <DataRow label="RSI (14)" value={indicators.rsi?.toFixed(1)} />
@@ -535,17 +578,17 @@ export default function AnalysisPage() {
                     <DataRow label="MACD Line" value={indicators.macd?.line?.toFixed(4)} />
                     <DataRow label="MACD Signal" value={indicators.macd?.signal?.toFixed(4)} />
                     <DataRow label="MACD Hist" value={indicators.macd?.histogram?.toFixed(4)} />
-                    <div className="border-t border-border/20 pt-1.5 mt-1.5" />
+                    <div className="border-t border-border/15 pt-1.5 mt-1.5" />
                     <DataRow label="EMA 9" value={`$${formatPrice(indicators.ema9)}`} />
                     <DataRow label="EMA 21" value={`$${formatPrice(indicators.ema21)}`} />
                     <DataRow label="EMA 50" value={`$${formatPrice(indicators.ema50)}`} />
                     <DataRow label="EMA 200" value={`$${formatPrice(indicators.ema200)}`} />
-                    <div className="border-t border-border/20 pt-1.5 mt-1.5" />
+                    <div className="border-t border-border/15 pt-1.5 mt-1.5" />
                     <DataRow label="BB Upper" value={`$${formatPrice(indicators.bollingerBands?.upper)}`} />
                     <DataRow label="BB Middle" value={`$${formatPrice(indicators.bollingerBands?.middle)}`} />
                     <DataRow label="BB Lower" value={`$${formatPrice(indicators.bollingerBands?.lower)}`} />
                     <DataRow label="BB %B" value={`${((indicators.bollingerBands?.percentB || 0) * 100).toFixed(1)}%`} />
-                    <div className="border-t border-border/20 pt-1.5 mt-1.5" />
+                    <div className="border-t border-border/15 pt-1.5 mt-1.5" />
                     <DataRow label="ATR" value={`$${formatPrice(indicators.atr)}`} />
                     <DataRow label="ATR %" value={`${indicators.atrPercent?.toFixed(2)}%`} />
                     <DataRow label="Volume Ratio" value={`${indicators.volumeRatio?.toFixed(2)}x`} />
@@ -559,21 +602,45 @@ export default function AnalysisPage() {
 
         {/* ── Backtesting Section ─────────────────────────────── */}
         <div className="mt-4">
-          <Card className="border-border/50 bg-card/50 p-4">
+          <Card className="border-border/30 p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <FlaskConical className="w-4 h-4 text-purple-400" />
-                <span className="text-xs font-semibold">Backtesting</span>
-                <span className="text-[10px] text-muted-foreground">1D swing — v2 confluence scoring</span>
+                <span className="text-xs font-bold">Backtesting</span>
               </div>
-              {!backtestRequested && (
-                <button
-                  onClick={() => setBacktestRequested(true)}
-                  className="text-xs px-3 py-1.5 rounded-md bg-purple-500/20 border border-purple-500/40 text-purple-300 hover:bg-purple-500/30 transition-colors font-medium"
-                >
-                  Run Backtest
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Strategy tabs for backtest */}
+                <div className="flex items-center bg-card/40 border border-border/20 rounded-lg p-0.5">
+                  {[
+                    { id: "v2-swing" as const, label: "v2 Swing" },
+                    { id: "mean-reversion" as const, label: "Mean Rev" },
+                    { id: "breakout" as const, label: "Breakout" },
+                  ].map(tab => {
+                    const sc = getStratColor(tab.id);
+                    return (
+                      <button
+                        key={tab.id}
+                        onClick={() => { setBacktestTab(tab.id); setBacktestRequested(true); }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${
+                          backtestTab === tab.id && backtestRequested
+                            ? `${sc.bg} ${sc.text}`
+                            : "text-muted-foreground/50 hover:text-foreground"
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {!backtestRequested && (
+                  <button
+                    onClick={() => setBacktestRequested(true)}
+                    className="text-xs px-3 py-1.5 rounded-md bg-purple-500/20 border border-purple-500/40 text-purple-300 hover:bg-purple-500/30 transition-colors font-medium"
+                  >
+                    Run
+                  </button>
+                )}
+              </div>
             </div>
 
             {backtestLoading && (
@@ -585,26 +652,10 @@ export default function AnalysisPage() {
             {backtest && !backtestLoading && (
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
-                  <BacktestStat
-                    label="Win Rate"
-                    value={`${backtest.winRate}%`}
-                    color={backtest.winRate >= 50 ? "text-emerald-400" : "text-red-400"}
-                  />
-                  <BacktestStat
-                    label="Profit Factor"
-                    value={backtest.profitFactor >= 999 ? "∞" : backtest.profitFactor.toFixed(2)}
-                    color={backtest.profitFactor >= 1.5 ? "text-emerald-400" : backtest.profitFactor >= 1 ? "text-yellow-400" : "text-red-400"}
-                  />
-                  <BacktestStat
-                    label="Total Return"
-                    value={`${backtest.totalReturn > 0 ? "+" : ""}${backtest.totalReturn}%`}
-                    color={backtest.totalReturn >= 0 ? "text-emerald-400" : "text-red-400"}
-                  />
-                  <BacktestStat
-                    label="Max Drawdown"
-                    value={`${backtest.maxDrawdown.toFixed(1)}%`}
-                    color="text-red-400"
-                  />
+                  <BacktestStat label="Win Rate" value={`${backtest.winRate}%`} color={backtest.winRate >= 50 ? "text-emerald-400" : "text-red-400"} />
+                  <BacktestStat label="Profit Factor" value={backtest.profitFactor >= 999 ? "∞" : backtest.profitFactor.toFixed(2)} color={backtest.profitFactor >= 1.5 ? "text-emerald-400" : backtest.profitFactor >= 1 ? "text-yellow-400" : "text-red-400"} />
+                  <BacktestStat label="Total Return" value={`${backtest.totalReturn > 0 ? "+" : ""}${backtest.totalReturn}%`} color={backtest.totalReturn >= 0 ? "text-emerald-400" : "text-red-400"} />
+                  <BacktestStat label="Max Drawdown" value={`${backtest.maxDrawdown.toFixed(1)}%`} color="text-red-400" />
                   <BacktestStat label="Avg Win" value={`+${backtest.avgWinPct}%`} color="text-emerald-400" />
                   <BacktestStat label="Avg Loss" value={`-${backtest.avgLossPct}%`} color="text-red-400" />
                 </div>
@@ -612,7 +663,8 @@ export default function AnalysisPage() {
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-[10px] text-muted-foreground">
                     {backtest.totalTrades} trades over {backtest.spanDays || "~100"} days
-                    ({backtest.totalBars} 1D candles)
+                    ({backtest.totalBars} {backtest.interval || "1D"} candles)
+                    {backtest.strategy && <> · <span className="text-foreground">{backtest.strategy}</span></>}
                   </span>
                 </div>
 
@@ -620,7 +672,7 @@ export default function AnalysisPage() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-[10px]">
                       <thead>
-                        <tr className="border-b border-border/30 text-muted-foreground">
+                        <tr className="border-b border-border/20 text-muted-foreground">
                           <th className="text-left py-1.5 pr-3 font-medium">Date</th>
                           <th className="text-left py-1.5 pr-3 font-medium">Signal</th>
                           <th className="text-right py-1.5 pr-3 font-medium">Entry</th>
@@ -633,7 +685,7 @@ export default function AnalysisPage() {
                       </thead>
                       <tbody>
                         {[...backtest.trades].reverse().slice(0, 20).map((trade: any, i: number) => (
-                          <tr key={i} className="border-b border-border/10 hover:bg-card/50">
+                          <tr key={i} className="border-b border-border/8 hover:bg-card/30">
                             <td className="py-1.5 pr-3 text-muted-foreground">
                               {new Date(trade.time * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" })}
                             </td>
@@ -663,7 +715,7 @@ export default function AnalysisPage() {
 
             {!backtestRequested && (
               <p className="text-[10px] text-muted-foreground">
-                Daily swing trading with v2 confluence scoring. Walk-forward backtest with compound returns.
+                Select a strategy and click Run to backtest {symbol.toUpperCase()} with that strategy's signal logic.
               </p>
             )}
           </Card>
@@ -675,8 +727,8 @@ export default function AnalysisPage() {
 
 function StatCard({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <Card className="border-border/40 bg-card/30 px-3 py-2">
-      <span className="text-[10px] text-muted-foreground uppercase tracking-wider block">{label}</span>
+    <Card className="border-border/20 px-3 py-2">
+      <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider block">{label}</span>
       <span className={`text-xs font-bold font-mono ${color || "text-foreground"}`}>{value}</span>
     </Card>
   );
@@ -708,8 +760,8 @@ function BiasIcon({ bias }: { bias: string }) {
 
 function BacktestStat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <Card className="border-border/40 bg-card/30 px-3 py-2">
-      <span className="text-[10px] text-muted-foreground uppercase tracking-wider block">{label}</span>
+    <Card className="border-border/20 px-3 py-2">
+      <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider block">{label}</span>
       <span className={`text-sm font-bold font-mono ${color || "text-foreground"}`}>{value}</span>
     </Card>
   );
