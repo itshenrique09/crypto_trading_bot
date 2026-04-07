@@ -997,7 +997,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
   // Dynamic coin list from MEXC (cached 5 min)
   let cachedTopCoins: { coins: string[]; fetchedAt: number } | null = null;
-  const STABLECOINS = new Set(["USDC", "USDT", "DAI", "BUSD", "FDUSD", "TUSD", "USDD", "USDP", "USD1", "PYUSD", "GUSD", "FRAX", "LUSD", "SUSD", "EURC", "EURT", "AEUR"]);
+  const STABLECOINS = new Set(["USDC", "USDT", "DAI", "BUSD", "FDUSD", "TUSD", "USDD", "USDP", "USD1", "PYUSD", "GUSD", "FRAX", "LUSD", "SUSD", "EURC", "EURT", "AEUR", "USDE", "USDS", "CUSD", "USDX", "USDJ", "USTC", "USDB"]);
 
   async function getTopCoinsByVolume(count = 30): Promise<string[]> {
     if (cachedTopCoins && Date.now() - cachedTopCoins.fetchedAt < 5 * 60 * 1000) {
@@ -1075,6 +1075,24 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch { /* silent */ }
   }
 
+  // Helper: determine daily trend for a coin using 1D EMA50
+  async function getDailyTrend(symbol: string): Promise<"up" | "down" | "neutral"> {
+    try {
+      const dailyCandles = await fetchBinanceKlines(symbol, "1d", 55);
+      if (dailyCandles.length < 52) return "neutral";
+      const closes = dailyCandles.map(c => c.close);
+      // EMA50
+      const k = 2 / 51;
+      let ema = closes[0];
+      for (let i = 1; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+      const last = closes[closes.length - 1];
+      const dist = (last - ema) / ema;
+      if (dist > 0.01) return "up";
+      if (dist < -0.01) return "down";
+      return "neutral";
+    } catch { return "neutral"; }
+  }
+
   async function paperScan() {
     try {
       const mode = await getSetting("mode");
@@ -1094,6 +1112,10 @@ export async function registerRoutes(server: Server, app: Express) {
           .map(e => `${e.symbol}:${e.strategy}`)
       );
 
+      // Limit max open trades to avoid overexposure
+      const totalOpen = journal.filter(e => e.mode === "paper" && e.outcome === "open").length;
+      if (totalOpen >= 10) return; // Max 10 open trades at once
+
       // Group strategies by interval to avoid fetching same candles twice
       const byInterval: Record<string, Strategy[]> = {};
       for (const s of strategies) {
@@ -1102,11 +1124,17 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       for (const sym of coins) {
+        // Daily trend filter — fetch once per coin
+        const dailyTrend = await getDailyTrend(sym);
+
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
 
           for (const strat of strats) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
+
+            // Re-check total open trades (may have added new ones this scan)
+            if (totalOpen + openPairs.size >= 10) break;
 
             try {
               // Lazy-fetch candles for this interval
@@ -1118,6 +1146,24 @@ export async function registerRoutes(server: Server, app: Express) {
 
               const signal = strat.analyze(candles);
               if (!signal) continue;
+
+              // ── DAILY TREND FILTER ──
+              // Block contra-trend trades unless they have very high confidence
+              const isContraTrend =
+                (signal.direction === "LONG" && dailyTrend === "down") ||
+                (signal.direction === "SHORT" && dailyTrend === "up");
+
+              if (isContraTrend) {
+                // v2-swing: needs STRONG signal (score ≥ 6) to override
+                if (strat.id === "v2-swing" && Math.abs(signal.confluenceScore) < 6) continue;
+                // breakout/mean-reversion: needs ≥ 75 confidence to override
+                if (strat.id !== "v2-swing" && signal.confidence < 75) continue;
+              }
+
+              // ── MINIMUM R:R CHECK ──
+              const risk = Math.abs(signal.entry - signal.stopLoss);
+              const reward = Math.abs(signal.takeProfit1 - signal.entry);
+              if (risk <= 0 || reward / risk < 1.5) continue; // Minimum 1.5:1 R:R
 
               await addJournalEntry({
                 symbol: sym,

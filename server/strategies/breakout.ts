@@ -13,13 +13,16 @@ export const breakoutStrategy: Strategy = {
 
     if (sig.type === "NONE") return null;
 
+    // Require minimum 60% confidence to avoid weak breakouts
+    if (sig.confidence < 60) return null;
+
     return {
       direction: sig.type,
       entry: sig.entry,
       stopLoss: sig.stopLoss,
       takeProfit1: sig.takeProfit,
       confidence: sig.confidence,
-      confluenceScore: Math.round(sig.confidence * 10),
+      confluenceScore: sig.confidence,  // Already 0-100 scale
       reason: sig.reason,
     };
   },

@@ -4,7 +4,7 @@ import { meanReversionSignal, type OHLCV } from "../analysis";
 export const meanReversionStrategy: Strategy = {
   id: "mean-reversion",
   name: "Mean Reversion",
-  description: "Bollinger Bands + RSI(7) oversold/overbought — entradas na reversão à média com BB midline como TP.",
+  description: "Bollinger Bands + RSI(7) oversold/overbought — fades overextended moves targeting BB midline.",
   interval: "4h",
   minCandles: 30,
 
@@ -13,13 +13,16 @@ export const meanReversionStrategy: Strategy = {
 
     if (sig.type === "NONE") return null;
 
+    // Require minimum 60% confidence to avoid weak reversals
+    if (sig.confidence < 60) return null;
+
     return {
       direction: sig.type,
       entry: sig.entry,
       stopLoss: sig.stopLoss,
       takeProfit1: sig.takeProfit,
       confidence: sig.confidence,
-      confluenceScore: Math.round(sig.confidence * 10),
+      confluenceScore: sig.confidence,  // Already 0-100 scale
       reason: sig.reason,
     };
   },

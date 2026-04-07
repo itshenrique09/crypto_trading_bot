@@ -853,9 +853,9 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
 
   let type: TradeSignal["type"];
   if      (score >= 6)  type = "STRONG_BUY";
-  else if (score >= 3)  type = "BUY";
+  else if (score >= 4)  type = "BUY";
   else if (score <= -6) type = "STRONG_SELL";
-  else if (score <= -3) type = "SELL";
+  else if (score <= -4) type = "SELL";
   else                  type = "HOLD";
 
   const confidence = Math.min(95, Math.max(10, Math.abs(score) * 9 + 10));
