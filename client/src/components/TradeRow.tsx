@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
-import { Trash2 } from "lucide-react";
+import { Trash2, BarChart2 } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor, getStratName } from "@/lib/types";
+import TradeChartModal from "./TradeChartModal";
 
 interface TradeRowProps {
   entry: JournalEntry;
@@ -22,6 +24,7 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
   const sc = getStratColor(entry.strategy || "confluence-swing");
   const isOpen = entry.outcome === "open";
   const pnl = isOpen ? price?.unrealizedPnl : entry.pnl_pct;
+  const [showChart, setShowChart] = useState(false);
 
   return (
     <div className="p-4 hover:bg-card/20 transition-colors">
@@ -66,10 +69,13 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
             </span>
           ) : null}
           <span className="text-[10px] text-muted-foreground block">
-            {new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+            {new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
           </span>
         </div>
 
+        <button onClick={() => setShowChart(true)} className="text-muted-foreground/40 hover:text-purple-400 transition-colors p-1.5 shrink-0" title="View chart">
+          <BarChart2 className="w-3.5 h-3.5" />
+        </button>
         <button onClick={() => onDelete(entry.id)} className="text-muted-foreground/40 hover:text-red-400 transition-colors p-1.5 shrink-0">
           <Trash2 className="w-3.5 h-3.5" />
         </button>
@@ -132,11 +138,18 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
       {!isOpen && entry.exit_price != null && (
         <div className="flex items-center gap-3 mt-2 ml-12 text-xs text-muted-foreground">
           <span>Exit: <span className="font-mono text-foreground">${formatPrice(entry.exit_price)}</span></span>
-          {entry.closed_at && <span>{new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>}
+          {entry.closed_at && (
+            <span>
+              {new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
         </div>
       )}
 
       {entry.notes && <p className="text-xs text-muted-foreground mt-2 ml-12 italic">"{entry.notes}"</p>}
+
+      {/* Trade chart modal */}
+      {showChart && <TradeChartModal entry={entry} onClose={() => setShowChart(false)} />}
     </div>
   );
 }

@@ -9,9 +9,10 @@ import {
   ArrowLeft, BookOpen, CheckCircle2, XCircle, Clock,
   TrendingUp, TrendingDown, Minus, Zap, Radio,
   Trash2, Filter, AlertTriangle, FlaskConical, Play, Square, Loader2, Activity,
-  ToggleLeft, ToggleRight
+  ToggleLeft, ToggleRight, BarChart2
 } from "lucide-react";
 import { formatPrice, getSignalColor } from "@/lib/utils";
+import TradeChartModal from "@/components/TradeChartModal";
 
 interface PaperPrice {
   id: number;
@@ -69,6 +70,7 @@ export default function JournalPage() {
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [closingId, setClosingId] = useState<number | null>(null);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
+  const [chartEntry, setChartEntry] = useState<any | null>(null);
 
   // Fetch current mode
   const { data: modeData } = useQuery({
@@ -498,6 +500,14 @@ export default function JournalPage() {
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </span>
+                {/* Chart */}
+                <button
+                  onClick={() => setChartEntry(entry)}
+                  className="text-muted-foreground/50 hover:text-purple-400 transition-colors p-1"
+                  title="View chart"
+                >
+                  <BarChart2 className="w-3 h-3" />
+                </button>
                 {/* Delete */}
                 <button
                   onClick={() => deleteMutation.mutate(entry.id)}
@@ -656,7 +666,7 @@ export default function JournalPage() {
                 {entry.followed === "yes" && entry.mode === "signal" && <span className="text-emerald-400">Followed</span>}
                 {entry.followed === "no" && <span className="text-muted-foreground">Ignored</span>}
                 {entry.closed_at && (
-                  <span>Closed: {new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                  <span>Closed: {new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                 )}
               </div>
             )}
@@ -669,6 +679,9 @@ export default function JournalPage() {
           );
         })}
       </main>
+
+      {/* Trade chart modal */}
+      {chartEntry && <TradeChartModal entry={chartEntry} onClose={() => setChartEntry(null)} />}
     </div>
   );
 }

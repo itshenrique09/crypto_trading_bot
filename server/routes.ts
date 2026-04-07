@@ -1392,6 +1392,45 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Trade chart data ─────────────────────────────────────────────
+  // Returns OHLCV candles around a trade's entry/exit for chart display
+  app.get("/api/trade-chart/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const from     = parseInt(req.query.from as string);   // unix seconds
+      const to       = parseInt(req.query.to   as string);   // unix seconds
+      const interval = (req.query.interval as string) || "4h";
+
+      if (isNaN(from)) return res.status(400).json({ error: "from required" });
+
+      // Fetch candles: 60 before entry + window after (up to now or exit + 20 bars)
+      // Use startTime/endTime Binance params to get the right window
+      const msPerBar: Record<string, number> = { "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000 };
+      const barMs  = msPerBar[interval] ?? 14400000;
+      const before = 60;  // candles before entry
+      const after  = 30;  // candles after exit (or after entry if still open)
+
+      const startMs = (from * 1000) - before * barMs;
+      const endMs   = to ? (to * 1000) + after * barMs : Date.now() + after * barMs;
+      const limit   = Math.min(Math.ceil((endMs - startMs) / barMs) + 5, 500);
+
+      const pair = getBinanceSymbol(symbol);
+      const url  = `${BINANCE_BASE}/klines?symbol=${pair}&interval=${interval}&startTime=${startMs}&limit=${limit}`;
+      const data: any[][] = await fetchJSON(url);
+
+      const candles = data.map(k => ({
+        time:   Math.floor(k[0] / 1000),
+        open:   parseFloat(k[1]),
+        high:   parseFloat(k[2]),
+        low:    parseFloat(k[3]),
+        close:  parseFloat(k[4]),
+        volume: parseFloat(k[5]),
+      }));
+
+      res.json(candles);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   // Keep tick for manual triggers
   app.post("/api/paper/tick", async (_req, res) => {
     try {
