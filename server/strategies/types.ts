@@ -22,6 +22,11 @@ export interface Strategy {
   interval: string;
   /** Minimum candles required */
   minCandles: number;
+  /**
+   * Symbols that backtest well with this strategy (500-day 4H backtest).
+   * Used by the UI to show "best fit" coins for each strategy.
+   */
+  preferredSymbols?: string[];
   /** Analyze candles and return a signal or null */
   analyze(candles: OHLCV[]): StrategySignal | null;
 }

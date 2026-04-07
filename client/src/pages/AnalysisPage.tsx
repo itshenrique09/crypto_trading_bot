@@ -38,7 +38,7 @@ export default function AnalysisPage() {
   const [, marketParams] = useRoute("/market/:symbol");
   const [, analyzeParams] = useRoute("/analyze/:symbol");
   const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
-  const [backtestTab, setBacktestTab] = useState<"v2-swing" | "mean-reversion" | "breakout">("v2-swing");
+  const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest">("confluence-swing");
   const [backtestRequested, setBacktestRequested] = useState(false);
   const [signalLogged, setSignalLogged] = useState(false);
 
@@ -77,9 +77,9 @@ export default function AnalysisPage() {
 
   // Backtests — one per strategy
   const backtestEndpoints: Record<string, string> = {
-    "v2-swing": `/api/backtest/${symbol}`,
-    "mean-reversion": `/api/backtest-meanrev/${symbol}`,
-    "breakout": `/api/backtest-breakout/${symbol}`,
+    "confluence-swing": `/api/backtest/${symbol}`,
+    "smc": `/api/backtest-smc/${symbol}`,
+    "break-retest": `/api/backtest-breakretest/${symbol}`,
   };
 
   const { data: backtest, isLoading: backtestLoading } = useQuery({
@@ -612,9 +612,9 @@ export default function AnalysisPage() {
                 {/* Strategy tabs for backtest */}
                 <div className="flex items-center bg-card/40 border border-border/20 rounded-lg p-0.5">
                   {[
-                    { id: "v2-swing" as const, label: "v2 Swing" },
-                    { id: "mean-reversion" as const, label: "Mean Rev" },
-                    { id: "breakout" as const, label: "Breakout" },
+                    { id: "confluence-swing" as const, label: "Confluence Swing" },
+                    { id: "smc" as const, label: "SMC" },
+                    { id: "break-retest" as const, label: "Break & Retest" },
                   ].map(tab => {
                     const sc = getStratColor(tab.id);
                     return (
@@ -651,9 +651,11 @@ export default function AnalysisPage() {
 
             {backtest && !backtestLoading && (
               <>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 mb-4">
                   <BacktestStat label="Win Rate" value={`${backtest.winRate}%`} color={backtest.winRate >= 50 ? "text-emerald-400" : "text-red-400"} />
                   <BacktestStat label="Profit Factor" value={backtest.profitFactor >= 999 ? "∞" : backtest.profitFactor.toFixed(2)} color={backtest.profitFactor >= 1.5 ? "text-emerald-400" : backtest.profitFactor >= 1 ? "text-yellow-400" : "text-red-400"} />
+                  <BacktestStat label="Expectancy" value={backtest.expectancy != null ? `${backtest.expectancy > 0 ? "+" : ""}${backtest.expectancy.toFixed(3)}%` : "—"} color={backtest.expectancy > 0 ? "text-emerald-400" : "text-red-400"} />
+                  <BacktestStat label="Sharpe" value={backtest.sharpe != null ? backtest.sharpe.toFixed(2) : "—"} color={backtest.sharpe >= 0.5 ? "text-emerald-400" : backtest.sharpe >= 0 ? "text-yellow-400" : "text-red-400"} />
                   <BacktestStat label="Total Return" value={`${backtest.totalReturn > 0 ? "+" : ""}${backtest.totalReturn}%`} color={backtest.totalReturn >= 0 ? "text-emerald-400" : "text-red-400"} />
                   <BacktestStat label="Max Drawdown" value={`${backtest.maxDrawdown.toFixed(1)}%`} color="text-red-400" />
                   <BacktestStat label="Avg Win" value={`+${backtest.avgWinPct}%`} color="text-emerald-400" />
@@ -666,6 +668,11 @@ export default function AnalysisPage() {
                     ({backtest.totalBars} {backtest.interval || "1D"} candles)
                     {backtest.strategy && <> · <span className="text-foreground">{backtest.strategy}</span></>}
                   </span>
+                  {backtest.totalTrades < 30 && (
+                    <span className="text-[10px] text-yellow-400 font-medium">
+                      ⚠️ {backtest.totalTrades < 15 ? "Insufficient" : "Low"} sample (N={backtest.totalTrades})
+                    </span>
+                  )}
                 </div>
 
                 {backtest.trades?.length > 0 && (

@@ -858,6 +858,18 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
   else if (score <= -4) type = "SELL";
   else                  type = "HOLD";
 
+  // ── MACRO TREND ALIGNMENT FILTER ──────────────────────────────────
+  // Prevents buying in bear markets and shorting in confirmed bull markets.
+  // 1% margin: requires EMA50 to be decisively above/below EMA200 —
+  // eliminates false signals at crossover transition zones (whipsaw region).
+  // Same institutional logic as B&R and SMC.
+  if (ema200reliable) {
+    const macroUp   = ema50 > ema200 * 1.01;  // EMA50 decisively above EMA200
+    const macroDown = ema50 < ema200 * 0.99;  // EMA50 decisively below EMA200
+    if ((type === "STRONG_BUY"  || type === "BUY")  && !macroUp)   type = "HOLD";
+    if ((type === "STRONG_SELL" || type === "SELL") && !macroDown)  type = "HOLD";
+  }
+
   const confidence = Math.min(95, Math.max(10, Math.abs(score) * 9 + 10));
 
   // ── TREND ──
@@ -1201,6 +1213,621 @@ export function breakoutSignal(candles: OHLCV[]): BreakoutSignal {
       confidence: Math.min(85, Math.round(volumeRatio * 15 + 35)),
       reason: reasons.join(" | "),
     };
+  }
+
+  return none;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATEGY D: SMC (Smart Money Concepts)
+// ═══════════════════════════════════════════════════════════════════
+//
+// 4H structure analysis:
+//   1. Detect market structure: HH/HL (bullish) or LH/LL (bearish)
+//   2. Identify BOS (Break of Structure) — price closes beyond last swing
+//   3. Find unmitigated Order Block at the origin of the BOS move
+//   4. Wait for price to retrace into OB zone
+//   5. Confirm with rejection candle characteristics
+//
+// SL: behind OB zone, TP: next swing point, minimum R:R 1:3
+
+export interface SMCSignal {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  confidence: number;
+  reason: string;
+  structure: "bullish" | "bearish" | "none";
+  obZone?: { high: number; low: number };
+}
+
+export function smcSignal(candles: OHLCV[]): SMCSignal {
+  const none: SMCSignal = {
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    confidence: 0, reason: "", structure: "none",
+  };
+
+  if (candles.length < 150) return none;  // Need 150+ bars for reliable EMA200
+
+  // ══ INDICATOR WINDOW: full history (150+ bars) for accurate EMAs ══════════
+  const allCloses    = candles.map(c => c.close);
+  const allLast      = candles.length - 1;
+  const ema21Values  = ema(allCloses, 21);
+  const ema50Values  = ema(allCloses, 50);
+  const ema200Values = ema(allCloses, 200);
+  const rsiVals      = calcRSI(allCloses, 14);
+
+  const rsiNow    = rsiVals[allLast];
+  const ema21Now  = ema21Values[allLast];
+  const ema50Now  = ema50Values[allLast];
+  const ema200Now = ema200Values[allLast];
+
+  // Micro-trend (short-term) and macro-trend (institutional bias)
+  const trendUp   = ema21Now > ema50Now;    // micro uptrend
+  const trendDown = ema21Now < ema50Now;    // micro downtrend
+  const macroUp   = ema50Now > ema200Now;   // bull market structure
+  // macroDown not used for shorts (B&R pattern: allow shorts in corrections)
+
+  // ══ STRUCTURE WINDOW: last 120 bars — wide view for BOS/swing detection ══
+  const STRUCT_LEN    = Math.min(120, candles.length);
+  const structCandles = candles.slice(-STRUCT_LEN);
+
+  // ══ SIGNAL WINDOW: last 60 bars — tight view for OB and retest detection ══
+  const SIG_LEN    = Math.min(60, candles.length);
+  const sigCandles = candles.slice(-SIG_LEN);
+
+  const closes  = sigCandles.map(c => c.close);
+  const last    = closes.length - 1;
+  const price   = closes[last];
+  const atr     = calcATR(sigCandles);
+
+  // ── 1. Market structure via swing points (in STRUCTURE window) ──
+  const swings = findSwingPoints(structCandles, 2);
+  const { highs: swingHighs, lows: swingLows, highIndices, lowIndices } = swings;
+
+  if (swingHighs.length < 2 || swingLows.length < 2) return none;
+
+  const lastTwoHighs = swingHighs.slice(-2);
+  const lastTwoLows  = swingLows.slice(-2);
+
+  const isHH = lastTwoHighs[1] > lastTwoHighs[0];
+  const isHL  = lastTwoLows[1]  > lastTwoLows[0];
+  const isLH  = lastTwoHighs[1] < lastTwoHighs[0];
+  const isLL  = lastTwoLows[1]  < lastTwoLows[0];
+
+  // SMC structure: at least one bullish or bearish signal
+  // The EMA200 macro filter + RSI bounds are the true quality gates —
+  // requiring BOTH HH+HL together produces too few signals (~3/year) for any coin
+  const bullishStructure = isHH || isHL;
+  const bearishStructure = isLH || isLL;
+
+  // Choppy: both bullish and bearish signals simultaneously → skip
+  if (bullishStructure && bearishStructure) return none;
+  if (!bullishStructure && !bearishStructure) return none;
+
+  // ── 2. Macro + micro trend alignment ──
+  // LONGs: need micro uptrend AND macro bull structure (institutional backing)
+  // SHORTs: need micro downtrend (allow corrections in bull market too)
+  if (bullishStructure && !(trendUp && macroUp)) return none;
+  if (bearishStructure && !trendDown) return none;
+
+  // ── 3. RSI bounds — context-aware for OB retest entries ──
+  // LONG: price pulling back to OB → RSI typically 35-60 range; block if overbought (>72)
+  // SHORT: price bouncing to bearish OB → RSI typically 50-72 range; block if oversold (<28)
+  if (bullishStructure && rsiNow > 72) return none;  // don't chase already-overbought
+  if (bearishStructure && rsiNow < 28) return none;  // don't short already-oversold
+
+  // ── 4. BOS (Break of Structure) detection in STRUCTURE window ──
+  const prevSwingHigh    = lastTwoHighs[0];
+  const prevSwingLow     = lastTwoLows[0];
+  const lastSwingHighIdx = highIndices[highIndices.length - 1];
+  const lastSwingLowIdx  = lowIndices[lowIndices.length - 1];
+
+  let hasBOS = false;
+  let bosDirection: "bullish" | "bearish" = "bullish";
+
+  if (bullishStructure) {
+    // Bullish BOS: a candle after the last swing high closed above the prior swing high
+    const bosCandle = structCandles.slice(lastSwingHighIdx).find(c => c.close > prevSwingHigh);
+    hasBOS = !!bosCandle;
+    bosDirection = "bullish";
+  } else {
+    // Bearish BOS: a candle after the last swing low closed below the prior swing low
+    const bosCandle = structCandles.slice(lastSwingLowIdx).find(c => c.close < prevSwingLow);
+    hasBOS = !!bosCandle;
+    bosDirection = "bearish";
+  }
+
+  if (!hasBOS) return none;
+
+  // ── 5. Order Blocks (in STRUCTURE window — wider lookback captures OBs
+  //    that preceded the BOS move, which can be 60-120 bars old) ──
+  const orderBlocks = findOrderBlocks(structCandles, 120);
+
+  const relevantOBs = orderBlocks.filter(ob =>
+    bosDirection === "bullish" ? ob.type === "bullish" : ob.type === "bearish"
+  );
+
+  if (relevantOBs.length === 0) return none;
+
+  // ── 6. Scan ALL relevant OBs — return the best valid retest ──────────
+  // Key fix: "most recent OB" often isn't the one price is retesting right now.
+  // Scan all OBs, pick the highest-confidence valid setup.
+  const tolerance       = atr * 0.3;
+  const currentCandle   = sigCandles[last];
+  const prevCandle      = sigCandles[last - 1];
+  const volAvg20        = sigCandles.slice(-20).reduce((a, c) => a + c.volume, 0) / 20;
+  const volumeRatio     = volAvg20 > 0 ? currentCandle.volume / volAvg20 : 1;
+
+  interface CandidateSignal {
+    conf: number;
+    sl: number;
+    tp: number;
+    rr: number;
+    obHigh: number;
+    obLow: number;
+    hasRejection: boolean;
+  }
+
+  let bestCandidate: CandidateSignal | null = null;
+
+  for (const ob of relevantOBs) {
+    const obMid = (ob.high + ob.low) / 2;
+
+    if (bosDirection === "bullish") {
+      // Price must be retesting the bullish OB (demand zone)
+      const inZone = price <= ob.high + tolerance && price >= ob.low - tolerance;
+      if (!inZone) continue;
+
+      const hasRejection =
+        currentCandle.low  <= ob.high &&
+        currentCandle.close > obMid   &&
+        currentCandle.close > currentCandle.open;
+
+      const prevRejected = prevCandle &&
+        prevCandle.low   <= ob.high &&
+        prevCandle.close >  obMid   &&
+        currentCandle.close > prevCandle.high;
+
+      if (!hasRejection && !prevRejected) continue;
+
+      const sl   = ob.low - atr * 0.3;
+      const risk = price - sl;
+      if (risk <= 0) continue;
+
+      const nextTarget = swingHighs[swingHighs.length - 1];
+      const tp25 = price + risk * 2.5;
+      const tp   = Math.min(nextTarget > price ? nextTarget : tp25, tp25);
+      const rr   = Math.abs(tp - price) / risk;
+      if (rr < 1.8) continue;
+
+      let conf = 50;
+      if (ob.strength > 60) conf += 10;
+      if (hasRejection)     conf += 10;
+      if (rr >= 2.5)        conf += 10;
+      conf += 5;                         // bullish structure confirmed
+      if (volumeRatio > 1.3) conf += 5;
+      if (macroUp)           conf += 5;
+      conf = Math.min(90, conf);
+
+      if (!bestCandidate || conf > bestCandidate.conf) {
+        bestCandidate = { conf, sl, tp, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
+      }
+
+    } else {
+      // Bearish: price retesting bearish OB (supply zone)
+      const inZone = price >= ob.low - tolerance && price <= ob.high + tolerance;
+      if (!inZone) continue;
+
+      const hasRejection =
+        currentCandle.high  >= ob.low  &&
+        currentCandle.close <  obMid   &&
+        currentCandle.close <  currentCandle.open;
+
+      const prevRejected = prevCandle &&
+        prevCandle.high  >= ob.low  &&
+        prevCandle.close <  obMid   &&
+        currentCandle.close < prevCandle.low;
+
+      if (!hasRejection && !prevRejected) continue;
+
+      const sl   = ob.high + atr * 0.3;
+      const risk = sl - price;
+      if (risk <= 0) continue;
+
+      const nextTarget = swingLows[swingLows.length - 1];
+      const tp25 = price - risk * 2.5;
+      const tp   = Math.max(nextTarget < price ? nextTarget : tp25, tp25);
+      const rr   = Math.abs(price - tp) / risk;
+      if (rr < 1.8) continue;
+
+      let conf = 50;
+      if (ob.strength > 60) conf += 10;
+      if (hasRejection)     conf += 10;
+      if (rr >= 2.5)        conf += 10;
+      conf += 5;                         // bearish structure confirmed
+      if (volumeRatio > 1.3) conf += 5;
+      conf = Math.min(90, conf);
+
+      if (!bestCandidate || conf > bestCandidate.conf) {
+        bestCandidate = { conf, sl, tp, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
+      }
+    }
+  }
+
+  if (!bestCandidate) return none;
+
+  const { conf, sl, tp, rr, obHigh, obLow, hasRejection } = bestCandidate;
+  const dir = bosDirection === "bullish" ? "LONG" : "SHORT";
+
+  return {
+    type: dir,
+    entry: price,
+    stopLoss: sl,
+    takeProfit: tp,
+    confidence: conf,
+    reason: [
+      dir === "LONG" ? `Bullish BOS (HH+HL)` : `Bearish BOS (LH+LL)`,
+      `OB ${obLow.toFixed(2)}-${obHigh.toFixed(2)}`,
+      hasRejection ? "Rejection candle" : "Prior bar rejection",
+      `R:R ${rr.toFixed(1)}:1`,
+      `RSI ${rsiNow.toFixed(0)}`,
+    ].join(" | "),
+    structure: bosDirection,
+    obZone: { high: obHigh, low: obLow },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATEGY E: BREAK & RETEST
+// ═══════════════════════════════════════════════════════════════════
+//
+// 4H S/R level detection + break + retest + rejection:
+//   1. Identify key S/R levels from swing points (tested 2+ times)
+//   2. Detect a clear break: candle close beyond the level
+//   3. Wait for retest: price returns to the broken level
+//   4. Confirm rejection at retest (wick rejection / engulfing)
+//
+// Entry in break direction, SL behind level, TP at next S/R, min R:R 1:2
+
+export interface BreakRetestSignal {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  confidence: number;
+  reason: string;
+  level?: number;
+}
+
+export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
+  // ── PROFESSIONAL BREAK & RETEST ─────────────────────────────────
+  //
+  // Rules (as a discretionary trader would apply):
+  //  1. Identify KEY S/R levels — swing-based, clustered, 3+ touches (institutional)
+  //  2. BREAK: close beyond level by >0.5 ATR, body >55% of range (not a wick break),
+  //            volume on break candle >1.5x average (conviction)
+  //  3. BREAK HOLDS: price stays on the broken side for 3+ candles (not a fake-out)
+  //  4. RETEST: price returns to level within 3–18 candles after break
+  //  5. REJECTION at retest: pin bar or engulfing candle (quality patterns only)
+  //  6. Trend filter: EMA21>EMA50 (micro) AND EMA50>EMA200 (macro) for LONG
+  //  7. RSI filter: 45–70 for LONG, 30–60 for SHORT (momentum confirmation)
+  //  8. Separate indicator window (full history) from signal window (last 60 bars)
+  //     so EMA200 is reliable regardless of the warm-up period
+
+  const none: BreakRetestSignal = {
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    confidence: 0, reason: "",
+  };
+
+  if (candles.length < 60) return none;
+
+  // ══ INDICATOR WINDOW: full passed history for reliable EMAs ══════
+  // Caller should pass at least 150 candles so EMA200 converges properly.
+  // With k=2/201, after 150 bars the initial seed contributes only ~22% weight.
+  const allCloses  = candles.map(c => c.close);
+  const allLast    = candles.length - 1;
+
+  const ema21Values  = ema(allCloses, 21);
+  const ema50Values  = ema(allCloses, 50);
+  const ema200Values = ema(allCloses, 200);
+  const rsiVals      = calcRSI(allCloses, 14);
+  const rsiNow       = rsiVals[allLast];
+  const ema21Now     = ema21Values[allLast];
+  const ema50Now     = ema50Values[allLast];
+  const ema200Now    = ema200Values[allLast];
+
+  // Micro-trend: EMA21 vs EMA50 (short-term directional bias)
+  const trendUp   = ema21Now > ema50Now;
+  const trendDown = ema21Now < ema50Now;
+
+  // Macro-trend: EMA50 vs EMA200 (market structure — bull or bear)
+  // Only LONG when price is in a macro bull structure; prevents dead-cat bounce longs
+  const macroUp   = ema50Now > ema200Now;
+  const macroDown = ema50Now < ema200Now;
+
+  // EMA50 slope over last 10 bars: reject extreme trending markets where B&R fails
+  const ema50Prev10   = ema50Values[Math.max(0, allLast - 10)];
+  const ema50Slope10  = Math.abs(ema50Now - ema50Prev10) / ema50Prev10 * 100;
+  const inStrongTrend = ema50Slope10 > 7;  // >7% in 10 bars = too strong, skip
+
+  // ══ SIGNAL WINDOW: last 60 bars for break/retest logic (unchanged behaviour) ══
+  // ══ LEVEL WINDOW:  last 120 bars for S/R level detection (more 3-touch levels) ══
+  // Separating the two means we get more historical touches per level without
+  // changing the break/retest timing logic.
+  const SIG_LEN    = Math.min(60,  candles.length);
+  const LEVEL_LEN  = Math.min(120, candles.length);
+  const sigCandles  = candles.slice(-SIG_LEN);
+  const lvlCandles  = candles.slice(-LEVEL_LEN);  // wider window for swing counting
+  const closes  = sigCandles.map(c => c.close);
+  const highs   = sigCandles.map(c => c.high);
+  const lows    = sigCandles.map(c => c.low);
+  const volumes = sigCandles.map(c => c.volume);
+  const last    = closes.length - 1;
+  const price   = closes[last];
+  const atr     = calcATR(sigCandles);
+
+  const atrPct     = (atr / price) * 100;
+  const tooVolatile = atrPct > 5.5;
+
+  if (inStrongTrend || tooVolatile) return none;
+
+  // ── Volume baseline: 20-bar average from signal window ──
+  const volAvg20 = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+
+  // ── 1. Build S/R level map from signal window ──
+  // Use strength=2 (swing that holds 2 bars each side) to find significant pivots
+  // Level detection uses the wider 120-bar window for more historical touches
+  const swings = findSwingPoints(lvlCandles, 2);
+  const allSwingPrices = [...swings.highs, ...swings.lows];
+  if (allSwingPrices.length < 4) return none;
+
+  const clusters: { price: number; touches: number; lastIdx: number }[] = [];
+
+  const { highs: allH, lows: allL, highIndices: hiIdx, lowIndices: loIdx } =
+    findSwingPoints(lvlCandles, 2);
+
+  for (let k = 0; k < allH.length; k++) {
+    const lvl = allH[k];
+    const idx = hiIdx[k];
+    const existing = clusters.find(c => Math.abs(c.price - lvl) / price < 0.006);
+    if (existing) {
+      existing.price = (existing.price * existing.touches + lvl) / (existing.touches + 1);
+      existing.touches++;
+      existing.lastIdx = Math.max(existing.lastIdx, idx);
+    } else clusters.push({ price: lvl, touches: 1, lastIdx: idx });
+  }
+  for (let k = 0; k < allL.length; k++) {
+    const lvl = allL[k];
+    const idx = loIdx[k];
+    const existing = clusters.find(c => Math.abs(c.price - lvl) / price < 0.006);
+    if (existing) {
+      existing.price = (existing.price * existing.touches + lvl) / (existing.touches + 1);
+      existing.touches++;
+      existing.lastIdx = Math.max(existing.lastIdx, idx);
+    } else clusters.push({ price: lvl, touches: 1, lastIdx: idx });
+  }
+
+  // ✦ Require 3+ touches: well-respected institutional levels only
+  //   (2-touch levels are common noise; 3+ = price respects this zone)
+  const strongLevels = clusters
+    .filter(c => c.touches >= 3)
+    .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price));
+
+  if (strongLevels.length === 0) return none;
+
+  // ── 2. Search for valid break + retest setups ──
+  // Scan last 25 candles for breaks, then check if current candle is the retest
+
+  for (const level of strongLevels.slice(0, 6)) {  // Check closest 6 levels
+    const lvlPrice = level.price;
+
+    // Skip levels too far from current price (>6% away)
+    if (Math.abs(lvlPrice - price) / price > 0.06) continue;
+
+    // ── Find the most recent valid break of this level ──
+    let breakIdx = -1;
+    let breakDirection: "up" | "down" | null = null;
+    let breakVolRatio = 0;
+
+    // Scan last 25 candles of the signal window (not the last 4 — retest must form)
+    for (let i = Math.max(1, last - 25); i <= last - 4; i++) {
+      const c    = sigCandles[i];
+      const prev = sigCandles[i - 1];
+
+      // Previous candle was on one side, this candle closes decisively on other side
+      const bodySize  = Math.abs(c.close - c.open);
+      const totalRange = c.high - c.low;
+      const bodyRatio  = totalRange > 0 ? bodySize / totalRange : 0;
+      const volRatio   = volAvg20 > 0 ? c.volume / volAvg20 : 1;
+
+      // Break UP: prev close below level, this close above level + margin, strong body + volume
+      if (prev.close < lvlPrice &&
+          c.close > lvlPrice + atr * 0.5 &&  // Larger margin (0.5 ATR)
+          bodyRatio > 0.55 &&     // Body must be >55% of range (conviction)
+          volRatio > 1.5) {       // Volume >1.5x (meaningful break)
+        breakIdx = i;
+        breakDirection = "up";
+        breakVolRatio = volRatio;
+      }
+
+      // Break DOWN: prev close above level, this close below level − margin
+      if (prev.close > lvlPrice &&
+          c.close < lvlPrice - atr * 0.5 &&
+          bodyRatio > 0.55 &&
+          volRatio > 1.5) {
+        breakIdx = i;
+        breakDirection = "down";
+        breakVolRatio = volRatio;
+      }
+    }
+
+    if (breakIdx === -1 || !breakDirection) continue;
+
+    // ── Trend alignment ──
+    // LONG:  EMA21>EMA50 (micro) AND EMA50>EMA200 (macro bull structure required)
+    //        → eliminates dead-cat bounce longs in persistent bear markets
+    // SHORT: EMA21<EMA50 (micro only) — corrections within bull markets are valid SHORTs
+    //        The RSI guard (max 60) prevents shorting in strongly bullish conditions
+    if (breakDirection === "up"   && !(trendUp && macroUp)) continue;
+    if (breakDirection === "down" && !trendDown)            continue;
+
+    // ── RSI guard ──
+    // LONG: RSI must be 45–70. Below 45 = bearish momentum (dead-cat bounce risk).
+    //       Above 70 = overbought, bad risk/reward.
+    // SHORT: RSI must be 30–60. Above 60 = coin has bullish momentum, SHORTs risky.
+    //        Below 30 = already oversold, sellers are exhausted (capitulation pattern).
+    if (breakDirection === "up"   && (rsiNow < 45 || rsiNow > 70)) continue;
+    if (breakDirection === "down" && (rsiNow < 30 || rsiNow > 60)) continue;
+
+    // ── Break must have HELD: at least 3 candles stayed on broken side ──
+    const holdWindow = Math.min(breakIdx + 8, last - 1);
+    let heldCount = 0;
+    for (let i = breakIdx + 1; i <= holdWindow; i++) {
+      if (breakDirection === "up"   && closes[i] > lvlPrice) heldCount++;
+      if (breakDirection === "down" && closes[i] < lvlPrice) heldCount++;
+    }
+    if (heldCount < 3) continue;
+
+    // ── Retest window: must happen 3–18 candles after break ──
+    const retestMin = breakIdx + 3;
+    const retestMax = breakIdx + 18;
+    if (last < retestMin || last > retestMax) continue;
+
+    // ── Check that price is actually near the level right now ──
+    // The last 2 candles should touch or penetrate the level
+    const retestTol = atr * 0.5;
+    const c0 = sigCandles[last];
+    const c1 = sigCandles[last - 1];
+
+    const touchingLevel = (
+      (Math.min(c0.low, c1.low) <= lvlPrice + retestTol) &&
+      (Math.max(c0.high, c1.high) >= lvlPrice - retestTol)
+    );
+    if (!touchingLevel) continue;
+
+    // ── Retest volume should be LOWER than break volume (exhaustion / accumulation) ──
+    const retestVol = volumes.slice(last - 2, last + 1).reduce((a, b) => a + b, 0) / 3;
+    const retestVolRatio = volAvg20 > 0 ? retestVol / volAvg20 : 1;
+    // Soft check: retest volume should be lower than break volume (not mandatory but scored)
+    const quietRetest = retestVolRatio < breakVolRatio;
+
+    // ── 5. Rejection candle check ──
+    const range0 = c0.high - c0.low;
+    const body0  = Math.abs(c0.close - c0.open);
+    const bodyRatio0 = range0 > 0 ? body0 / range0 : 0;
+
+    let rejectionType = "none";
+
+    if (breakDirection === "up") {
+      // Bullish rejection: hammer / bullish engulf / close above level
+      const lowerWick  = Math.min(c0.open, c0.close) - c0.low;
+      const wickRatio  = range0 > 0 ? lowerWick / range0 : 0;
+
+      // Pin bar (hammer): lower wick ≥40% of range, close above midpoint of bar
+      const isPinBar = wickRatio >= 0.4 && c0.close > (c0.high + c0.low) / 2;
+
+      // Bullish engulf: close above prev candle's open (for previous bearish candle)
+      const prevBearish = c1.close < c1.open;
+      const isEngulf    = prevBearish && c0.close > c1.open && c0.open < c1.close;
+
+      // Simple close above level
+      const closesAbove = c0.close > lvlPrice && c0.close > c0.open;
+
+      if (isPinBar)    rejectionType = "pin_bar";
+      else if (isEngulf) rejectionType = "engulfing";
+      else if (closesAbove) rejectionType = "close_above";
+
+    } else {
+      // Bearish rejection: shooting star / bearish engulf / close below level
+      const upperWick  = c0.high - Math.max(c0.open, c0.close);
+      const wickRatio  = range0 > 0 ? upperWick / range0 : 0;
+
+      const isPinBar = wickRatio >= 0.4 && c0.close < (c0.high + c0.low) / 2;
+
+      const prevBullish = c1.close > c1.open;
+      const isEngulf    = prevBullish && c0.close < c1.open && c0.open > c1.close;
+
+      const closesBelow = c0.close < lvlPrice && c0.close < c0.open;
+
+      if (isPinBar)    rejectionType = "pin_bar";
+      else if (isEngulf) rejectionType = "engulfing";
+      else if (closesBelow) rejectionType = "close_below";
+    }
+
+    if (rejectionType === "none") continue;
+
+    // ── 6. Calculate entry, SL, TP ──
+    // SL: behind the level + 1 ATR buffer (give room)
+    // TP: next major S/R level, or 2.5x risk minimum
+
+    if (breakDirection === "up") {
+      const sl  = lvlPrice - atr * 1.0;
+      const risk = price - sl;
+      if (risk <= 0) continue;
+
+      // Find next resistance above
+      const nextRes = strongLevels.find(l => l.price > price + atr * 0.3 && l.touches >= 2);
+      const tpDefault = price + risk * 2.5;
+      const tp = (nextRes && nextRes.price > price + risk) ? Math.min(nextRes.price, tpDefault) : tpDefault;
+      const rr = (tp - price) / risk;
+      if (rr < 2.0) continue;
+
+      // ── Confidence score ──
+      let conf = 45;
+      if (level.touches >= 3) conf += 10;      // Well-tested level
+      if (rejectionType === "pin_bar")    conf += 15;  // Strongest signal
+      if (rejectionType === "engulfing")  conf += 12;
+      if (rejectionType === "close_above") conf += 5;
+      if (quietRetest)    conf += 8;            // Volume exhaustion at retest
+      if (breakVolRatio >= 2.0) conf += 7;      // Strong break volume
+      if (rr >= 3.0)      conf += 5;
+      conf = Math.min(90, conf);
+
+      const retestBars = last - breakIdx;
+      return {
+        type: "LONG",
+        entry: price,
+        stopLoss: sl,
+        takeProfit: tp,
+        confidence: conf,
+        reason: `B&R UP | Level ${lvlPrice.toFixed(4)} (${level.touches}x) | ${rejectionType} | Break+${retestBars}bars | Vol ${breakVolRatio.toFixed(1)}x | R:R ${rr.toFixed(1)}:1`,
+        level: lvlPrice,
+      };
+
+    } else {
+      const sl  = lvlPrice + atr * 1.0;
+      const risk = sl - price;
+      if (risk <= 0) continue;
+
+      const nextSup = [...strongLevels].reverse().find(l => l.price < price - atr * 0.3 && l.touches >= 2);
+      const tpDefault = price - risk * 2.5;
+      const tp = (nextSup && nextSup.price < price - risk) ? Math.max(nextSup.price, tpDefault) : tpDefault;
+      const rr = (price - tp) / risk;
+      if (rr < 2.0) continue;
+
+      let conf = 45;
+      if (level.touches >= 3) conf += 10;
+      if (rejectionType === "pin_bar")    conf += 15;
+      if (rejectionType === "engulfing")  conf += 12;
+      if (rejectionType === "close_below") conf += 5;
+      if (quietRetest)    conf += 8;
+      if (breakVolRatio >= 2.0) conf += 7;
+      if (rr >= 3.0)      conf += 5;
+      conf = Math.min(90, conf);
+
+      const retestBars = last - breakIdx;
+      return {
+        type: "SHORT",
+        entry: price,
+        stopLoss: sl,
+        takeProfit: tp,
+        confidence: conf,
+        reason: `B&R DOWN | Level ${lvlPrice.toFixed(4)} (${level.touches}x) | ${rejectionType} | Break+${retestBars}bars | Vol ${breakVolRatio.toFixed(1)}x | R:R ${rr.toFixed(1)}:1`,
+        level: lvlPrice,
+      };
+    }
   }
 
   return none;

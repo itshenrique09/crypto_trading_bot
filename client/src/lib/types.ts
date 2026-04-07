@@ -53,11 +53,24 @@ export interface CoinData {
 }
 
 export const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  "v2-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "mean-reversion": { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
-  "breakout": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
+  "confluence-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
+  "v2-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },  // legacy alias
+  "smc": { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
+  "break-retest": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
 };
 
 export function getStratColor(id: string) {
   return STRATEGY_COLORS[id] || { bg: "bg-gray-500/10", text: "text-gray-400", border: "border-gray-500/30" };
+}
+
+const LEGACY_NAMES: Record<string, string> = {
+  "v2-swing": "Confluence Swing",
+  "mean-reversion": "Mean Reversion",
+  "breakout": "Breakout",
+};
+
+export function getStratName(id: string, strategies?: { id: string; name: string }[]): string {
+  const found = strategies?.find(s => s.id === id);
+  if (found) return found.name;
+  return LEGACY_NAMES[id] || id;
 }

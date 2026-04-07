@@ -221,7 +221,7 @@ export default function Dashboard() {
             <div className="space-y-2">
               {sortedOpen.slice(0, 8).map(t => {
                 const price = priceMap.get(t.id);
-                const sc = getStratColor(t.strategy || "v2-swing");
+                const sc = getStratColor(t.strategy || "confluence-swing");
                 const pnl = price?.unrealizedPnl;
                 return (
                   <Card key={t.id} className="border-border/20 hover:border-border/40 transition-colors overflow-hidden">
@@ -371,7 +371,7 @@ export default function Dashboard() {
               </div>
               <Card className="border-border/20 divide-y divide-border/10 overflow-hidden">
                 {recentClosed.map(t => {
-                  const sc = getStratColor(t.strategy || "v2-swing");
+                  const sc = getStratColor(t.strategy || "confluence-swing");
                   return (
                     <div key={t.id} className="flex items-center gap-2.5 px-3 py-2.5 hover:bg-card/30 transition-colors">
                       <div className={`w-6 h-6 rounded flex items-center justify-center shrink-0 ${

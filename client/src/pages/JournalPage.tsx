@@ -52,9 +52,10 @@ interface StrategyInfo {
 }
 
 const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  "confluence-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
   "v2-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "mean-reversion": { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
-  "breakout": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
+  "smc": { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
+  "break-retest": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
 };
 
 function getStratColor(id: string) {
@@ -190,7 +191,7 @@ export default function JournalPage() {
   const filtered = (journal as JournalEntry[]).filter(e => {
     if (filter !== "all" && e.outcome !== filter && !(filter === "open" && e.outcome === "open")) return false;
     if (modeFilter !== "all" && e.mode !== modeFilter) return false;
-    if (strategyFilter !== "all" && (e.strategy || "v2-swing") !== strategyFilter) return false;
+    if (strategyFilter !== "all" && (e.strategy || "confluence-swing") !== strategyFilter) return false;
     return true;
   });
 
@@ -450,7 +451,7 @@ export default function JournalPage() {
         )}
 
         {filtered.map((entry) => {
-          const sc = getStratColor(entry.strategy || "v2-swing");
+          const sc = getStratColor(entry.strategy || "confluence-swing");
           return (
           <Card key={entry.id} className="border-border/50 bg-card/50 p-3">
             <div className="flex items-center justify-between mb-2">
@@ -469,7 +470,7 @@ export default function JournalPage() {
                 </Link>
                 {/* Strategy badge */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
-                  {strategies.find(s => s.id === (entry.strategy || "v2-swing"))?.name || entry.strategy || "v2 Swing"}
+                  {strategies.find(s => s.id === (entry.strategy || "confluence-swing"))?.name || (entry.strategy === "v2-swing" ? "Confluence Swing" : entry.strategy || "Confluence Swing")}
                 </span>
                 {/* Mode */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${

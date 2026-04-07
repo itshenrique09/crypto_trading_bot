@@ -7,7 +7,7 @@ import {
   getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
   getSetting, setSetting,
 } from "./storage";
-import { analyzeIndicators, generateSignal, refineEntry, meanReversionSignal, breakoutSignal, type OHLCV } from "./analysis";
+import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 
@@ -86,6 +86,35 @@ async function fetchBinanceKlines(symbol: string, interval: string, limit: numbe
     close:  parseFloat(k[4]),
     volume: parseFloat(k[5]),
   }));
+}
+
+// Paginated fetch — retrieves multiple batches to get large historical datasets
+// Used for backtests that need 2000–3000+ candles for statistical reliability
+async function fetchBinanceKlinesPaginated(symbol: string, interval: string, total: number): Promise<OHLCV[]> {
+  const pair = getBinanceSymbol(symbol);
+  const candles: OHLCV[] = [];
+  let endTime: number | undefined;
+  const batchSize = 1000;
+  const batches = Math.ceil(total / batchSize);
+
+  for (let b = 0; b < batches; b++) {
+    const qs = `symbol=${pair}&interval=${interval}&limit=${batchSize}` +
+               (endTime ? `&endTime=${endTime}` : "");
+    const data: any[][] = await fetchJSON(`${BINANCE_BASE}/klines?${qs}`);
+    if (!Array.isArray(data) || data.length === 0) break;
+    const batch: OHLCV[] = data.map(k => ({
+      time:   k[0] / 1000,
+      open:   parseFloat(k[1]),
+      high:   parseFloat(k[2]),
+      low:    parseFloat(k[3]),
+      close:  parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+    }));
+    candles.unshift(...batch);
+    if (data.length < batchSize) break;
+    endTime = data[0][0] - 1;  // fetch older batch next iteration
+  }
+  return candles;
 }
 
 const insertWatchlistSchema = z.object({
@@ -238,8 +267,9 @@ export async function registerRoutes(server: Server, app: Express) {
       const { symbol } = req.params;
 
       // Fetch timeframes: 4H primary, 1D for trend, 15m for entry
+      // 4H limit=300: 300 bars → breakRetestSignal gets reliable EMA200 (needs ≥150)
       const [candles4h, candles1d, candles15m] = await Promise.all([
-        fetchBinanceKlines(symbol, "4h",  300),   // primary analysis
+        fetchBinanceKlines(symbol, "4h",  300),   // primary analysis (≥150 needed for EMA200)
         fetchBinanceKlines(symbol, "1d",  100),   // trend filter
         fetchBinanceKlines(symbol, "15m", 200),   // entry refinement
       ]);
@@ -342,23 +372,23 @@ export async function registerRoutes(server: Server, app: Express) {
   app.get("/api/signals/:symbol", async (req, res) => {
     try {
       const { symbol } = req.params;
-      const candles4h = await fetchBinanceKlines(symbol, "4h", 300);
-      if (candles4h.length < 50) {
+      const candles4h = await fetchBinanceKlines(symbol, "4h", 400);  // 400→EMA200 seed ~2% (reliable)
+      if (candles4h.length < 150) {
         return res.status(400).json({ error: "Not enough data" });
       }
 
       const ind = analyzeIndicators(candles4h);
       const swingSig = generateSignal(candles4h, ind);
-      const mrSig = meanReversionSignal(candles4h);
-      const boSig = breakoutSignal(candles4h);
+      const smcSig = smcSignal(candles4h);
+      const brSig = breakRetestSignal(candles4h);
 
       res.json({
         symbol: symbol.toUpperCase(),
         currentPrice: candles4h[candles4h.length - 1].close,
         strategies: [
           {
-            id: "v2-swing",
-            name: "v2 Swing",
+            id: "confluence-swing",
+            name: "Confluence Swing",
             signal: swingSig.type,
             score: Math.round(swingSig.confluenceScore * 10) / 10,
             confidence: swingSig.confidence,
@@ -369,28 +399,29 @@ export async function registerRoutes(server: Server, app: Express) {
             trend: swingSig.trend,
           },
           {
-            id: "mean-reversion",
-            name: "Mean Reversion",
-            signal: mrSig.type === "NONE" ? "HOLD" : mrSig.type === "LONG" ? "BUY" : "SELL",
-            score: mrSig.confidence / 10,
-            confidence: mrSig.confidence,
-            reason: mrSig.reason || "No signal",
-            entry: mrSig.entry || undefined,
-            stopLoss: mrSig.stopLoss || undefined,
-            takeProfit: mrSig.takeProfit || undefined,
-            rsi7: mrSig.rsi7,
-            bbPercentB: mrSig.bbPercentB,
+            id: "smc",
+            name: "SMC",
+            signal: smcSig.type === "NONE" ? "HOLD" : smcSig.type === "LONG" ? "BUY" : "SELL",
+            score: smcSig.confidence / 10,
+            confidence: smcSig.confidence,
+            reason: smcSig.reason || "No signal",
+            entry: smcSig.entry || undefined,
+            stopLoss: smcSig.stopLoss || undefined,
+            takeProfit: smcSig.takeProfit || undefined,
+            structure: smcSig.structure,
+            obZone: smcSig.obZone,
           },
           {
-            id: "breakout",
-            name: "Breakout",
-            signal: boSig.type === "NONE" ? "HOLD" : boSig.type === "LONG" ? "BUY" : "SELL",
-            score: boSig.confidence / 10,
-            confidence: boSig.confidence,
-            reason: boSig.reason || "No signal",
-            entry: boSig.entry || undefined,
-            stopLoss: boSig.stopLoss || undefined,
-            takeProfit: boSig.takeProfit || undefined,
+            id: "break-retest",
+            name: "Break & Retest",
+            signal: brSig.type === "NONE" ? "HOLD" : brSig.type === "LONG" ? "BUY" : "SELL",
+            score: brSig.confidence / 10,
+            confidence: brSig.confidence,
+            reason: brSig.reason || "No signal",
+            entry: brSig.entry || undefined,
+            stopLoss: brSig.stopLoss || undefined,
+            takeProfit: brSig.takeProfit || undefined,
+            level: brSig.level,
           },
         ],
       });
@@ -409,11 +440,14 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const { symbol } = req.params;
 
-      const WINDOW   = 90;
-      const FORWARD  = 30;
+      // ── 4H confirmed throughout: strategy.interval = "4h", matching live signals
+      // WINDOW=250 → EMA200 seed influence ≈ 8% (reliable); was 90 (EMA200 always disabled)
+      const WINDOW   = 250;
+      const FORWARD  = 30;   // 30×4H = 120h (5 days) time stop
       const COOLDOWN = 5;
 
-      const allCandles = await fetchBinanceKlines(symbol, "1d", 400);
+      // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone backtest-swing.ts
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
 
       if (allCandles.length < WINDOW + FORWARD + 10) {
         return res.status(400).json({ error: "Not enough historical data for backtest" });
@@ -432,10 +466,13 @@ export async function registerRoutes(server: Server, app: Express) {
         const indicators = analyzeIndicators(window);
         const signal     = generateSignal(window, indicators);
 
-        if (signal.type === "HOLD" || !signal.entry || !signal.stopLoss || !signal.takeProfit1 || !signal.takeProfit2) continue;
+        // Only STRONG signals (score ≥ ±6) — matches live strategy in v2-swing.ts
+        // Macro filter is now built into generateSignal() — no separate check needed
+        if (signal.type !== "STRONG_BUY" && signal.type !== "STRONG_SELL") continue;
+        if (!signal.entry || !signal.stopLoss || !signal.takeProfit1 || !signal.takeProfit2) continue;
 
         lastTradeIdx = i;
-        const isBuy  = signal.type === "BUY" || signal.type === "STRONG_BUY";
+        const isBuy  = signal.type === "STRONG_BUY";
         const future = allCandles.slice(i + 1, i + 1 + FORWARD);
 
         let outcome: "tp1" | "tp2" | "loss" | "pending" = "pending";
@@ -510,163 +547,43 @@ export async function registerRoutes(server: Server, app: Express) {
       const wins   = done.filter(t => t.outcome === "win");
       const losses = done.filter(t => t.outcome === "loss");
 
-      const avgWin     = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
-      const avgLoss    = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
+      const avgWin      = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
+      const avgLoss     = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
       const grossProfit = wins.reduce((s, t)   => s + t.pnlPct, 0);
       const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
       const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+      const wrFrac      = done.length > 0 ? wins.length / done.length : 0;
+      const expectancy  = wrFrac * avgWin - (1 - wrFrac) * avgLoss;
+
+      // Sharpe estimate
+      const pnls      = done.map(t => t.pnlPct);
+      const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlStd    = Math.sqrt(pnlVar);
+      const years     = (allCandles.length * 4) / 8760;  // 4H bars
+      const tpy       = done.length / Math.max(years, 0.01);
+      const annReturn = pnlMean * tpy;
+      const annStd    = pnlStd  * Math.sqrt(tpy);
+      const sharpe    = annStd > 0 ? annReturn / annStd : 0;
 
       const totalReturn = Math.round((equity - 100) * 100) / 100;
 
       const firstTime = allCandles[WINDOW]?.time || 0;
-      const lastTime = allCandles[allCandles.length - 1]?.time || 0;
-      const spanDays = Math.round((lastTime - firstTime) / 86400);
+      const lastTime  = allCandles[allCandles.length - 1]?.time || 0;
+      const spanDays  = Math.round((lastTime - firstTime) / 86400);
 
       res.json({
         symbol:       symbol.toUpperCase(),
-        interval:     "1d",
+        strategy:     "Confluence Swing (4H)",
+        interval:     "4h",
         totalBars:    allCandles.length,
         totalTrades:  done.length,
         winRate:      done.length > 0 ? Math.round((wins.length / done.length) * 1000) / 10 : 0,
         avgWinPct:    Math.round(avgWin  * 100) / 100,
         avgLossPct:   Math.round(avgLoss * 100) / 100,
         profitFactor: Math.round(profitFactor * 100) / 100,
-        totalReturn,
-        maxDrawdown:  Math.round(maxDD * 100) / 100,
-        finalEquity:  Math.round(equity * 100) / 100,
-        trades:       trades.slice(-50),
-        spanDays,
-        barHours:     24,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // ── Backtesting — Strategy B: 4H Mean Reversion ──────────────────
-  //
-  // Fades overextended moves on 4H using BB(2.5σ) + RSI(7) + volume exhaustion
-  // TP: BB midline, SL: 1.2x ATR, time stop: 5 candles (20h)
-
-  app.get("/api/backtest-meanrev/:symbol", async (req, res) => {
-    try {
-      const { symbol } = req.params;
-
-      const WINDOW    = 50;   // 50 candles lookback for indicators
-      const TIME_STOP = 10;   // exit after 10 candles (40h) if no TP/SL hit
-      const COOLDOWN  = 3;    // 3 candles between trades (12h)
-
-      const allCandles = await fetchBinanceKlines(symbol, "4h", 1000);
-
-      if (allCandles.length < WINDOW + TIME_STOP + 10) {
-        return res.status(400).json({ error: "Not enough 4H data for mean reversion backtest" });
-      }
-
-      const trades: any[] = [];
-      let equity   = 100;
-      let peakEq   = 100;
-      let maxDD    = 0;
-      let lastTradeIdx = -COOLDOWN;
-
-      for (let i = WINDOW; i < allCandles.length - TIME_STOP; i++) {
-        if (i - lastTradeIdx < COOLDOWN) continue;
-
-        const window = allCandles.slice(i - WINDOW, i + 1);
-        const sig = meanReversionSignal(window);
-
-        if (sig.type === "NONE") continue;
-
-        lastTradeIdx = i;
-        const isLong = sig.type === "LONG";
-        const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
-
-        let outcome: "tp" | "sl" | "timeout" = "timeout";
-        let barsToOutcome = TIME_STOP;
-
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isLong) {
-            if (c.low <= sig.stopLoss)       { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit)     { outcome = "tp"; barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= sig.stopLoss)       { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.low <= sig.takeProfit)      { outcome = "tp"; barsToOutcome = j + 1; break; }
-          }
-        }
-
-        const risk = Math.abs(sig.entry - sig.stopLoss);
-        const reward = Math.abs(sig.takeProfit - sig.entry);
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss";
-
-        if (outcome === "tp") {
-          pnlPct = (reward / sig.entry) * 100;
-          outcomeLabel = "win";
-        } else if (outcome === "sl") {
-          pnlPct = -(risk / sig.entry) * 100;
-          outcomeLabel = "loss";
-        } else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
-          pnlPct = isLong
-            ? ((exitPrice - sig.entry) / sig.entry) * 100
-            : ((sig.entry - exitPrice) / sig.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
-
-        // Position sizing: 1% risk
-        const posRisk = 0.01;
-        const equityPnl = equity * (pnlPct / 100) * posRisk * 100;
-        equity += equityPnl;
-        peakEq = Math.max(peakEq, equity);
-        maxDD  = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
-
-        const hours = barsToOutcome * 4;
-        const durationLabel = hours >= 24 ? `${Math.round(hours / 24)}d` : `${hours}h`;
-
-        trades.push({
-          time:            allCandles[i].time,
-          signal:          sig.type === "LONG" ? "BUY" : "SELL",
-          strategy:        "Mean Reversion",
-          entry:           sig.entry,
-          stopLoss:        sig.stopLoss,
-          takeProfit1:     sig.takeProfit,
-          outcome:         outcomeLabel,
-          pnlPct:          Math.round(pnlPct * 100) / 100,
-          barsToOutcome,
-          durationLabel,
-          confluenceScore: Math.round(sig.confidence / 10) / 1, // normalize to ~score
-          hitLevel:        outcome,
-          rsi7:            sig.rsi7,
-          bbPercentB:      sig.bbPercentB,
-          volumeRatio:     sig.volumeRatio,
-        });
-      }
-
-      const wins   = trades.filter(t => t.outcome === "win");
-      const losses = trades.filter(t => t.outcome === "loss");
-
-      const avgWin     = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
-      const avgLoss    = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
-      const grossProfit = wins.reduce((s, t)   => s + t.pnlPct, 0);
-      const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
-      const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
-
-      const totalReturn = Math.round((equity - 100) * 100) / 100;
-
-      const firstTime = allCandles[WINDOW]?.time || 0;
-      const lastTime = allCandles[allCandles.length - 1]?.time || 0;
-      const spanDays = Math.round((lastTime - firstTime) / 86400);
-
-      res.json({
-        symbol:       symbol.toUpperCase(),
-        strategy:     "Mean Reversion (4H)",
-        interval:     "4h",
-        totalBars:    allCandles.length,
-        totalTrades:  trades.length,
-        winRate:      trades.length > 0 ? Math.round((wins.length / trades.length) * 1000) / 10 : 0,
-        avgWinPct:    Math.round(avgWin  * 100) / 100,
-        avgLossPct:   Math.round(avgLoss * 100) / 100,
-        profitFactor: Math.round(profitFactor * 100) / 100,
+        expectancy:   Math.round(expectancy * 1000) / 1000,
+        sharpe:       Math.round(sharpe * 100) / 100,
         totalReturn,
         maxDrawdown:  Math.round(maxDD * 100) / 100,
         finalEquity:  Math.round(equity * 100) / 100,
@@ -679,23 +596,26 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   });
 
-  // ── Backtesting — Strategy C: 4H Breakout ─────────────────────────
+  // ── Backtesting — Strategy B: SMC (Smart Money Concepts) ──────────
   //
-  // Donchian(20) breakout + volume spike + EMA(20) trend alignment
-  // TP: 2:1 R:R, SL: 1.5x ATR, time stop: 15 candles (60h)
+  // BOS + OB retest + rejection candle confirmation
+  // SL behind OB zone, TP at next swing / 3:1 R:R, time stop: 15 candles (60h)
 
-  app.get("/api/backtest-breakout/:symbol", async (req, res) => {
+  app.get("/api/backtest-smc/:symbol", async (req, res) => {
     try {
       const { symbol } = req.params;
 
-      const WINDOW    = 25;
-      const TIME_STOP = 15;   // 15 candles = 60h
-      const COOLDOWN  = 3;
+      const WINDOW         = 150;  // reliable EMA200 (22% seed influence vs 55% at 60 bars)
+      const TIME_STOP      = 15;
+      const COOLDOWN       = 3;
+      const ZONE_COOLDOWN  = 20;   // bars before same OB zone can be traded again
+      const ZONE_PCT       = 0.008; // 0.8% price zone grouping for cooldown key
 
-      const allCandles = await fetchBinanceKlines(symbol, "4h", 1000);
+      // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone script
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
 
       if (allCandles.length < WINDOW + TIME_STOP + 10) {
-        return res.status(400).json({ error: "Not enough 4H data for breakout backtest" });
+        return res.status(400).json({ error: "Not enough 4H data for SMC backtest" });
       }
 
       const trades: any[] = [];
@@ -703,15 +623,24 @@ export async function registerRoutes(server: Server, app: Express) {
       let peakEq   = 100;
       let maxDD    = 0;
       let lastTradeIdx = -COOLDOWN;
+      const zoneCooldown = new Map<string, number>(); // OB zone → last bar index
 
       for (let i = WINDOW; i < allCandles.length - TIME_STOP; i++) {
         if (i - lastTradeIdx < COOLDOWN) continue;
 
         const window = allCandles.slice(i - WINDOW, i + 1);
-        const sig = breakoutSignal(window);
+        const sig = smcSignal(window);
 
         if (sig.type === "NONE") continue;
+        if (sig.confidence < 68) continue;  // match smc.ts: confidence ≥ 68% required
 
+        // Zone-based cooldown: don't re-trade the same OB zone within ZONE_COOLDOWN bars
+        const lvl = sig.obZone ? (sig.obZone.high + sig.obZone.low) / 2 : sig.entry;
+        const zoneKey = Math.round(lvl / (lvl * ZONE_PCT)).toString() + "_" + sig.type;
+        const lastZone = zoneCooldown.get(zoneKey) ?? -999;
+        if (i - lastZone < ZONE_COOLDOWN) continue;
+
+        zoneCooldown.set(zoneKey, i);
         lastTradeIdx = i;
         const isLong = sig.type === "LONG";
         const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
@@ -761,7 +690,7 @@ export async function registerRoutes(server: Server, app: Express) {
         trades.push({
           time:            allCandles[i].time,
           signal:          sig.type === "LONG" ? "BUY" : "SELL",
-          strategy:        "Breakout",
+          strategy:        "SMC",
           entry:           sig.entry,
           stopLoss:        sig.stopLoss,
           takeProfit1:     sig.takeProfit,
@@ -771,27 +700,41 @@ export async function registerRoutes(server: Server, app: Express) {
           durationLabel,
           confluenceScore: Math.round(sig.confidence / 10),
           hitLevel:        outcome,
+          structure:       sig.structure,
         });
       }
 
       const wins   = trades.filter(t => t.outcome === "win");
       const losses = trades.filter(t => t.outcome === "loss");
 
-      const avgWin     = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
-      const avgLoss    = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
+      const avgWin      = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
+      const avgLoss     = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
       const grossProfit = wins.reduce((s, t)   => s + t.pnlPct, 0);
       const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
       const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+      const wr          = trades.length > 0 ? wins.length / trades.length : 0;
+      const expectancy  = wr * avgWin - (1 - wr) * avgLoss; // % per trade
+
+      // Sharpe estimate: annualised return / annualised std-dev of per-trade PnL
+      const pnls      = trades.map(t => t.pnlPct);
+      const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlStd    = Math.sqrt(pnlVar);
+      const years     = (allCandles.length * 4) / 8760;
+      const tpy       = trades.length / Math.max(years, 0.01);
+      const annReturn = pnlMean * tpy;
+      const annStd    = pnlStd  * Math.sqrt(tpy);
+      const sharpe    = annStd > 0 ? annReturn / annStd : 0;
 
       const totalReturn = Math.round((equity - 100) * 100) / 100;
 
       const firstTime = allCandles[WINDOW]?.time || 0;
-      const lastTime = allCandles[allCandles.length - 1]?.time || 0;
-      const spanDays = Math.round((lastTime - firstTime) / 86400);
+      const lastTime  = allCandles[allCandles.length - 1]?.time || 0;
+      const spanDays  = Math.round((lastTime - firstTime) / 86400);
 
       res.json({
         symbol:       symbol.toUpperCase(),
-        strategy:     "Breakout (4H)",
+        strategy:     "SMC (4H)",
         interval:     "4h",
         totalBars:    allCandles.length,
         totalTrades:  trades.length,
@@ -799,6 +742,170 @@ export async function registerRoutes(server: Server, app: Express) {
         avgWinPct:    Math.round(avgWin  * 100) / 100,
         avgLossPct:   Math.round(avgLoss * 100) / 100,
         profitFactor: Math.round(profitFactor * 100) / 100,
+        expectancy:   Math.round(expectancy * 1000) / 1000,
+        sharpe:       Math.round(sharpe * 100) / 100,
+        totalReturn,
+        maxDrawdown:  Math.round(maxDD * 100) / 100,
+        finalEquity:  Math.round(equity * 100) / 100,
+        trades:       trades.slice(-50),
+        spanDays,
+        barHours:     4,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Backtesting — Strategy C: Break & Retest ──────────────────────
+  //
+  // S/R level break + retest + rejection confirmation
+  // SL behind level, TP at next S/R / 2.5:1 R:R, time stop: 15 candles (60h)
+
+  app.get("/api/backtest-breakretest/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+
+      const WINDOW         = 150;  // 150 bars → reliable EMA200 (22% seed vs 55% at 60 bars)
+      const TIME_STOP      = 15;
+      const COOLDOWN       = 3;
+      const LEVEL_COOLDOWN = 20;    // candles before same zone can be traded again
+      const ZONE_PCT       = 0.008; // 0.8% price zone grouping for cooldown
+
+      // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone script
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
+
+      if (allCandles.length < WINDOW + TIME_STOP + 10) {
+        return res.status(400).json({ error: "Not enough 4H data for break & retest backtest" });
+      }
+
+      const trades: any[] = [];
+      let equity   = 100;
+      let peakEq   = 100;
+      let maxDD    = 0;
+      let lastTradeIdx = -COOLDOWN;
+      // Zone-based cooldown: prevent re-trading the same price zone within 20 bars
+      // Uses price buckets (0.8% wide) to group nearby levels — solves "3 SHORTs at same level" bug
+      const zoneCooldown = new Map<string, number>(); // zoneKey → last bar index
+
+      for (let i = WINDOW; i < allCandles.length - TIME_STOP; i++) {
+        if (i - lastTradeIdx < COOLDOWN) continue;
+
+        const window = allCandles.slice(i - WINDOW, i + 1);
+        const sig = breakRetestSignal(window);
+
+        if (sig.type === "NONE") continue;
+        if (sig.confidence < 68) continue;  // match break-retest.ts: confidence ≥ 68% required
+
+        // Zone-based cooldown check
+        const lvl = sig.level ?? sig.entry;
+        const zoneKey = Math.round(lvl / (lvl * ZONE_PCT)).toString() + "_" + sig.type;
+        const lastZone = zoneCooldown.get(zoneKey) ?? -999;
+        if (i - lastZone < LEVEL_COOLDOWN) continue;
+
+        zoneCooldown.set(zoneKey, i);
+        lastTradeIdx = i;
+        const isLong = sig.type === "LONG";
+        const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
+
+        let outcome: "tp" | "sl" | "timeout" = "timeout";
+        let barsToOutcome = TIME_STOP;
+
+        for (let j = 0; j < future.length; j++) {
+          const c = future[j];
+          if (isLong) {
+            if (c.low <= sig.stopLoss)     { outcome = "sl"; barsToOutcome = j + 1; break; }
+            if (c.high >= sig.takeProfit)  { outcome = "tp"; barsToOutcome = j + 1; break; }
+          } else {
+            if (c.high >= sig.stopLoss)    { outcome = "sl"; barsToOutcome = j + 1; break; }
+            if (c.low <= sig.takeProfit)   { outcome = "tp"; barsToOutcome = j + 1; break; }
+          }
+        }
+
+        const risk = Math.abs(sig.entry - sig.stopLoss);
+        const reward = Math.abs(sig.takeProfit - sig.entry);
+        let pnlPct: number;
+        let outcomeLabel: "win" | "loss";
+
+        if (outcome === "tp") {
+          pnlPct = (reward / sig.entry) * 100;
+          outcomeLabel = "win";
+        } else if (outcome === "sl") {
+          pnlPct = -(risk / sig.entry) * 100;
+          outcomeLabel = "loss";
+        } else {
+          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
+          pnlPct = isLong
+            ? ((exitPrice - sig.entry) / sig.entry) * 100
+            : ((sig.entry - exitPrice) / sig.entry) * 100;
+          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
+        }
+
+        const posRisk = 0.01;
+        const equityPnl = equity * (pnlPct / 100) * posRisk * 100;
+        equity += equityPnl;
+        peakEq = Math.max(peakEq, equity);
+        maxDD  = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
+
+        const hours = barsToOutcome * 4;
+        const durationLabel = hours >= 24 ? `${Math.round(hours / 24)}d` : `${hours}h`;
+
+        trades.push({
+          time:            allCandles[i].time,
+          signal:          sig.type === "LONG" ? "BUY" : "SELL",
+          strategy:        "Break & Retest",
+          entry:           sig.entry,
+          stopLoss:        sig.stopLoss,
+          takeProfit1:     sig.takeProfit,
+          outcome:         outcomeLabel,
+          pnlPct:          Math.round(pnlPct * 100) / 100,
+          barsToOutcome,
+          durationLabel,
+          confluenceScore: Math.round(sig.confidence / 10),
+          hitLevel:        outcome,
+          level:           sig.level,
+        });
+      }
+
+      const wins   = trades.filter(t => t.outcome === "win");
+      const losses = trades.filter(t => t.outcome === "loss");
+
+      const avgWin      = wins.length   ? wins.reduce((s, t)   => s + t.pnlPct, 0) / wins.length   : 0;
+      const avgLoss     = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
+      const grossProfit = wins.reduce((s, t)   => s + t.pnlPct, 0);
+      const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
+      const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+      const wr          = trades.length > 0 ? wins.length / trades.length : 0;
+      const expectancy  = wr * avgWin - (1 - wr) * avgLoss;
+
+      // Sharpe estimate: annualised return / annualised std-dev of per-trade PnL
+      const pnls      = trades.map(t => t.pnlPct);
+      const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlStd    = Math.sqrt(pnlVar);
+      const years     = (allCandles.length * 4) / 8760;
+      const tpy       = trades.length / Math.max(years, 0.01);
+      const annReturn = pnlMean * tpy;
+      const annStd    = pnlStd  * Math.sqrt(tpy);
+      const sharpe    = annStd > 0 ? annReturn / annStd : 0;
+
+      const totalReturn = Math.round((equity - 100) * 100) / 100;
+
+      const firstTime = allCandles[WINDOW]?.time || 0;
+      const lastTime  = allCandles[allCandles.length - 1]?.time || 0;
+      const spanDays  = Math.round((lastTime - firstTime) / 86400);
+
+      res.json({
+        symbol:       symbol.toUpperCase(),
+        strategy:     "Break & Retest (4H)",
+        interval:     "4h",
+        totalBars:    allCandles.length,
+        totalTrades:  trades.length,
+        winRate:      trades.length > 0 ? Math.round((wins.length / trades.length) * 1000) / 10 : 0,
+        avgWinPct:    Math.round(avgWin  * 100) / 100,
+        avgLossPct:   Math.round(avgLoss * 100) / 100,
+        profitFactor: Math.round(profitFactor * 100) / 100,
+        expectancy:   Math.round(expectancy * 1000) / 1000,
+        sharpe:       Math.round(sharpe * 100) / 100,
         totalReturn,
         maxDrawdown:  Math.round(maxDD * 100) / 100,
         finalEquity:  Math.round(equity * 100) / 100,
@@ -821,24 +928,26 @@ export async function registerRoutes(server: Server, app: Express) {
       const { symbol } = req.params;
       const base = `http://localhost:${process.env.PORT || 5000}`;
 
-      const [resA, resB] = await Promise.all([
+      const [resA, resB, resC] = await Promise.all([
         fetch(`${base}/api/backtest/${symbol}`).then(r => r.json()),
-        fetch(`${base}/api/backtest-meanrev/${symbol}`).then(r => r.json()),
+        fetch(`${base}/api/backtest-smc/${symbol}`).then(r => r.json()),
+        fetch(`${base}/api/backtest-breakretest/${symbol}`).then(r => r.json()),
       ]);
 
       // Show all strategies but mark profitable ones
       const allStrategies = [
-        { name: "Swing (1D)", ...resA },
-        { name: "Mean Rev (4H)", ...resB },
+        { name: "Confluence Swing", ...resA },
+        { name: "SMC", ...resB },
+        { name: "Break & Retest", ...resC },
       ];
       const strategies = allStrategies.filter(s => (s.totalTrades || 0) > 0);
-      // Flag profitable strategies
       strategies.forEach(s => { (s as any).profitable = (s.profitFactor || 0) >= 1; });
 
       // Merge trades chronologically
       const allTrades = [
-        ...(resA.trades || []).map((t: any) => ({ ...t, strategy: "Swing (1D)" })),
-        ...(resB.trades || []).map((t: any) => ({ ...t, strategy: "Mean Rev (4H)" })),
+        ...(resA.trades || []).map((t: any) => ({ ...t, strategy: "Confluence Swing" })),
+        ...(resB.trades || []).map((t: any) => ({ ...t, strategy: "SMC" })),
+        ...(resC.trades || []).map((t: any) => ({ ...t, strategy: "Break & Retest" })),
       ].sort((a, b) => a.time - b.time);
 
       const totalTrades = strategies.reduce((s, st) => s + (st.totalTrades || 0), 0);
@@ -944,7 +1053,13 @@ export async function registerRoutes(server: Server, app: Express) {
   app.get("/api/strategies", async (_req, res) => {
     const all = getAllStrategies();
     const enabledJson = await getSetting("enabled_strategies");
-    const enabled: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    let enabled: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    // Migrate: if stored IDs don't match any current strategy, reset to all enabled
+    const validIds = all.map(s => s.id);
+    if (enabled.length > 0 && !enabled.some(id => validIds.includes(id))) {
+      enabled = validIds;
+      await setSetting("enabled_strategies", JSON.stringify(enabled));
+    }
     res.json(all.map(s => ({
       id: s.id, name: s.name, description: s.description,
       interval: s.interval, enabled: enabled.includes(s.id),
@@ -1154,10 +1269,10 @@ export async function registerRoutes(server: Server, app: Express) {
                 (signal.direction === "SHORT" && dailyTrend === "up");
 
               if (isContraTrend) {
-                // v2-swing: needs STRONG signal (score ≥ 6) to override
-                if (strat.id === "v2-swing" && Math.abs(signal.confluenceScore) < 6) continue;
-                // breakout/mean-reversion: needs ≥ 75 confidence to override
-                if (strat.id !== "v2-swing" && signal.confidence < 75) continue;
+                // confluence-swing: needs STRONG signal (score ≥ 6) to override
+                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) continue;
+                // smc/break-retest: needs ≥ 75 confidence to override
+                if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
               }
 
               // ── MINIMUM R:R CHECK ──
@@ -1265,7 +1380,7 @@ export async function registerRoutes(server: Server, app: Express) {
         return {
           id: trade.id,
           symbol: trade.symbol,
-          strategy: trade.strategy || "v2-swing",
+          strategy: trade.strategy || "confluence-swing",
           currentPrice: Math.round(currentPrice * 10000) / 10000,
           unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
           progressPct: Math.round(progressPct * 10) / 10,

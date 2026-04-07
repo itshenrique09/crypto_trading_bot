@@ -82,7 +82,7 @@ export default function PaperTradingPage() {
   const totalPnl = closedTrades.reduce((s, e) => s + (e.pnl_pct || 0), 0);
 
   let displayTrades = (tab === "open" ? openTrades : closedTrades)
-    .filter(e => strategyFilter === "all" || (e.strategy || "v2-swing") === strategyFilter);
+    .filter(e => strategyFilter === "all" || (e.strategy || "confluence-swing") === strategyFilter);
 
   // Sort
   if (sortBy === "pnl" && tab === "open") {

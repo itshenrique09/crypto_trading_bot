@@ -1,12 +1,15 @@
 import type { Strategy } from "./types";
 import { v2SwingStrategy } from "./v2-swing";
-import { meanReversionStrategy } from "./mean-reversion";
-import { breakoutStrategy } from "./breakout";
+import { smcStrategy } from "./smc";
+import { breakRetestStrategy } from "./break-retest";
+
+// Mean-reversion and breakout disabled — backtests showed poor performance.
+// Files kept for reference: ./mean-reversion.ts, ./breakout.ts
 
 const ALL_STRATEGIES: Strategy[] = [
   v2SwingStrategy,
-  meanReversionStrategy,
-  breakoutStrategy,
+  smcStrategy,
+  breakRetestStrategy,
 ];
 
 export function getAllStrategies(): Strategy[] {
