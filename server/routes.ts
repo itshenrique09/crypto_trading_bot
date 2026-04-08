@@ -10,6 +10,7 @@ import {
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
+import { getMexcClient, toMexcSymbol } from "./mexc-client";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
@@ -1811,5 +1812,337 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ── MEXC Live Trading Engine ──────────────────────────────────────
+  //
+  // Mirror of the paper engine but places real orders on MEXC Futures.
+  // Keys stored in bot_settings (mexc_api_key / mexc_api_secret).
+  // Activate by calling POST /api/live/config then POST /api/live/start.
+
+  let liveCheckInterval: ReturnType<typeof setInterval> | null = null;
+  let liveScanInterval:  ReturnType<typeof setInterval> | null = null;
+  let liveEngineStatus = {
+    running:       false,
+    lastCheck:     null as string | null,
+    lastScan:      null as string | null,
+    balance:       null as number | null,
+    openPositions: 0,
+    error:         null as string | null,
+  };
+
+  async function getLiveClient() {
+    const apiKey    = await getSetting("mexc_api_key");
+    const apiSecret = await getSetting("mexc_api_secret");
+    if (!apiKey || !apiSecret) throw new Error("MEXC API keys not configured. Use POST /api/live/config first.");
+    return getMexcClient(apiKey, apiSecret);
+  }
+
+  async function liveCheck() {
+    try {
+      const client = await getLiveClient();
+
+      // Reconcile MEXC open positions with our journal
+      const mexcPositions = await client.getPositions();
+      liveEngineStatus.openPositions = mexcPositions.length;
+      liveEngineStatus.balance = (await client.getBalance()).availableBalance;
+
+      const journal = await getJournal();
+      const liveTrades = journal.filter(e => e.mode === "live" && e.outcome === "open");
+
+      // Fetch all prices once
+      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const priceMap: Record<string, number> = {};
+      for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
+
+      for (const trade of liveTrades) {
+        const mexcSym = toMexcSymbol(trade.symbol);
+        const pos = mexcPositions.find(p => p.symbol === mexcSym);
+
+        if (!pos) {
+          // Position no longer open on MEXC — it was closed (SL/TP hit or manual)
+          const lastPrice = priceMap[`${trade.symbol}USDT`] || trade.entry_price;
+          const isLong = trade.direction === "LONG";
+          const pnlPct = isLong
+            ? ((lastPrice - trade.entry_price) / trade.entry_price) * 100
+            : ((trade.entry_price - lastPrice) / trade.entry_price) * 100;
+          const pnlUsd = trade.position_size_usd ? trade.position_size_usd * (pnlPct / 100) : null;
+
+          await updateJournalEntry(trade.id, {
+            outcome:   pnlPct >= 0 ? "win" : "loss",
+            exit_price: Math.round(lastPrice * 10000) / 10000,
+            pnl_pct:   Math.round(pnlPct * 100) / 100,
+            pnl_usd:   pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+            closed_at: new Date().toISOString(),
+            notes:     trade.notes + " | Closed on MEXC",
+          });
+          continue;
+        }
+
+        // Still open — track peak price and manage trailing stop
+        const price = priceMap[`${trade.symbol}USDT`] || 0;
+        if (!price) continue;
+
+        const isLong = trade.direction === "LONG";
+        const peak   = trade.peak_price ?? trade.entry_price;
+        const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
+        if (newPeak !== peak) {
+          await updateJournalEntry(trade.id, { peak_price: newPeak });
+        }
+
+        // TP1 hit → move SL to break-even on MEXC
+        if (!trade.tp1_hit && trade.take_profit1) {
+          const tp1Hit = isLong ? price >= trade.take_profit1 : price <= trade.take_profit1;
+          if (tp1Hit) {
+            await updateJournalEntry(trade.id, { tp1_hit: 1, stop_loss: trade.entry_price });
+            // Update SL on MEXC (positionId from notes is not stored yet; use symbol-based approach)
+            // For now log the event — full positionId tracking can be added later
+          }
+        }
+
+        // Trailing stop: 2% from peak (after TP1)
+        if (trade.tp1_hit) {
+          const TRAIL_PCT = 0.02;
+          const trailStop = isLong ? newPeak * (1 - TRAIL_PCT) : newPeak * (1 + TRAIL_PCT);
+          const trailHit  = isLong ? price <= trailStop : price >= trailStop;
+          if (trailHit) {
+            // Close position at market
+            try {
+              const posType = isLong ? 1 : 2;
+              await client.closePosition(mexcSym, posType, pos.holdVol);
+            } catch { /* position may already be closed */ }
+          }
+        }
+      }
+
+      liveEngineStatus.lastCheck = new Date().toISOString();
+      liveEngineStatus.error = null;
+    } catch (e: any) {
+      liveEngineStatus.error = e.message;
+    }
+  }
+
+  async function liveScan() {
+    try {
+      if (!liveEngineStatus.running) return;
+
+      const client = await getLiveClient();
+      const topCoins = await getTopCoinsByVolume(30);
+      const strategies = await getEnabledStrategies();
+      if (strategies.length === 0) return;
+
+      const preferredSet = new Set<string>(topCoins);
+      for (const strat of strategies) {
+        for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
+      }
+      const coins = Array.from(preferredSet);
+
+      const journal = await getJournal();
+      const liveTrades = journal.filter(e => e.mode === "live");
+      const openLive   = liveTrades.filter(e => e.outcome === "open");
+
+      // Cap at 6 concurrent live positions
+      if (openLive.length >= 6) return;
+
+      // Capital from actual MEXC balance
+      const balance = await client.getBalance();
+      const currentBalance = balance.availableBalance;
+      const baseRiskPct = parseFloat(await getSetting("live_risk_pct") || "1"); // conservative 1% default
+
+      // BTC macro filter
+      let riskMultiplier = 1.0;
+      try {
+        const btcDaily = await getDailyTrend("BTC");
+        if      (btcDaily === "up")   riskMultiplier = 1.25;
+        else if (btcDaily === "down") riskMultiplier = 0.75;
+      } catch {}
+      const effectiveRiskPct = baseRiskPct * riskMultiplier;
+
+      // Drawdown protection (same as paper)
+      const closedLive = liveTrades.filter(e => e.outcome !== "open");
+      const daily1R    = currentBalance * baseRiskPct / 100;
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
+                                   .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+      if (todayPnl < -4 * daily1R) return;
+
+      const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
+      const lastClosedAt = new Map<string, number>();
+      for (const e of liveTrades) {
+        if (e.outcome !== "open" && e.closed_at) {
+          const key = `${e.symbol}:${e.strategy}`;
+          const ts  = new Date(e.closed_at).getTime();
+          if (!lastClosedAt.has(key) || ts > lastClosedAt.get(key)!) lastClosedAt.set(key, ts);
+        }
+      }
+
+      const byInterval: Record<string, Strategy[]> = {};
+      for (const s of strategies) {
+        if (!byInterval[s.interval]) byInterval[s.interval] = [];
+        byInterval[s.interval].push(s);
+      }
+
+      for (const sym of coins) {
+        if (openLive.length + openPairs.size >= 6) break;
+
+        const dailyTrend = await getDailyTrend(sym);
+
+        for (const [interval, strats] of Object.entries(byInterval)) {
+          let candles: OHLCV[] | null = null;
+
+          for (const strat of strats) {
+            if (openPairs.has(`${sym}:${strat.id}`)) continue;
+            if (strat.preferredSymbols?.length && !strat.preferredSymbols.includes(sym)) continue;
+
+            if (strat.cooldownHours) {
+              const lastClose = lastClosedAt.get(`${sym}:${strat.id}`);
+              if (lastClose && (Date.now() - lastClose) / 3600000 < strat.cooldownHours) continue;
+            }
+
+            try {
+              if (!candles) {
+                const limit = Math.max(...strats.map(s => s.minCandles)) + 10;
+                candles = await fetchBinanceKlines(sym, interval, limit);
+              }
+              if (candles.length < strat.minCandles) continue;
+
+              const signal = strat.analyze(candles);
+              if (!signal) continue;
+
+              const isContraTrend =
+                (signal.direction === "LONG" && dailyTrend === "down") ||
+                (signal.direction === "SHORT" && dailyTrend === "up");
+              if (isContraTrend) {
+                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) continue;
+                if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
+              }
+
+              const risk   = Math.abs(signal.entry - signal.stopLoss);
+              const reward = Math.abs(signal.takeProfit1 - signal.entry);
+              if (risk <= 0 || reward / risk < 1.5) continue;
+
+              // Position sizing
+              const slDistPct = risk / signal.entry;
+              const riskUsd   = currentBalance * effectiveRiskPct / 100;
+              const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
+
+              const mexcSym  = toMexcSymbol(sym);
+              const leverage = 5;
+              const vol      = await client.calcContractVol(mexcSym, posSize, signal.entry);
+              const side     = signal.direction === "LONG" ? 1 : 2;
+
+              const order = await client.placeOrder({
+                symbol:          mexcSym,
+                side:            side as 1 | 2,
+                openType:        2,       // cross margin
+                type:            5,       // market
+                vol,
+                leverage,
+                stopLossPrice:   signal.stopLoss,
+                takeProfitPrice: signal.takeProfit2 ?? signal.takeProfit1,
+              });
+
+              await addJournalEntry({
+                symbol:            sym,
+                direction:         signal.direction,
+                entry_price:       signal.entry,
+                stop_loss:         signal.stopLoss,
+                take_profit1:      signal.takeProfit1,
+                take_profit2:      signal.takeProfit2,
+                confluence_score:  signal.confluenceScore,
+                mode:              "live",
+                strategy:          strat.id,
+                followed:          "yes",
+                position_size_usd: Math.round(posSize * 100) / 100,
+                risk_usd:          Math.round(riskUsd * 100) / 100,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% | ${signal.reason}`,
+              });
+
+              openPairs.add(`${sym}:${strat.id}`);
+            } catch { /* skip — never crash the scan */ }
+          }
+        }
+      }
+
+      liveEngineStatus.lastScan = new Date().toISOString();
+    } catch (e: any) {
+      liveEngineStatus.error = e.message;
+    }
+  }
+
+  function startLiveEngine() {
+    if (liveEngineStatus.running) return;
+    liveEngineStatus.running = true;
+    liveCheck();
+    liveCheckInterval = setInterval(liveCheck, 30 * 1000);
+    liveScanInterval  = setInterval(liveScan, 3 * 60 * 1000);
+  }
+
+  function stopLiveEngine() {
+    liveEngineStatus.running = false;
+    if (liveCheckInterval) { clearInterval(liveCheckInterval); liveCheckInterval = null; }
+    if (liveScanInterval)  { clearInterval(liveScanInterval);  liveScanInterval  = null; }
+  }
+
+  // Configure MEXC API keys + optional live risk settings
+  app.post("/api/live/config", async (req, res) => {
+    try {
+      const { apiKey, apiSecret, riskPct } = req.body;
+      if (!apiKey || !apiSecret) return res.status(400).json({ error: "apiKey and apiSecret are required" });
+      await setSetting("mexc_api_key",    apiKey);
+      await setSetting("mexc_api_secret", apiSecret);
+      if (riskPct && riskPct > 0 && riskPct <= 3) await setSetting("live_risk_pct", String(riskPct));
+      // Immediately test the connection
+      const client = getMexcClient(apiKey, apiSecret);
+      const test   = await client.testConnection();
+      res.json({ ok: test.ok, balance: test.balance, error: test.error });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Test existing keys without saving new ones
+  app.post("/api/live/test", async (_req, res) => {
+    try {
+      const client = await getLiveClient();
+      const test   = await client.testConnection();
+      res.json(test);
+    } catch (err: any) { res.status(500).json({ ok: false, error: err.message }); }
+  });
+
+  app.post("/api/live/start", async (_req, res) => {
+    try {
+      startLiveEngine();
+      await setSetting("mode", "live");
+      res.json({ running: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/live/stop", async (_req, res) => {
+    stopLiveEngine();
+    res.json({ running: false });
+  });
+
+  app.get("/api/live/status", async (_req, res) => {
+    try {
+      const hasKeys   = !!(await getSetting("mexc_api_key")) && !!(await getSetting("mexc_api_secret"));
+      const riskPct   = parseFloat(await getSetting("live_risk_pct") || "1");
+      const journal   = await getJournal();
+      const liveTrades = journal.filter(e => e.mode === "live");
+      const closed     = liveTrades.filter(e => e.outcome !== "open");
+      const totalPnl   = closed.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const todayPnl   = closed.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
+                               .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+
+      res.json({
+        ...liveEngineStatus,
+        hasKeys,
+        riskPct,
+        openTrades:      liveTrades.filter(e => e.outcome === "open").length,
+        totalLiveTrades: liveTrades.length,
+        totalPnlUsd:     Math.round(totalPnl * 100) / 100,
+        todayPnlUsd:     Math.round(todayPnl * 100) / 100,
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 }

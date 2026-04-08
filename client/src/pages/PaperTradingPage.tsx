@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2 } from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -31,6 +31,11 @@ export default function PaperTradingPage() {
   const [showCapitalForm, setShowCapitalForm] = useState(false);
   const [capitalInput, setCapitalInput] = useState("");
   const [riskInput, setRiskInput] = useState("");
+  const [showLiveForm, setShowLiveForm] = useState(false);
+  const [liveApiKey, setLiveApiKey] = useState("");
+  const [liveApiSecret, setLiveApiSecret] = useState("");
+  const [liveRiskInput, setLiveRiskInput] = useState("1");
+  const [showSecret, setShowSecret] = useState(false);
 
   const { data: strategies = [] } = useQuery<StrategyInfo[]>({
     queryKey: ["/api/strategies"],
@@ -87,6 +92,37 @@ export default function PaperTradingPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] });
       setShowCapitalForm(false);
     },
+  });
+
+  const { data: liveStatus } = useQuery({
+    queryKey: ["/api/live/status"],
+    queryFn: async () => (await apiRequest("GET", "/api/live/status")).json(),
+    refetchInterval: 10000,
+  });
+
+  const liveConfigMutation = useMutation({
+    mutationFn: async ({ apiKey, apiSecret, riskPct }: { apiKey: string; apiSecret: string; riskPct?: number }) => {
+      const res = await apiRequest("POST", "/api/live/config", { apiKey, apiSecret, riskPct: Number(riskPct) });
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/live/status"] }),
+  });
+
+  const liveTestMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/live/test", {});
+      return res.json();
+    },
+  });
+
+  const liveStartMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/live/start", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/live/status"] }),
+  });
+
+  const liveStopMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/live/stop", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/live/status"] }),
   });
 
   const paperTrades = journal.filter(e => e.mode === "paper");
@@ -252,6 +288,159 @@ export default function PaperTradingPage() {
           )}
         </Card>
       )}
+
+      {/* MEXC Live Trading Card */}
+      <Card className="border-border/30 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Zap className={`w-4 h-4 ${liveStatus?.running ? "text-amber-400" : "text-muted-foreground/40"}`} />
+            <span className="text-xs font-bold">MEXC Live Trading</span>
+            {liveStatus?.running && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 font-medium">LIVE</span>
+            )}
+            {liveStatus?.hasKeys && !liveStatus?.running && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-card/60 text-muted-foreground border border-border/20">Ready</span>
+            )}
+          </div>
+          <button
+            onClick={() => setShowLiveForm(!showLiveForm)}
+            className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Settings2 className="w-3 h-3" /> API Keys
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+          <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+            <p className="text-[10px] text-muted-foreground mb-0.5">Status</p>
+            <p className={`text-sm font-bold ${liveStatus?.running ? "text-amber-400" : "text-muted-foreground/60"}`}>
+              {liveStatus?.running ? "Running" : "Stopped"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">{liveStatus?.hasKeys ? "Keys configured" : "No keys"}</p>
+          </div>
+          <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+            <p className="text-[10px] text-muted-foreground mb-0.5">MEXC Balance</p>
+            <p className="text-sm font-bold font-mono text-foreground">
+              {liveStatus?.balance != null ? `$${liveStatus.balance.toFixed(2)}` : "--"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">Available USDT</p>
+          </div>
+          <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+            <p className="text-[10px] text-muted-foreground mb-0.5">Open Positions</p>
+            <p className="text-sm font-bold font-mono text-foreground">
+              {liveStatus?.openTrades ?? 0} / 6
+            </p>
+            <p className="text-[10px] text-muted-foreground">Risk: {liveStatus?.riskPct ?? 1}% per trade</p>
+          </div>
+          <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+            <p className="text-[10px] text-muted-foreground mb-0.5">P&L (USD)</p>
+            <p className={`text-sm font-bold font-mono ${(liveStatus?.totalPnlUsd ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {liveStatus?.totalPnlUsd != null ? `${liveStatus.totalPnlUsd >= 0 ? "+" : ""}$${liveStatus.totalPnlUsd.toFixed(2)}` : "--"}
+            </p>
+            <p className={`text-[10px] ${(liveStatus?.todayPnlUsd ?? 0) >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              Today: {liveStatus?.todayPnlUsd != null ? `${liveStatus.todayPnlUsd >= 0 ? "+" : ""}$${liveStatus.todayPnlUsd.toFixed(2)}` : "--"}
+            </p>
+          </div>
+        </div>
+
+        {/* Error display */}
+        {liveStatus?.error && (
+          <p className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1.5 mb-3 font-mono">
+            {liveStatus.error}
+          </p>
+        )}
+
+        {/* Start / Stop button */}
+        <div className="flex items-center gap-2 mb-3">
+          {liveStatus?.running ? (
+            <button
+              onClick={() => liveStopMutation.mutate()}
+              disabled={liveStopMutation.isPending}
+              className="px-3 py-1.5 text-xs rounded-md bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 transition-colors font-medium"
+            >
+              Stop Live Engine
+            </button>
+          ) : (
+            <button
+              onClick={() => liveStartMutation.mutate()}
+              disabled={!liveStatus?.hasKeys || liveStartMutation.isPending}
+              className="px-3 py-1.5 text-xs rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Start Live Engine
+            </button>
+          )}
+          {liveStatus?.hasKeys && !liveStatus?.running && (
+            <button
+              onClick={() => liveTestMutation.mutate()}
+              disabled={liveTestMutation.isPending}
+              className="px-3 py-1.5 text-xs rounded-md bg-card/60 border border-border/30 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {liveTestMutation.isPending ? "Testing..." : "Test Connection"}
+            </button>
+          )}
+          {liveTestMutation.data && (
+            <span className={`text-[11px] ${liveTestMutation.data.ok ? "text-emerald-400" : "text-red-400"}`}>
+              {liveTestMutation.data.ok ? `Connected · $${liveTestMutation.data.balance?.toFixed(2)} available` : liveTestMutation.data.error}
+            </span>
+          )}
+        </div>
+
+        {/* API Key configuration form */}
+        {showLiveForm && (
+          <div className="pt-3 border-t border-border/20 space-y-2">
+            <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
+              Keys are stored locally and never leave this server. Use read+trade permissions only, never withdrawal.
+            </p>
+            <div className="flex items-end gap-2 flex-wrap">
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">API Key</label>
+                <input
+                  type="text" value={liveApiKey} onChange={e => setLiveApiKey(e.target.value)}
+                  className="w-52 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-amber-500/60 font-mono"
+                  placeholder="mx0v..."
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">API Secret</label>
+                <div className="relative">
+                  <input
+                    type={showSecret ? "text" : "password"} value={liveApiSecret} onChange={e => setLiveApiSecret(e.target.value)}
+                    className="w-52 px-2 py-1.5 pr-7 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-amber-500/60 font-mono"
+                    placeholder="••••••••••••••••"
+                  />
+                  <button onClick={() => setShowSecret(s => !s)} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                    {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Risk / trade (%)</label>
+                <input
+                  type="number" value={liveRiskInput} onChange={e => setLiveRiskInput(e.target.value)}
+                  step="0.25" min="0.25" max="3"
+                  className="w-20 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-amber-500/60"
+                  placeholder="1"
+                />
+              </div>
+              <button
+                onClick={() => liveConfigMutation.mutate({ apiKey: liveApiKey, apiSecret: liveApiSecret, riskPct: parseFloat(liveRiskInput) })}
+                disabled={!liveApiKey || !liveApiSecret || liveConfigMutation.isPending}
+                className="px-3 py-1.5 text-xs rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition-colors font-medium disabled:opacity-40"
+              >
+                {liveConfigMutation.isPending ? "Saving..." : "Save & Test"}
+              </button>
+              <button onClick={() => setShowLiveForm(false)} className="text-[10px] text-muted-foreground hover:text-foreground">Cancel</button>
+            </div>
+            {liveConfigMutation.data && (
+              <p className={`text-[11px] ${liveConfigMutation.data.ok ? "text-emerald-400" : "text-red-400"}`}>
+                {liveConfigMutation.data.ok
+                  ? `Keys valid · MEXC balance: $${liveConfigMutation.data.balance?.toFixed(2)} USDT`
+                  : `Connection failed: ${liveConfigMutation.data.error}`}
+              </p>
+            )}
+          </div>
+        )}
+      </Card>
 
       {/* Strategy Mini Stats — only if there's data */}
       {activeStrats.length > 0 && (
