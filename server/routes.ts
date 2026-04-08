@@ -942,6 +942,128 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   });
 
+  // ── RSI Divergence Backtest ─────────────────────────────────────
+  // 1H candles, EMA200 macro filter, TP=2.5R, COOLDOWN=20h, MAX_BARS=200h
+  // Best on FIL (PF=1.72) and SAND (PF=1.70, all years positive)
+
+  app.get("/api/backtest-rsi-div/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+
+      const WINDOW   = 250;  // EMA200 seed
+      const MAX_BARS = 200;  // 200h max hold
+      const COOLDOWN = 20;   // 20h between signals
+
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
+      if (allCandles.length < WINDOW + MAX_BARS + 10) {
+        return res.status(400).json({ error: "Not enough 1H data for RSI Divergence backtest" });
+      }
+
+      const trades: any[] = [];
+      let equity = 100, peakEq = 100, maxDD = 0;
+      let lastTradeIdx = -COOLDOWN;
+
+      for (let i = WINDOW; i < allCandles.length - MAX_BARS; i++) {
+        if (i - lastTradeIdx < COOLDOWN) continue;
+
+        const window = allCandles.slice(i - WINDOW, i + 1);
+        const sig = rsiDivergenceSignal(window);
+        if (sig.type === "NONE") continue;
+
+        lastTradeIdx = i;
+        const isLong = sig.type === "LONG";
+        const future = allCandles.slice(i + 1, i + 1 + MAX_BARS);
+
+        let outcome: "tp1" | "tp2" | "loss" | "timeout" = "timeout";
+        let barsToOutcome = MAX_BARS;
+
+        for (let j = 0; j < future.length; j++) {
+          const c = future[j];
+          if (isLong) {
+            if (c.low  <= sig.stopLoss)   { outcome = "loss";  barsToOutcome = j + 1; break; }
+            if (c.high >= sig.takeProfit2){ outcome = "tp2";   barsToOutcome = j + 1; break; }
+            if (c.high >= sig.takeProfit) { outcome = "tp1";   barsToOutcome = j + 1; break; }
+          } else {
+            if (c.high >= sig.stopLoss)   { outcome = "loss";  barsToOutcome = j + 1; break; }
+            if (c.low  <= sig.takeProfit2){ outcome = "tp2";   barsToOutcome = j + 1; break; }
+            if (c.low  <= sig.takeProfit) { outcome = "tp1";   barsToOutcome = j + 1; break; }
+          }
+        }
+
+        const risk   = Math.abs(sig.entry - sig.stopLoss);
+        const tp1Rew = Math.abs(sig.takeProfit  - sig.entry);
+        const tp2Rew = Math.abs(sig.takeProfit2 - sig.entry);
+
+        let pnlPct: number;
+        let outcomeLabel: "win" | "loss";
+        if      (outcome === "tp2")  { pnlPct =  (tp2Rew / sig.entry) * 100; outcomeLabel = "win"; }
+        else if (outcome === "tp1")  { pnlPct =  (tp1Rew / sig.entry) * 100; outcomeLabel = "win"; }
+        else if (outcome === "loss") { pnlPct = -(risk    / sig.entry) * 100; outcomeLabel = "loss"; }
+        else {
+          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
+          pnlPct = isLong ? ((exitPrice - sig.entry) / sig.entry) * 100 : ((sig.entry - exitPrice) / sig.entry) * 100;
+          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
+        }
+
+        const posRisk = 0.01;
+        equity += equity * (pnlPct / 100) * posRisk * 100;
+        peakEq = Math.max(peakEq, equity);
+        maxDD  = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
+
+        const durationLabel = barsToOutcome >= 24 ? `${Math.round(barsToOutcome / 24)}d` : `${barsToOutcome}h`;
+        trades.push({
+          time: allCandles[i].time, signal: sig.type === "LONG" ? "BUY" : "SELL",
+          entry: sig.entry, stopLoss: sig.stopLoss, takeProfit1: sig.takeProfit,
+          outcome: outcomeLabel, pnlPct: Math.round(pnlPct * 100) / 100,
+          barsToOutcome, durationLabel, confluenceScore: Math.round(sig.confidence / 10),
+          hitLevel: outcome, rsiDir: sig.type,
+        });
+      }
+
+      const wins   = trades.filter(t => t.outcome === "win");
+      const losses = trades.filter(t => t.outcome === "loss");
+      const avgWin  = wins.length   ? wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length : 0;
+      const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
+      const grossProfit = wins.reduce((s, t) => s + t.pnlPct, 0);
+      const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
+      const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+      const wr = trades.length > 0 ? wins.length / trades.length : 0;
+      const expectancy = wr * avgWin - (1 - wr) * avgLoss;
+
+      const pnls    = trades.map(t => t.pnlPct);
+      const pnlMean = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
+      const pnlVar  = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const years   = (allCandles.length) / 8760;
+      const tpy     = trades.length / Math.max(years, 0.01);
+      const annReturn = pnlMean * tpy;
+      const annStd    = Math.sqrt(pnlVar) * Math.sqrt(tpy);
+      const sharpe    = annStd > 0 ? annReturn / annStd : 0;
+
+      const firstTime = allCandles[WINDOW]?.time || 0;
+      const lastTime  = allCandles[allCandles.length - 1]?.time || 0;
+
+      res.json({
+        symbol:       symbol.toUpperCase(),
+        strategy:     "RSI Divergence (1H)",
+        interval:     "1h",
+        totalBars:    allCandles.length,
+        totalTrades:  trades.length,
+        winRate:      trades.length > 0 ? Math.round((wins.length / trades.length) * 1000) / 10 : 0,
+        avgWinPct:    Math.round(avgWin  * 100) / 100,
+        avgLossPct:   Math.round(avgLoss * 100) / 100,
+        profitFactor: Math.round(profitFactor * 100) / 100,
+        expectancy:   Math.round(expectancy * 1000) / 1000,
+        sharpe:       Math.round(sharpe * 100) / 100,
+        totalReturn:  Math.round((equity - 100) * 100) / 100,
+        maxDrawdown:  Math.round(maxDD * 100) / 100,
+        finalEquity:  Math.round(equity * 100) / 100,
+        trades:       trades.slice(-50),
+        spanDays:     Math.round((lastTime - firstTime) / 86400),
+        barHours:     1,
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   // ── Combined Multi-Strategy Backtest ────────────────────────────
   //
   // Runs both Strategy A (1D Swing) and Strategy B (4H Mean Reversion)
@@ -1186,27 +1308,93 @@ export async function registerRoutes(server: Server, app: Express) {
         const price = priceMap[pair];
         if (!price) continue;
 
-        const isLong = trade.direction === "LONG";
+        const isLong    = trade.direction === "LONG";
+        const peak      = trade.peak_price ?? trade.entry_price;
+        const tp1Hit    = trade.tp1_hit === 1;
+        const sl        = trade.stop_loss;
+        const tp1       = trade.take_profit1;
+        const tp2       = trade.take_profit2;
+
+        // Update peak price (best price in favour of trade)
+        const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
+        if (newPeak !== peak) {
+          await updateJournalEntry(trade.id, { peak_price: newPeak });
+        }
+
+        // ── TRAILING STOP (active after TP1 is hit) ──────────────
+        // Trail by 2% from peak — locks in profit as price moves in our favour
+        const TRAIL_PCT = 0.02;
+        const trailStop = isLong
+          ? newPeak * (1 - TRAIL_PCT)
+          : newPeak * (1 + TRAIL_PCT);
+
         let outcome: string | null = null;
         let exitPrice = price;
+        let closeReason = "";
 
         if (isLong) {
-          if (price <= trade.stop_loss) { outcome = "loss"; exitPrice = trade.stop_loss; }
-          else if (price >= trade.take_profit1) { outcome = "win"; exitPrice = trade.take_profit1; }
+          if (price <= sl) {
+            // SL hit — full loss (or break-even if TP1 was already hit)
+            outcome = tp1Hit ? "breakeven" : "loss";
+            exitPrice = sl;
+            closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
+          } else if (!tp1Hit && tp1 && price >= tp1) {
+            // TP1 reached: move SL to entry (break-even), start trailing
+            await updateJournalEntry(trade.id, {
+              tp1_hit: 1,
+              stop_loss: trade.entry_price,  // SL → break-even
+            });
+            closeReason = "TP1 — trailing active, SL moved to entry";
+          } else if (tp1Hit && price <= trailStop) {
+            // Trailing stop triggered after TP1
+            outcome = "win";
+            exitPrice = trailStop;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+          } else if (tp2 && price >= tp2) {
+            // TP2 — full target reached
+            outcome = "win";
+            exitPrice = tp2;
+            closeReason = "TP2";
+          }
         } else {
-          if (price >= trade.stop_loss) { outcome = "loss"; exitPrice = trade.stop_loss; }
-          else if (price <= trade.take_profit1) { outcome = "win"; exitPrice = trade.take_profit1; }
+          if (price >= sl) {
+            outcome = tp1Hit ? "breakeven" : "loss";
+            exitPrice = sl;
+            closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
+          } else if (!tp1Hit && tp1 && price <= tp1) {
+            await updateJournalEntry(trade.id, {
+              tp1_hit: 1,
+              stop_loss: trade.entry_price,
+            });
+            closeReason = "TP1 — trailing active, SL moved to entry";
+          } else if (tp1Hit && price >= trailStop) {
+            outcome = "win";
+            exitPrice = trailStop;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+          } else if (tp2 && price <= tp2) {
+            outcome = "win";
+            exitPrice = tp2;
+            closeReason = "TP2";
+          }
         }
 
         if (outcome) {
-          const pnl = isLong
+          const pnlPct = isLong
             ? ((exitPrice - trade.entry_price) / trade.entry_price) * 100
             : ((trade.entry_price - exitPrice) / trade.entry_price) * 100;
+
+          // P&L in USD (requires position_size_usd stored at open time)
+          const pnlUsd = trade.position_size_usd
+            ? trade.position_size_usd * (pnlPct / 100)
+            : null;
+
           await updateJournalEntry(trade.id, {
             outcome,
-            exit_price: Math.round(exitPrice * 100) / 100,
-            pnl_pct: Math.round(pnl * 100) / 100,
-            closed_at: new Date().toISOString(),
+            exit_price:  Math.round(exitPrice * 10000) / 10000,
+            pnl_pct:     Math.round(pnlPct * 100) / 100,
+            pnl_usd:     pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+            closed_at:   new Date().toISOString(),
+            notes:       trade.notes + ` | ${closeReason}`,
           });
         }
       }
@@ -1251,18 +1439,52 @@ export async function registerRoutes(server: Server, app: Express) {
       paperStatus.coinsScanned = coins.length;
 
       const journal = await getJournal();
+      const paperTrades = journal.filter(e => e.mode === "paper");
+
+      // ── CAPITAL MANAGEMENT ────────────────────────────────────────
+      const initialCapital = parseFloat(await getSetting("paper_capital") || "1000");
+      const baseRiskPct    = parseFloat(await getSetting("paper_risk_pct") || "2");
+
+      // Current balance = initial + sum of all closed P&L in USD
+      const closedTrades  = paperTrades.filter(e => e.outcome !== "open");
+      const totalPnlUsd   = closedTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+      const currentBalance = initialCapital + totalPnlUsd;
+
+      // ── DRAWDOWN PROTECTION ───────────────────────────────────────
+      // Daily: if today's closed P&L < -4R → pause scanning
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const todayTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart);
+      const daily1R     = currentBalance * baseRiskPct / 100;
+      const dailyPnlUsd = todayTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+      if (dailyPnlUsd < -4 * daily1R) return;  // Daily drawdown limit: -4R
+
+      // Monthly: if this month's closed P&L < -8R → pause
+      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+      const monthTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= monthStart);
+      const monthPnlUsd = monthTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+      if (monthPnlUsd < -8 * daily1R) return;  // Monthly drawdown limit: -8R
+
+      // ── BTC MACRO RISK FILTER ─────────────────────────────────────
+      // Adjust risk % based on BTC daily trend
+      let riskMultiplier = 1.0;
+      try {
+        const btcDaily = await getDailyTrend("BTC");
+        if      (btcDaily === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
+        else if (btcDaily === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
+      } catch { /* use default */ }
+      const effectiveRiskPct = baseRiskPct * riskMultiplier;
+
       // Track open trades per (symbol, strategy) to avoid duplicates
       const openPairs = new Set(
-        journal
-          .filter(e => e.mode === "paper" && e.outcome === "open")
+        paperTrades
+          .filter(e => e.outcome === "open")
           .map(e => `${e.symbol}:${e.strategy}`)
       );
 
       // Build cooldown map: last closed_at per (symbol:strategy) pair
-      // Prevents re-entering too soon after a trade closes — matches backtest COOLDOWN
       const lastClosedAt = new Map<string, number>();
-      for (const e of journal) {
-        if (e.mode === "paper" && e.outcome !== "open" && e.closed_at) {
+      for (const e of paperTrades) {
+        if (e.outcome !== "open" && e.closed_at) {
           const key = `${e.symbol}:${e.strategy}`;
           const ts  = new Date(e.closed_at).getTime();
           if (!lastClosedAt.has(key) || ts > lastClosedAt.get(key)!) {
@@ -1271,9 +1493,9 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
 
-      // Limit max open trades to avoid overexposure
-      const totalOpen = journal.filter(e => e.mode === "paper" && e.outcome === "open").length;
-      if (totalOpen >= 10) return; // Max 10 open trades at once
+      // Limit: max 6 concurrent open trades (6 × 2% = 12% total exposure)
+      const totalOpen = paperTrades.filter(e => e.outcome === "open").length;
+      if (totalOpen >= 6) return;
 
       // Group strategies by interval to avoid fetching same candles twice
       const byInterval: Record<string, Strategy[]> = {};
@@ -1340,6 +1562,14 @@ export async function registerRoutes(server: Server, app: Express) {
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
               if (risk <= 0 || reward / risk < 1.5) continue; // Minimum 1.5:1 R:R
 
+              // ── POSITION SIZING ────────────────────────────────
+              // risk_usd = balance × effectiveRiskPct%
+              // sl_dist_pct = |entry - sl| / entry
+              // position_size = risk_usd / sl_dist_pct
+              const slDistPct = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
+              const riskUsd   = currentBalance * effectiveRiskPct / 100;
+              const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
+
               await addJournalEntry({
                 symbol: sym,
                 direction: signal.direction,
@@ -1351,7 +1581,9 @@ export async function registerRoutes(server: Server, app: Express) {
                 mode: "paper",
                 strategy: strat.id,
                 followed: "yes",
-                notes: `Paper [${strat.name}] — ${signal.reason}`,
+                position_size_usd: Math.round(posSize * 100) / 100,
+                risk_usd:          Math.round(riskUsd * 100) / 100,
+                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% — ${signal.reason}`,
               });
             } catch { /* skip */ }
           }
@@ -1392,7 +1624,21 @@ export async function registerRoutes(server: Server, app: Express) {
   app.get("/api/paper/status", async (_req, res) => {
     const journal = await getJournal();
     const paperTrades = journal.filter(e => e.mode === "paper");
-    const openPaper = paperTrades.filter(e => e.outcome === "open");
+    const openPaper   = paperTrades.filter(e => e.outcome === "open");
+    const closed      = paperTrades.filter(e => e.outcome !== "open");
+
+    // Capital stats
+    const initialCapital = parseFloat(await getSetting("paper_capital") || "1000");
+    const baseRiskPct    = parseFloat(await getSetting("paper_risk_pct") || "2");
+    const totalPnlUsd    = closed.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+    const currentBalance = initialCapital + totalPnlUsd;
+
+    // Drawdown today
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayPnl   = closed.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
+                             .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+    const daily1R    = currentBalance * baseRiskPct / 100;
+
     const strategies = getAllStrategies();
     const strategyCounts: Record<string, { open: number; total: number }> = {};
     for (const s of strategies) {
@@ -1401,10 +1647,31 @@ export async function registerRoutes(server: Server, app: Express) {
     }
     res.json({
       ...paperStatus,
-      openTrades: openPaper.length,
+      openTrades:       openPaper.length,
       totalPaperTrades: paperTrades.length,
       strategyCounts,
+      capital: {
+        initial:    initialCapital,
+        balance:    Math.round(currentBalance * 100) / 100,
+        totalPnlUsd: Math.round(totalPnlUsd * 100) / 100,
+        riskPct:    baseRiskPct,
+        oneR:       Math.round(daily1R * 100) / 100,
+        todayPnlUsd: Math.round(todayPnl * 100) / 100,
+        todayR:     daily1R > 0 ? Math.round((todayPnl / daily1R) * 100) / 100 : 0,
+      },
     });
+  });
+
+  // Set paper trading capital and risk %
+  app.post("/api/paper/capital", async (req, res) => {
+    try {
+      const { capital, riskPct } = req.body;
+      if (capital !== undefined && capital > 0) await setSetting("paper_capital", String(capital));
+      if (riskPct !== undefined && riskPct > 0 && riskPct <= 5) await setSetting("paper_risk_pct", String(riskPct));
+      const ic  = parseFloat(await getSetting("paper_capital") || "1000");
+      const rp  = parseFloat(await getSetting("paper_risk_pct") || "2");
+      res.json({ capital: ic, riskPct: rp, oneR: Math.round(ic * rp) / 100 });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // Live prices for open paper trades (polled by frontend every 10s)
@@ -1437,14 +1704,23 @@ export async function registerRoutes(server: Server, app: Express) {
         // SL progress: how close to SL (0% = at entry, 100% = at SL)
         const slProgress = slDist > 0 ? Math.max(0, (-fromEntry / slDist) * 100) : 0;
 
+        const unrealizedUsd = trade.position_size_usd
+          ? trade.position_size_usd * (unrealizedPnl / 100)
+          : null;
+
         return {
           id: trade.id,
           symbol: trade.symbol,
           strategy: trade.strategy || "confluence-swing",
-          currentPrice: Math.round(currentPrice * 10000) / 10000,
-          unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
-          progressPct: Math.round(progressPct * 10) / 10,
-          slProgress: Math.round(slProgress * 10) / 10,
+          currentPrice:   Math.round(currentPrice * 10000) / 10000,
+          unrealizedPnl:  Math.round(unrealizedPnl * 100) / 100,
+          unrealizedUsd:  unrealizedUsd !== null ? Math.round(unrealizedUsd * 100) / 100 : null,
+          riskUsd:        trade.risk_usd ?? null,
+          positionSizeUsd: trade.position_size_usd ?? null,
+          tp1Hit:         trade.tp1_hit === 1,
+          peakPrice:      trade.peak_price ?? null,
+          progressPct:    Math.round(progressPct * 10) / 10,
+          slProgress:     Math.round(slProgress * 10) / 10,
         };
       });
 

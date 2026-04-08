@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FlaskConical, Filter, ArrowUpDown } from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2 } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -28,6 +28,9 @@ export default function PaperTradingPage() {
   const [closingId, setClosingId] = useState<number | null>(null);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
   const [sortBy, setSortBy] = useState<"date" | "pnl">("date");
+  const [showCapitalForm, setShowCapitalForm] = useState(false);
+  const [capitalInput, setCapitalInput] = useState("");
+  const [riskInput, setRiskInput] = useState("");
 
   const { data: strategies = [] } = useQuery<StrategyInfo[]>({
     queryKey: ["/api/strategies"],
@@ -73,6 +76,17 @@ export default function PaperTradingPage() {
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/journal/${id}`); },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/journal"] }),
+  });
+
+  const capitalMutation = useMutation({
+    mutationFn: async ({ capital, riskPct }: { capital?: number; riskPct?: number }) => {
+      const res = await apiRequest("POST", "/api/paper/capital", { capital, riskPct });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] });
+      setShowCapitalForm(false);
+    },
   });
 
   const paperTrades = journal.filter(e => e.mode === "paper");
@@ -145,6 +159,99 @@ export default function PaperTradingPage() {
           </span>
         </div>
       </div>
+
+      {/* Capital Management Card */}
+      {paperStatus?.capital && (
+        <Card className="border-border/30 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-emerald-400" />
+              <span className="text-xs font-bold">Capital Management</span>
+            </div>
+            <button
+              onClick={() => { setShowCapitalForm(!showCapitalForm); setCapitalInput(String(paperStatus.capital.initial)); setRiskInput(String(paperStatus.capital.riskPct)); }}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Settings2 className="w-3 h-3" /> Configure
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+              <p className="text-[10px] text-muted-foreground mb-0.5">Balance</p>
+              <p className={`text-sm font-bold font-mono ${paperStatus.capital.balance >= paperStatus.capital.initial ? "text-emerald-400" : "text-red-400"}`}>
+                €{paperStatus.capital.balance.toFixed(2)}
+              </p>
+              <p className={`text-[10px] ${paperStatus.capital.totalPnlUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {paperStatus.capital.totalPnlUsd >= 0 ? "+" : ""}€{paperStatus.capital.totalPnlUsd.toFixed(2)} total
+              </p>
+            </div>
+            <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+              <p className="text-[10px] text-muted-foreground mb-0.5">1R (risk/trade)</p>
+              <p className="text-sm font-bold font-mono text-amber-400">€{paperStatus.capital.oneR.toFixed(2)}</p>
+              <p className="text-[10px] text-muted-foreground">{paperStatus.capital.riskPct}% of balance</p>
+            </div>
+            <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+              <p className="text-[10px] text-muted-foreground mb-0.5">Today P&L</p>
+              <p className={`text-sm font-bold font-mono ${paperStatus.capital.todayPnlUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {paperStatus.capital.todayPnlUsd >= 0 ? "+" : ""}€{paperStatus.capital.todayPnlUsd.toFixed(2)}
+              </p>
+              <p className={`text-[10px] ${paperStatus.capital.todayR >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {paperStatus.capital.todayR >= 0 ? "+" : ""}{paperStatus.capital.todayR.toFixed(1)}R today
+              </p>
+            </div>
+            <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
+              <p className="text-[10px] text-muted-foreground mb-0.5">Drawdown Limits</p>
+              <p className="text-[11px] font-medium text-muted-foreground">Daily: <span className="text-red-400">-4R</span></p>
+              <p className="text-[11px] font-medium text-muted-foreground">Monthly: <span className="text-red-400">-8R</span></p>
+            </div>
+          </div>
+
+          {/* Progress bar: balance vs initial */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 rounded-full bg-border/30 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${paperStatus.capital.balance >= paperStatus.capital.initial ? "bg-emerald-500" : "bg-red-500"}`}
+                style={{ width: `${Math.min(100, (paperStatus.capital.balance / paperStatus.capital.initial) * 100)}%` }}
+              />
+            </div>
+            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+              Initial: €{paperStatus.capital.initial}
+            </span>
+          </div>
+
+          {/* Configure form */}
+          {showCapitalForm && (
+            <div className="mt-3 pt-3 border-t border-border/20 flex items-end gap-2 flex-wrap">
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Capital (€)</label>
+                <input
+                  type="number" value={capitalInput} onChange={e => setCapitalInput(e.target.value)}
+                  className="w-28 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-purple-500/60"
+                  placeholder="1000"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Risk per trade (%)</label>
+                <input
+                  type="number" value={riskInput} onChange={e => setRiskInput(e.target.value)}
+                  step="0.5" min="0.5" max="5"
+                  className="w-20 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-purple-500/60"
+                  placeholder="2"
+                />
+              </div>
+              <button
+                onClick={() => capitalMutation.mutate({ capital: parseFloat(capitalInput), riskPct: parseFloat(riskInput) })}
+                disabled={capitalMutation.isPending}
+                className="px-3 py-1.5 text-xs rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/30 transition-colors font-medium"
+              >
+                Save
+              </button>
+              <button onClick={() => setShowCapitalForm(false)} className="text-[10px] text-muted-foreground hover:text-foreground">Cancel</button>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Strategy Mini Stats — only if there's data */}
       {activeStrats.length > 0 && (

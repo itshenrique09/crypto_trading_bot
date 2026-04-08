@@ -206,9 +206,9 @@ function findTechnicalTPs(
   const capFn  = isLong ? (v: number) => Math.min(v, maxTp) : (v: number) => Math.max(v, maxTp);
   const capped = levels.map(capFn).filter(v => isLong ? v > entry + risk * 1.5 : v < entry - risk * 1.5);
 
-  // Fallback: standard R:R multiples
-  const tp1Fallback = isLong ? entry + risk * 2.0 : entry - risk * 2.0;
-  const tp2Fallback = isLong ? entry + risk * 3.5 : entry - risk * 3.5;
+  // Fallback: R:R multiples (TP1=2.5R, TP2=4R — trailing stop handles the rest)
+  const tp1Fallback = isLong ? entry + risk * 2.5 : entry - risk * 2.5;
+  const tp2Fallback = isLong ? entry + risk * 4.0 : entry - risk * 4.0;
 
   return {
     tp1: capped[0] ?? tp1Fallback,

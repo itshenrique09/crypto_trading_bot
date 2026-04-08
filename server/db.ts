@@ -70,10 +70,18 @@ export async function getDb(): Promise<Database> {
     );
   `);
 
-  // Migration: add strategy column to journal
-  try {
-    _db.run("ALTER TABLE journal ADD COLUMN strategy TEXT NOT NULL DEFAULT 'v2-swing'");
-  } catch { /* column already exists */ }
+  // Migrations — safe to run multiple times (catch = column already exists)
+  const migrations = [
+    "ALTER TABLE journal ADD COLUMN strategy TEXT NOT NULL DEFAULT 'v2-swing'",
+    "ALTER TABLE journal ADD COLUMN position_size_usd REAL",   // USD size of the position
+    "ALTER TABLE journal ADD COLUMN risk_usd REAL",            // USD risked (1R)
+    "ALTER TABLE journal ADD COLUMN pnl_usd REAL",             // closed P&L in USD
+    "ALTER TABLE journal ADD COLUMN peak_price REAL",          // trailing stop tracking
+    "ALTER TABLE journal ADD COLUMN tp1_hit INTEGER DEFAULT 0", // 1 if TP1 was hit (trailing active)
+  ];
+  for (const sql of migrations) {
+    try { _db.run(sql); } catch { /* already exists */ }
+  }
 
   // Default mode = signal
   const existing = rowsToObjectsSync<{ key: string; value: string }>(_db, "SELECT * FROM bot_settings WHERE key = 'mode'");

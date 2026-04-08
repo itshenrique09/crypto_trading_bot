@@ -38,7 +38,7 @@ export default function AnalysisPage() {
   const [, marketParams] = useRoute("/market/:symbol");
   const [, analyzeParams] = useRoute("/analyze/:symbol");
   const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
-  const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest">("confluence-swing");
+  const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest" | "rsi-divergence">("confluence-swing");
   const [backtestRequested, setBacktestRequested] = useState(false);
   const [signalLogged, setSignalLogged] = useState(false);
 
@@ -80,6 +80,7 @@ export default function AnalysisPage() {
     "confluence-swing": `/api/backtest/${symbol}`,
     "smc": `/api/backtest-smc/${symbol}`,
     "break-retest": `/api/backtest-breakretest/${symbol}`,
+    "rsi-divergence": `/api/backtest-rsi-div/${symbol}`,
   };
 
   const { data: backtest, isLoading: backtestLoading } = useQuery({
@@ -615,6 +616,7 @@ export default function AnalysisPage() {
                     { id: "confluence-swing" as const, label: "Confluence Swing" },
                     { id: "smc" as const, label: "SMC" },
                     { id: "break-retest" as const, label: "Break & Retest" },
+                    { id: "rsi-divergence" as const, label: "RSI Divergence" },
                   ].map(tab => {
                     const sc = getStratColor(tab.id);
                     return (
