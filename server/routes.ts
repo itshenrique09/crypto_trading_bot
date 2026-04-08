@@ -16,6 +16,9 @@ const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
 const MEXC_BASE = "https://api.mexc.com/api/v3";
 
+// Default strategy ID — used as fallback when strategy field is missing (legacy entries)
+const DEFAULT_STRATEGY = "confluence-swing";
+
 // Top tradeable coins on MEXC (USDT pairs)
 const SCANNER_COINS = [
   "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX",
@@ -283,8 +286,8 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       // PRIMARY: 1H Swing analysis — matches live strategy interval
-      const ind4h = analyzeIndicators(swingCandles);
-      const sig4h = generateSignal(swingCandles, ind4h);
+      const indSwing = analyzeIndicators(swingCandles);
+      const sigSwing = generateSignal(swingCandles, indSwing);
 
       // TREND FILTER: 1D analysis — used to confirm direction
       const ind1d = analyzeIndicators(candles1d);
@@ -301,17 +304,17 @@ export async function registerRoutes(server: Server, app: Express) {
         else if (dist < -0.0075) dailyTrend = "down";
       }
 
-      // Is the 4H signal aligned with the daily trend?
-      const isBuy4h  = sig4h.type === "BUY" || sig4h.type === "STRONG_BUY";
-      const isSell4h = sig4h.type === "SELL" || sig4h.type === "STRONG_SELL";
-      const isContraTrend = (isBuy4h && dailyTrend === "down") || (isSell4h && dailyTrend === "up");
+      // Is the 1H signal aligned with the daily trend?
+      const isBuySwing  = sigSwing.type === "BUY" || sigSwing.type === "STRONG_BUY";
+      const isSellSwing = sigSwing.type === "SELL" || sigSwing.type === "STRONG_SELL";
+      const isContraTrend = (isBuySwing && dailyTrend === "down") || (isSellSwing && dailyTrend === "up");
       const trendAligned = !isContraTrend || dailyTrend === "neutral";
 
       // Final signal: contra-trend needs STRONG signal (±6), else filtered
-      const finalSignal = { ...sig4h };
-      if (isContraTrend && Math.abs(sig4h.confluenceScore) < 6 && sig4h.type !== "HOLD") {
+      const finalSignal = { ...sigSwing };
+      if (isContraTrend && Math.abs(sigSwing.confluenceScore) < 6 && sigSwing.type !== "HOLD") {
         finalSignal.type = "HOLD";
-        finalSignal.reason = `1H says ${sig4h.type} but daily trend is ${dailyTrend} — needs STRONG signal to override`;
+        finalSignal.reason = `1H says ${sigSwing.type} but daily trend is ${dailyTrend} — needs STRONG signal to override`;
         finalSignal.entry = undefined;
         finalSignal.stopLoss = undefined;
         finalSignal.takeProfit1 = undefined;
@@ -319,10 +322,10 @@ export async function registerRoutes(server: Server, app: Express) {
         finalSignal.takeProfit3 = undefined;
       }
 
-      // Agreement: do 4H and 1D agree?
-      const bothBull = sig4h.confluenceScore > 0 && sig1d.confluenceScore > 0;
-      const bothBear = sig4h.confluenceScore < 0 && sig1d.confluenceScore < 0;
-      const spread = Math.abs(sig4h.confluenceScore - sig1d.confluenceScore);
+      // Agreement: do 1H and 1D agree?
+      const bothBull = sigSwing.confluenceScore > 0 && sig1d.confluenceScore > 0;
+      const bothBear = sigSwing.confluenceScore < 0 && sig1d.confluenceScore < 0;
+      const spread = Math.abs(sigSwing.confluenceScore - sig1d.confluenceScore);
 
       let agreement: "strong" | "moderate" | "weak" | "conflicting";
       if      ((bothBull || bothBear) && spread < 3) agreement = "strong";
@@ -333,7 +336,7 @@ export async function registerRoutes(server: Server, app: Express) {
       // Refine entry/SL using 15m candles
       let refinedEntry: { entry: number; stopLoss: number; confidence: number } | null = null;
       if (finalSignal.type !== "HOLD" && finalSignal.entry && finalSignal.stopLoss) {
-        const direction = isBuy4h ? "long" : "short";
+        const direction = isBuySwing ? "long" : "short";
         refinedEntry = refineEntry(direction, finalSignal.entry, finalSignal.stopLoss, candles15m);
       }
 
@@ -342,16 +345,16 @@ export async function registerRoutes(server: Server, app: Express) {
       res.json({
         symbol:       symbol.toUpperCase(),
         currentPrice,
-        indicators:   ind4h,
+        indicators:   indSwing,
         signal:       finalSignal,
         candles:      candles4h.slice(-150),
-        // Timeframe breakdown
+        // Timeframe breakdown — key matches actual data timeframe
         timeframes: {
-          "4h":  { timeframe: "1h",  label: "1H (Signal)", confluenceScore: Math.round(sig4h.confluenceScore * 10) / 10, signalType: sig4h.type, trend: sig4h.trend, confidence: sig4h.confidence },
+          "1h":  { timeframe: "1h",  label: "1H (Signal)", confluenceScore: Math.round(sigSwing.confluenceScore * 10) / 10, signalType: sigSwing.type, trend: sigSwing.trend, confidence: sigSwing.confidence },
           "1d":  { timeframe: "1d",  label: "1D (Trend)",  confluenceScore: Math.round(sig1d.confluenceScore * 10) / 10, signalType: sig1d.type, trend: sig1d.trend, confidence: sig1d.confidence },
         },
         combined: {
-          score:      Math.round(sig4h.confluenceScore * 10) / 10,
+          score:      Math.round(sigSwing.confluenceScore * 10) / 10,
           signal:     finalSignal.type,
           confidence: finalSignal.confidence,
           agreement,
@@ -580,12 +583,12 @@ export async function registerRoutes(server: Server, app: Express) {
       const wrFrac      = done.length > 0 ? wins.length / done.length : 0;
       const expectancy  = wrFrac * avgWin - (1 - wrFrac) * avgLoss;
 
-      // Sharpe estimate
+      // Sharpe estimate (1H bars: each bar = 1/8760 year)
       const pnls      = done.map(t => t.pnlPct);
       const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
-      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 1 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / (pnls.length - 1) : 0;
       const pnlStd    = Math.sqrt(pnlVar);
-      const years     = (allCandles.length * 4) / 8760;  // 4H bars
+      const years     = allCandles.length / 8760;  // 1H bars (fixed: was * 4 by mistake)
       const tpy       = done.length / Math.max(years, 0.01);
       const annReturn = pnlMean * tpy;
       const annStd    = pnlStd  * Math.sqrt(tpy);
@@ -613,8 +616,9 @@ export async function registerRoutes(server: Server, app: Express) {
         maxDrawdown:  Math.round(maxDD * 100) / 100,
         finalEquity:  Math.round(equity * 100) / 100,
         trades:       trades.slice(-50),
+        winsCount:    wins.length,
         spanDays,
-        barHours:     4,
+        barHours:     1,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -743,9 +747,9 @@ export async function registerRoutes(server: Server, app: Express) {
       // Sharpe estimate: annualised return / annualised std-dev of per-trade PnL
       const pnls      = trades.map(t => t.pnlPct);
       const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
-      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 1 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / (pnls.length - 1) : 0;
       const pnlStd    = Math.sqrt(pnlVar);
-      const years     = (allCandles.length * 4) / 8760;
+      const years     = (allCandles.length * 4) / 8760;  // 4H bars
       const tpy       = trades.length / Math.max(years, 0.01);
       const annReturn = pnlMean * tpy;
       const annStd    = pnlStd  * Math.sqrt(tpy);
@@ -773,6 +777,7 @@ export async function registerRoutes(server: Server, app: Express) {
         maxDrawdown:  Math.round(maxDD * 100) / 100,
         finalEquity:  Math.round(equity * 100) / 100,
         trades:       trades.slice(-50),
+        winsCount:    wins.length,
         spanDays,
         barHours:     4,
       });
@@ -905,9 +910,9 @@ export async function registerRoutes(server: Server, app: Express) {
       // Sharpe estimate: annualised return / annualised std-dev of per-trade PnL
       const pnls      = trades.map(t => t.pnlPct);
       const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
-      const pnlVar    = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 1 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / (pnls.length - 1) : 0;
       const pnlStd    = Math.sqrt(pnlVar);
-      const years     = (allCandles.length * 4) / 8760;
+      const years     = (allCandles.length * 4) / 8760;  // 4H bars
       const tpy       = trades.length / Math.max(years, 0.01);
       const annReturn = pnlMean * tpy;
       const annStd    = pnlStd  * Math.sqrt(tpy);
@@ -935,6 +940,7 @@ export async function registerRoutes(server: Server, app: Express) {
         maxDrawdown:  Math.round(maxDD * 100) / 100,
         finalEquity:  Math.round(equity * 100) / 100,
         trades:       trades.slice(-50),
+        winsCount:    wins.length,
         spanDays,
         barHours:     4,
       });
@@ -1033,7 +1039,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
       const pnls    = trades.map(t => t.pnlPct);
       const pnlMean = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
-      const pnlVar  = pnls.length > 0 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / pnls.length : 0;
+      const pnlVar  = pnls.length > 1 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / (pnls.length - 1) : 0;
       const years   = (allCandles.length) / 8760;
       const tpy     = trades.length / Math.max(years, 0.01);
       const annReturn = pnlMean * tpy;
@@ -1098,7 +1104,7 @@ export async function registerRoutes(server: Server, app: Express) {
       ].sort((a, b) => a.time - b.time);
 
       const totalTrades = strategies.reduce((s, st) => s + (st.totalTrades || 0), 0);
-      const totalWins = strategies.reduce((s, st) => s + Math.round((st.winRate / 100) * (st.totalTrades || 0)), 0);
+      const totalWins = strategies.reduce((s, st) => s + (st.winsCount || Math.round((st.winRate / 100) * (st.totalTrades || 0))), 0);
       const combinedWR = totalTrades > 0 ? Math.round((totalWins / totalTrades) * 1000) / 10 : 0;
       const combinedReturn = strategies.reduce((s, st) => s + (st.totalReturn || 0), 0);
 
@@ -1395,7 +1401,7 @@ export async function registerRoutes(server: Server, app: Express) {
             pnl_pct:     Math.round(pnlPct * 100) / 100,
             pnl_usd:     pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
             closed_at:   new Date().toISOString(),
-            notes:       trade.notes + ` | ${closeReason}`,
+            notes:       (trade.notes || "") + ` | ${closeReason}`,
           });
         }
       }
@@ -1426,13 +1432,12 @@ export async function registerRoutes(server: Server, app: Express) {
       const mode = await getSetting("mode");
       if (mode !== "paper" || !paperStatus.running) return;
 
-      const topCoins = await getTopCoinsByVolume(30);
-
       const strategies = await getEnabledStrategies();
       if (strategies.length === 0) return;
 
-      // Always include preferredSymbols coins for each strategy (regardless of volume rank)
-      const preferredSet = new Set<string>(topCoins);
+      // Use the same coin list as the market page + any strategy-specific preferred coins
+      // This keeps the engine consistent with what the user sees on the Market page
+      const preferredSet = new Set<string>(SCANNER_COINS);
       for (const strat of strategies) {
         for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
       }
@@ -1532,7 +1537,7 @@ export async function registerRoutes(server: Server, app: Express) {
             }
 
             // Re-check total open trades (may have added new ones this scan)
-            if (totalOpen + openPairs.size >= 10) break;
+            if (totalOpen + openPairs.size >= 6) break;
 
             try {
               // Lazy-fetch candles for this interval
@@ -1712,7 +1717,7 @@ export async function registerRoutes(server: Server, app: Express) {
         return {
           id: trade.id,
           symbol: trade.symbol,
-          strategy: trade.strategy || "confluence-swing",
+          strategy: trade.strategy || DEFAULT_STRATEGY,
           currentPrice:   Math.round(currentPrice * 10000) / 10000,
           unrealizedPnl:  Math.round(unrealizedPnl * 100) / 100,
           unrealizedUsd:  unrealizedUsd !== null ? Math.round(unrealizedUsd * 100) / 100 : null,
@@ -1874,7 +1879,7 @@ export async function registerRoutes(server: Server, app: Express) {
             pnl_pct:   Math.round(pnlPct * 100) / 100,
             pnl_usd:   pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
             closed_at: new Date().toISOString(),
-            notes:     trade.notes + " | Closed on MEXC",
+            notes:     (trade.notes || "") + " | Closed on MEXC",
           });
           continue;
         }
@@ -1895,8 +1900,19 @@ export async function registerRoutes(server: Server, app: Express) {
           const tp1Hit = isLong ? price >= trade.take_profit1 : price <= trade.take_profit1;
           if (tp1Hit) {
             await updateJournalEntry(trade.id, { tp1_hit: 1, stop_loss: trade.entry_price });
-            // Update SL on MEXC (positionId from notes is not stored yet; use symbol-based approach)
-            // For now log the event — full positionId tracking can be added later
+
+            // Update SL on MEXC exchange — move to break-even
+            // Find positionId from the MEXC position list (matched by symbol)
+            if (pos) {
+              try {
+                // Use the existing TP (TP2 or TP1) when updating risk levels
+                const currentTp = trade.take_profit2 ?? trade.take_profit1;
+                await client.setTpSl(mexcSym, String(pos.positionId), trade.entry_price, currentTp);
+              } catch (slErr: any) {
+                // Log but don't break — SL update is best-effort
+                console.error(`[Live] Failed to update SL on MEXC for ${trade.symbol}: ${slErr.message}`);
+              }
+            }
           }
         }
 
@@ -1910,6 +1926,20 @@ export async function registerRoutes(server: Server, app: Express) {
             try {
               const posType = isLong ? 1 : 2;
               await client.closePosition(mexcSym, posType, pos.holdVol);
+              
+              const pnlPct = isLong
+                ? ((price - trade.entry_price) / trade.entry_price) * 100
+                : ((trade.entry_price - price) / trade.entry_price) * 100;
+              const pnlUsd = trade.position_size_usd ? trade.position_size_usd * (pnlPct / 100) : null;
+
+              await updateJournalEntry(trade.id, {
+                outcome:   pnlPct >= 0 ? "win" : "loss",
+                exit_price: Math.round(price * 10000) / 10000,
+                pnl_pct:   Math.round(pnlPct * 100) / 100,
+                pnl_usd:   pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+                closed_at: new Date().toISOString(),
+                notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`,
+              });
             } catch { /* position may already be closed */ }
           }
         }
@@ -1927,11 +1957,11 @@ export async function registerRoutes(server: Server, app: Express) {
       if (!liveEngineStatus.running) return;
 
       const client = await getLiveClient();
-      const topCoins = await getTopCoinsByVolume(30);
       const strategies = await getEnabledStrategies();
       if (strategies.length === 0) return;
 
-      const preferredSet = new Set<string>(topCoins);
+      // Same coin universe as market page + strategy-specific preferred coins
+      const preferredSet = new Set<string>(SCANNER_COINS);
       for (const strat of strategies) {
         for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
       }
@@ -1944,9 +1974,9 @@ export async function registerRoutes(server: Server, app: Express) {
       // Cap at 6 concurrent live positions
       if (openLive.length >= 6) return;
 
-      // Capital from actual MEXC balance
+      // Capital from actual MEXC balance (use equity, not just available balance which excludes margin)
       const balance = await client.getBalance();
-      const currentBalance = balance.availableBalance;
+      const currentBalance = balance.equity;
       const baseRiskPct = parseFloat(await getSetting("live_risk_pct") || "1"); // conservative 1% default
 
       // BTC macro filter

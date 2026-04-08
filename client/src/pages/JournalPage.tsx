@@ -13,55 +13,9 @@ import {
 } from "lucide-react";
 import { formatPrice, getSignalColor } from "@/lib/utils";
 import TradeChartModal from "@/components/TradeChartModal";
+import { PaperPrice, JournalEntry, StrategyInfo, STRATEGY_COLORS, getStratColor } from "@/lib/types";
 
-interface PaperPrice {
-  id: number;
-  symbol: string;
-  strategy: string;
-  currentPrice: number;
-  unrealizedPnl: number;
-  progressPct: number;
-  slProgress: number;
-}
-
-interface JournalEntry {
-  id: number;
-  symbol: string;
-  direction: string;
-  entry_price: number;
-  stop_loss: number;
-  take_profit1: number;
-  take_profit2: number | null;
-  confluence_score: number | null;
-  mode: string;
-  strategy: string;
-  followed: string;
-  outcome: string;
-  exit_price: number | null;
-  pnl_pct: number | null;
-  notes: string;
-  created_at: string;
-  closed_at: string | null;
-}
-
-interface StrategyInfo {
-  id: string;
-  name: string;
-  description: string;
-  interval: string;
-  enabled: boolean;
-}
-
-const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  "confluence-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "v2-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "smc": { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
-  "break-retest": { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
-};
-
-function getStratColor(id: string) {
-  return STRATEGY_COLORS[id] || { bg: "bg-gray-500/10", text: "text-gray-400", border: "border-gray-500/30" };
-}
+const DEFAULT_STRATEGY = "confluence-swing";
 
 export default function JournalPage() {
   const queryClient = useQueryClient();
@@ -193,7 +147,7 @@ export default function JournalPage() {
   const filtered = (journal as JournalEntry[]).filter(e => {
     if (filter !== "all" && e.outcome !== filter && !(filter === "open" && e.outcome === "open")) return false;
     if (modeFilter !== "all" && e.mode !== modeFilter) return false;
-    if (strategyFilter !== "all" && (e.strategy || "confluence-swing") !== strategyFilter) return false;
+    if (strategyFilter !== "all" && (e.strategy || DEFAULT_STRATEGY) !== strategyFilter) return false;
     return true;
   });
 
@@ -453,7 +407,7 @@ export default function JournalPage() {
         )}
 
         {filtered.map((entry) => {
-          const sc = getStratColor(entry.strategy || "confluence-swing");
+          const sc = getStratColor(entry.strategy || DEFAULT_STRATEGY);
           return (
           <Card key={entry.id} className="border-border/50 bg-card/50 p-3">
             <div className="flex items-center justify-between mb-2">
@@ -472,7 +426,7 @@ export default function JournalPage() {
                 </Link>
                 {/* Strategy badge */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
-                  {strategies.find(s => s.id === (entry.strategy || "confluence-swing"))?.name || (entry.strategy === "v2-swing" ? "Confluence Swing" : entry.strategy || "Confluence Swing")}
+                  {strategies.find(s => s.id === (entry.strategy || DEFAULT_STRATEGY))?.name || (entry.strategy === "v2-swing" ? "Confluence Swing" : entry.strategy || "Confluence Swing")}
                 </span>
                 {/* Mode */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${

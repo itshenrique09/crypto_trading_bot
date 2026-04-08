@@ -964,7 +964,7 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
     // Technical TPs: nearest swing high/low beyond entry (fallback to R:R multiples)
     const tTPs = findTechnicalTPs(candles, currentPrice, stopLoss, isBuy);
     tp1 = tTPs.tp1;  // nearest structural level (≥1.5R) or 2.0R fallback
-    tp2 = tTPs.tp2;  // next structural level or 3.5R fallback
+    tp2 = tTPs.tp2;  // next structural level or 4R fallback
     tp3 = isBuy ? currentPrice + risk * 5 : currentPrice - risk * 5;  // 5:1 extended target
 
     riskRewardRatio = Math.round((Math.abs(tp2 - currentPrice) / risk) * 10) / 10;
@@ -1292,7 +1292,7 @@ export interface SMCSignal {
   entry: number;
   stopLoss: number;
   takeProfit: number;   // TP1 — nearest structural level
-  takeProfit2: number;  // TP2 — next structural level or 3.5R fallback
+  takeProfit2: number;  // TP2 — next structural level or 4R fallback
   confidence: number;
   reason: string;
   structure: "bullish" | "bearish" | "none";

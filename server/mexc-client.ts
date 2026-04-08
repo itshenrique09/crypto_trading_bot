@@ -31,6 +31,7 @@ export interface MexcOrder {
 }
 
 export interface MexcPosition {
+  positionId: number;        // MEXC position ID — needed for setTpSl
   symbol: string;
   holdVol: number;
   positionType: 1 | 2;     // 1=long, 2=short

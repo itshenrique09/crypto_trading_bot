@@ -185,7 +185,7 @@ export default function AnalysisPage() {
                   <div className="flex items-center gap-2 mb-3">
                     <Zap className="w-4 h-4 text-amber-400" />
                     <span className="text-xs font-bold">Strategy Signals</span>
-                    <span className="text-[10px] text-muted-foreground/50 ml-auto">Swing/RSI Div: 1H · SMC/B&R: 4H</span>
+                    <span className="text-[10px] text-muted-foreground/50 ml-auto">Raw · no trend filter · Swing/RSI Div: 1H · SMC/B&R: 4H</span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     {stratSignals.map(s => {
@@ -231,7 +231,7 @@ export default function AnalysisPage() {
                 <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Clock className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-bold">v2 Swing — 1H Signal + 1D Trend Filter</span>
+                    <span className="text-xs font-bold">v2 Swing — 1H Signal + 1D Trend Filter (bot signal)</span>
                     {combined && (
                       <Badge variant="outline" className="ml-auto text-[10px]">
                         {combined.trendAligned
@@ -243,20 +243,20 @@ export default function AnalysisPage() {
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {/* 1H Signal Card */}
-                    {timeframes?.["4h"] && (
-                      <div className={`rounded-md border-2 p-3 ${getSignalBg(timeframes["4h"].signalType)} border-cyan-500/40`}>
+                    {timeframes?.["1h"] && (
+                      <div className={`rounded-md border-2 p-3 ${getSignalBg(timeframes["1h"].signalType)} border-cyan-500/40`}>
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-[10px] text-cyan-400 font-medium uppercase tracking-wider">{timeframes["4h"].label}</span>
-                          <span className="text-[10px] font-mono text-muted-foreground">{timeframes["4h"].confluenceScore > 0 ? "+" : ""}{timeframes["4h"].confluenceScore}</span>
+                          <span className="text-[10px] text-cyan-400 font-medium uppercase tracking-wider">{timeframes["1h"].label}</span>
+                          <span className="text-[10px] font-mono text-muted-foreground">{timeframes["1h"].confluenceScore > 0 ? "+" : ""}{timeframes["1h"].confluenceScore}</span>
                         </div>
-                        <p className={`text-xs font-bold ${getSignalColor(timeframes["4h"].signalType)}`}>
-                          {timeframes["4h"].signalType.replace("_", " ")}
+                        <p className={`text-xs font-bold ${getSignalColor(timeframes["1h"].signalType)}`}>
+                          {timeframes["1h"].signalType.replace("_", " ")}
                         </p>
-                        <p className="text-[10px] text-muted-foreground mt-1 capitalize">{timeframes["4h"].trend.replace("_", " ")}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1 capitalize">{timeframes["1h"].trend.replace("_", " ")}</p>
                         <div className="mt-2 h-1 rounded-full bg-border/40 overflow-hidden">
                           <div
-                            className={`h-full rounded-full transition-all ${timeframes["4h"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-                            style={{ width: `${Math.abs(timeframes["4h"].confluenceScore) * 10}%`, marginLeft: timeframes["4h"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["4h"].confluenceScore) * 10}%` : "0" }}
+                            className={`h-full rounded-full transition-all ${timeframes["1h"].confluenceScore >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+                            style={{ width: `${Math.abs(timeframes["1h"].confluenceScore) * 10}%`, marginLeft: timeframes["1h"].confluenceScore < 0 ? `${100 - Math.abs(timeframes["1h"].confluenceScore) * 10}%` : "0" }}
                           />
                         </div>
                       </div>
@@ -462,8 +462,8 @@ export default function AnalysisPage() {
                     <span className="text-xs font-bold">Risk Management</span>
                   </div>
                   <div className="space-y-2 text-xs">
-                    <RiskRow label="Entry (4H)" value={`$${formatPrice(signal.entry)}`} color="text-foreground" icon={<DollarSign className="w-3 h-3" />} />
-                    <RiskRow label="Stop (4H)" value={`$${formatPrice(signal.stopLoss)}`} color="text-red-400" icon={<AlertTriangle className="w-3 h-3" />} />
+                    <RiskRow label="Entry (1H)" value={`$${formatPrice(signal.entry)}`} color="text-foreground" icon={<DollarSign className="w-3 h-3" />} />
+                    <RiskRow label="Stop (1H)" value={`$${formatPrice(signal.stopLoss)}`} color="text-red-400" icon={<AlertTriangle className="w-3 h-3" />} />
 
                     {/* Refined entry from 15m */}
                     {analysis?.refinedEntry && (
@@ -480,9 +480,8 @@ export default function AnalysisPage() {
 
                     <div className="border-t border-border/15 pt-2">
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Take Profit Levels</p>
-                      <RiskRow label="TP1 (1.5:1 R:R)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400/70" icon={<Target className="w-3 h-3" />} />
-                      <RiskRow label="TP2 (2.5:1 R:R)" value={`$${formatPrice(signal.takeProfit2)}`} color="text-emerald-400/85" icon={<Target className="w-3 h-3" />} />
-                      <RiskRow label="TP3 (4:1 R:R)" value={`$${formatPrice(signal.takeProfit3)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
+                      <RiskRow label="TP1 (trail trigger)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400/70" icon={<Target className="w-3 h-3" />} />
+                      <RiskRow label="TP2 (main target)" value={`$${formatPrice(signal.takeProfit2)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
                     </div>
                     <div className="border-t border-border/15 pt-2 space-y-1.5">
                       <div className="flex justify-between">
