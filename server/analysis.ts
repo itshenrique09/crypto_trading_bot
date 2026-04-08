@@ -162,6 +162,60 @@ function calcRSI(closes: number[], period = 14): number[] {
   return rsi;
 }
 
+// ─── Technical TP finder — nearest swing level beyond entry ──────
+//
+// Scans recent candles for confirmed swing highs/lows and returns the
+// nearest and second-nearest level on the profit side of the entry.
+// Falls back to R:R multiples when no clear structural level exists.
+//
+function findTechnicalTPs(
+  candles: OHLCV[],
+  entry: number,
+  stopLoss: number,
+  isLong: boolean
+): { tp1: number; tp2: number } {
+  const risk = Math.abs(entry - stopLoss);
+  const minDist = risk * 1.5;          // must be at least 1.5R from entry
+  const swingWindow = 3;               // bars on each side to confirm swing
+
+  // Scan last ~100 bars; exclude last 2 (not yet confirmed as swing points)
+  const end   = Math.max(0, candles.length - 2);
+  const start = Math.max(0, end - 100);
+
+  const levels: number[] = [];
+  for (let i = start + swingWindow; i < end - swingWindow; i++) {
+    if (isLong) {
+      const isSwingHigh =
+        candles.slice(i - swingWindow, i).every(c => c.high <= candles[i].high) &&
+        candles.slice(i + 1, i + swingWindow + 1).every(c => c.high <= candles[i].high);
+      if (isSwingHigh && candles[i].high > entry + minDist) levels.push(candles[i].high);
+    } else {
+      const isSwingLow =
+        candles.slice(i - swingWindow, i).every(c => c.low >= candles[i].low) &&
+        candles.slice(i + 1, i + swingWindow + 1).every(c => c.low >= candles[i].low);
+      if (isSwingLow && candles[i].low < entry - minDist) levels.push(candles[i].low);
+    }
+  }
+
+  // Nearest level first
+  if (isLong) levels.sort((a, b) => a - b);
+  else        levels.sort((a, b) => b - a);
+
+  // Cap at 5R — prevents unreachable TPs on very wide swings
+  const maxTp  = isLong ? entry + risk * 5 : entry - risk * 5;
+  const capFn  = isLong ? (v: number) => Math.min(v, maxTp) : (v: number) => Math.max(v, maxTp);
+  const capped = levels.map(capFn).filter(v => isLong ? v > entry + risk * 1.5 : v < entry - risk * 1.5);
+
+  // Fallback: standard R:R multiples
+  const tp1Fallback = isLong ? entry + risk * 2.0 : entry - risk * 2.0;
+  const tp2Fallback = isLong ? entry + risk * 3.5 : entry - risk * 3.5;
+
+  return {
+    tp1: capped[0] ?? tp1Fallback,
+    tp2: capped[1] ?? tp2Fallback,
+  };
+}
+
 // ─── Stochastic RSI — FIXED: proper D-line via SMA(3) ────────────
 
 function calcStochRSI(closes: number[], rsiPeriod = 14, stochPeriod = 14, smoothK = 3, smoothD = 3): { k: number; d: number } {
@@ -907,9 +961,11 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
     stopLoss = isBuy ? currentPrice - slMultiplier * atr : currentPrice + slMultiplier * atr;
 
     const risk = Math.abs(currentPrice - stopLoss);
-    tp1 = isBuy ? currentPrice + risk * 1.5 : currentPrice - risk * 1.5;  // 1.5:1
-    tp2 = isBuy ? currentPrice + risk * 2.5 : currentPrice - risk * 2.5;  // 2.5:1
-    tp3 = isBuy ? currentPrice + risk * 4   : currentPrice - risk * 4;    // 4:1
+    // Technical TPs: nearest swing high/low beyond entry (fallback to R:R multiples)
+    const tTPs = findTechnicalTPs(candles, currentPrice, stopLoss, isBuy);
+    tp1 = tTPs.tp1;  // nearest structural level (≥1.5R) or 2.0R fallback
+    tp2 = tTPs.tp2;  // next structural level or 3.5R fallback
+    tp3 = isBuy ? currentPrice + risk * 5 : currentPrice - risk * 5;  // 5:1 extended target
 
     riskRewardRatio = Math.round((Math.abs(tp2 - currentPrice) / risk) * 10) / 10;
 
@@ -1235,7 +1291,8 @@ export interface SMCSignal {
   type: "LONG" | "SHORT" | "NONE";
   entry: number;
   stopLoss: number;
-  takeProfit: number;
+  takeProfit: number;   // TP1 — nearest structural level
+  takeProfit2: number;  // TP2 — next structural level or 3.5R fallback
   confidence: number;
   reason: string;
   structure: "bullish" | "bearish" | "none";
@@ -1244,7 +1301,7 @@ export interface SMCSignal {
 
 export function smcSignal(candles: OHLCV[]): SMCSignal {
   const none: SMCSignal = {
-    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0, takeProfit2: 0,
     confidence: 0, reason: "", structure: "none",
   };
 
@@ -1364,6 +1421,7 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
     conf: number;
     sl: number;
     tp: number;
+    tp2: number;
     rr: number;
     obHigh: number;
     obLow: number;
@@ -1396,9 +1454,9 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       const risk = price - sl;
       if (risk <= 0) continue;
 
-      const nextTarget = swingHighs[swingHighs.length - 1];
-      const tp25 = price + risk * 2.5;
-      const tp   = Math.min(nextTarget > price ? nextTarget : tp25, tp25);
+      // Technical TP: nearest swing high above entry (not capped at 2.5R)
+      const tTPs = findTechnicalTPs(candles, price, sl, true);
+      const tp   = tTPs.tp1;
       const rr   = Math.abs(tp - price) / risk;
       if (rr < 1.8) continue;
 
@@ -1412,7 +1470,7 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       conf = Math.min(90, conf);
 
       if (!bestCandidate || conf > bestCandidate.conf) {
-        bestCandidate = { conf, sl, tp, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
+        bestCandidate = { conf, sl, tp, tp2: tTPs.tp2, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
       }
 
     } else {
@@ -1436,9 +1494,9 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       const risk = sl - price;
       if (risk <= 0) continue;
 
-      const nextTarget = swingLows[swingLows.length - 1];
-      const tp25 = price - risk * 2.5;
-      const tp   = Math.max(nextTarget < price ? nextTarget : tp25, tp25);
+      // Technical TP: nearest swing low below entry (not capped at 2.5R)
+      const tTPs = findTechnicalTPs(candles, price, sl, false);
+      const tp   = tTPs.tp1;
       const rr   = Math.abs(price - tp) / risk;
       if (rr < 1.8) continue;
 
@@ -1451,14 +1509,14 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       conf = Math.min(90, conf);
 
       if (!bestCandidate || conf > bestCandidate.conf) {
-        bestCandidate = { conf, sl, tp, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
+        bestCandidate = { conf, sl, tp, tp2: tTPs.tp2, rr, obHigh: ob.high, obLow: ob.low, hasRejection };
       }
     }
   }
 
   if (!bestCandidate) return none;
 
-  const { conf, sl, tp, rr, obHigh, obLow, hasRejection } = bestCandidate;
+  const { conf, sl, tp, tp2, rr, obHigh, obLow, hasRejection } = bestCandidate;
   const dir = bosDirection === "bullish" ? "LONG" : "SHORT";
 
   return {
@@ -1466,6 +1524,7 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
     entry: price,
     stopLoss: sl,
     takeProfit: tp,
+    takeProfit2: tp2,
     confidence: conf,
     reason: [
       dir === "LONG" ? `Bullish BOS (HH+HL)` : `Bearish BOS (LH+LL)`,
@@ -1495,13 +1554,14 @@ export interface BreakRetestSignal {
   type: "LONG" | "SHORT" | "NONE";
   entry: number;
   stopLoss: number;
-  takeProfit: number;
+  takeProfit: number;   // TP1 — next S/R level or 2.5R fallback
+  takeProfit2: number;  // TP2 — level after TP1 or 4R fallback
   confidence: number;
   reason: string;
   level?: number;
 }
 
-export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
+export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetestSignal {
   // ── PROFESSIONAL BREAK & RETEST ─────────────────────────────────
   //
   // Rules (as a discretionary trader would apply):
@@ -1517,7 +1577,7 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
   //     so EMA200 is reliable regardless of the warm-up period
 
   const none: BreakRetestSignal = {
-    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0,
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0, takeProfit2: 0,
     confidence: 0, reason: "",
   };
 
@@ -1609,10 +1669,10 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
     } else clusters.push({ price: lvl, touches: 1, lastIdx: idx });
   }
 
-  // ✦ Require 3+ touches: well-respected institutional levels only
-  //   (2-touch levels are common noise; 3+ = price respects this zone)
+  // ✦ Require minTouches (default 3): well-respected institutional levels
+  //   (2-touch levels are more common; 3+ = stronger institutional respect)
   const strongLevels = clusters
-    .filter(c => c.touches >= 3)
+    .filter(c => c.touches >= minTouches)
     .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price));
 
   if (strongLevels.length === 0) return none;
@@ -1767,12 +1827,15 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
       const risk = price - sl;
       if (risk <= 0) continue;
 
-      // Find next resistance above
-      const nextRes = strongLevels.find(l => l.price > price + atr * 0.3 && l.touches >= 2);
+      // TP1: next resistance above entry, or 2.5R fallback
+      const nextRes = strongLevels.find(l => l.price > price + risk && l.touches >= 2);
       const tpDefault = price + risk * 2.5;
-      const tp = (nextRes && nextRes.price > price + risk) ? Math.min(nextRes.price, tpDefault) : tpDefault;
+      const tp = (nextRes && nextRes.price > price + risk) ? nextRes.price : tpDefault;
       const rr = (tp - price) / risk;
       if (rr < 2.0) continue;
+      // TP2: next resistance beyond TP1, or technical swing level, or 4R fallback
+      const nextRes2 = strongLevels.find(l => l.price > tp + atr * 0.5 && l.touches >= 2);
+      const tp2 = nextRes2 ? nextRes2.price : findTechnicalTPs(candles, price, sl, true).tp2;
 
       // ── Confidence score ──
       let conf = 45;
@@ -1791,6 +1854,7 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
         entry: price,
         stopLoss: sl,
         takeProfit: tp,
+        takeProfit2: tp2,
         confidence: conf,
         reason: `B&R UP | Level ${lvlPrice.toFixed(4)} (${level.touches}x) | ${rejectionType} | Break+${retestBars}bars | Vol ${breakVolRatio.toFixed(1)}x | R:R ${rr.toFixed(1)}:1`,
         level: lvlPrice,
@@ -1801,11 +1865,15 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
       const risk = sl - price;
       if (risk <= 0) continue;
 
-      const nextSup = [...strongLevels].reverse().find(l => l.price < price - atr * 0.3 && l.touches >= 2);
+      // TP1: next support below entry, or 2.5R fallback
+      const nextSup = [...strongLevels].reverse().find(l => l.price < price - risk && l.touches >= 2);
       const tpDefault = price - risk * 2.5;
-      const tp = (nextSup && nextSup.price < price - risk) ? Math.max(nextSup.price, tpDefault) : tpDefault;
+      const tp = (nextSup && nextSup.price < price - risk) ? nextSup.price : tpDefault;
       const rr = (price - tp) / risk;
       if (rr < 2.0) continue;
+      // TP2: next support beyond TP1, or technical swing level, or 4R fallback
+      const nextSup2 = [...strongLevels].reverse().find(l => l.price < tp - atr * 0.5 && l.touches >= 2);
+      const tp2Short = nextSup2 ? nextSup2.price : findTechnicalTPs(candles, price, sl, false).tp2;
 
       let conf = 45;
       if (level.touches >= 3) conf += 10;
@@ -1823,10 +1891,117 @@ export function breakRetestSignal(candles: OHLCV[]): BreakRetestSignal {
         entry: price,
         stopLoss: sl,
         takeProfit: tp,
+        takeProfit2: tp2Short,
         confidence: conf,
         reason: `B&R DOWN | Level ${lvlPrice.toFixed(4)} (${level.touches}x) | ${rejectionType} | Break+${retestBars}bars | Vol ${breakVolRatio.toFixed(1)}x | R:R ${rr.toFixed(1)}:1`,
         level: lvlPrice,
       };
+    }
+  }
+
+  return none;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATEGY F: RSI DIVERGENCE
+// ═══════════════════════════════════════════════════════════════════
+//
+// Detects classic price-RSI divergence setups:
+//   Bullish: price makes lower low, RSI makes higher low (RSI<40) → LONG
+//   Bearish: price makes higher high, RSI makes lower high (RSI>60) → SHORT
+//
+// EMA200 macro filter: LONG only in bull market, SHORT only in bear market.
+// SL: 0.5% below/above the divergence swing. TP: 2.5R (TP2: 4R).
+//
+// 3.7-year 1H backtest (25 coins):
+//   ✅ FIL  PF=1.72 T=122 — 4/5 years positive (2022:-1% 2023:+14% 2024:+35% 2025:+70%)
+//   ✅ SAND PF=1.70 T=135 — ALL years positive (+26% +34% +3% +57% +10%) ⭐
+//   🟡 Others mostly PF=1.0–1.37 (not significant enough for live trading)
+
+export interface RsiDivSignal {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;   // 2.5R
+  takeProfit2: number;  // 4R
+  confidence: number;
+  reason: string;
+}
+
+export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
+  const none: RsiDivSignal = {
+    type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0, takeProfit2: 0,
+    confidence: 0, reason: "",
+  };
+
+  const LOOKBACK  = 5;   // bars each side to define a swing
+  const DIV_RANGE = 30;  // bars to scan back for divergence
+
+  if (candles.length < 250) return none;
+
+  const closes  = candles.map(c => c.close);
+  const lows    = candles.map(c => c.low);
+  const highs   = candles.map(c => c.high);
+  const rsiVals = calcRSI(closes, 14);
+  const ema200v = ema(closes, 200);
+
+  const n      = candles.length - 1;
+  const price  = closes[n];
+  const inBull = price > ema200v[n];
+
+  // ── BULLISH DIVERGENCE → LONG (only in bull market) ──
+  if (inBull) {
+    const priceLow1 = Math.min(...lows.slice(n - LOOKBACK, n + 1));
+    const rsiLow1   = Math.min(...rsiVals.slice(n - LOOKBACK, n + 1));
+
+    for (let j = n - LOOKBACK * 2 - 1; j >= Math.max(200, n - DIV_RANGE); j--) {
+      const priceLow2 = Math.min(...lows.slice(j - LOOKBACK, j + 1));
+      const rsiLow2   = Math.min(...rsiVals.slice(j - LOOKBACK, j + 1));
+
+      // Bullish divergence: price lower low + RSI higher low (RSI in oversold zone)
+      if (priceLow1 < priceLow2 * 0.998 && rsiLow1 > rsiLow2 + 2 && rsiLow1 < 40) {
+        const sl   = priceLow1 * 0.995;
+        const risk = price - sl;
+        if (risk <= 0 || risk / price > 0.05) break;
+        const conf = rsiLow1 < 30 ? 80 : 72;
+        return {
+          type: "LONG",
+          entry: price,
+          stopLoss: sl,
+          takeProfit:  price + risk * 2.5,
+          takeProfit2: price + risk * 4,
+          confidence: conf,
+          reason: `RSI Bull Div | PriceLow ${priceLow1.toFixed(4)}<${priceLow2.toFixed(4)} RSI ${rsiLow1.toFixed(1)}>${rsiLow2.toFixed(1)} | EMA200 bull`,
+        };
+      }
+    }
+  }
+
+  // ── BEARISH DIVERGENCE → SHORT (only in bear market) ──
+  if (!inBull) {
+    const priceHigh1 = Math.max(...highs.slice(n - LOOKBACK, n + 1));
+    const rsiHigh1   = Math.max(...rsiVals.slice(n - LOOKBACK, n + 1));
+
+    for (let j = n - LOOKBACK * 2 - 1; j >= Math.max(200, n - DIV_RANGE); j--) {
+      const priceHigh2 = Math.max(...highs.slice(j - LOOKBACK, j + 1));
+      const rsiHigh2   = Math.max(...rsiVals.slice(j - LOOKBACK, j + 1));
+
+      // Bearish divergence: price higher high + RSI lower high (RSI in overbought zone)
+      if (priceHigh1 > priceHigh2 * 1.002 && rsiHigh1 < rsiHigh2 - 2 && rsiHigh1 > 60) {
+        const sl   = priceHigh1 * 1.005;
+        const risk = sl - price;
+        if (risk <= 0 || risk / price > 0.05) break;
+        const conf = rsiHigh1 > 70 ? 80 : 72;
+        return {
+          type: "SHORT",
+          entry: price,
+          stopLoss: sl,
+          takeProfit:  price - risk * 2.5,
+          takeProfit2: price - risk * 4,
+          confidence: conf,
+          reason: `RSI Bear Div | PriceHigh ${priceHigh1.toFixed(4)}>${priceHigh2.toFixed(4)} RSI ${rsiHigh1.toFixed(1)}<${rsiHigh2.toFixed(1)} | EMA200 bear`,
+        };
+      }
     }
   }
 

@@ -6,22 +6,28 @@ export const v2SwingStrategy: Strategy = {
   name: "Confluence Swing",
   description:
     "Multi-indicator confluence: EMA9/21/50/200 + Ichimoku + RSI + Stoch RSI + MACD + " +
-    "Bollinger + OBV + Order Blocks + Fibonacci. Score ±10, signal at ±4/±6. " +
-    "Dual TP: 1.5× (TP1) + 2.5× (TP2). High frequency — 130-160 trades/year per coin.",
-  interval: "4h",
-  minCandles: 250,  // EMA200 seed ≈8% at 250 bars (reliable); was 90 → EMA200 always disabled
-  // ── 3.7-year 4H backtest (8000 candles, ~2022–2026) ──────────────────
-  //   STRONG signals only (score≥6) + EMA200 macro filter (1% margin)
-  //   ✅ AVAX PF=2.15 T=53  WR=47% Sharpe=1.19  (best — PF>2)
-  //   ✅ XRP  PF=2.03 T=46  WR=50% Sharpe=1.15  (PF>2, low N)
-  //   ✅ DOT  PF=1.98 T=44  WR=43% Sharpe=1.00  (just under 2, low N)
-  //   ✅ BTC  PF=1.51 T=82  WR=41% Sharpe=0.87  (good frequency ~22/year)
-  //   ✅ BNB  PF=1.51 T=65  WR=49% Sharpe=0.78  (~18/year)
-  //   🟡 ADA  PF=1.15 T=58 | DOGE PF=1.07 | LINK PF=1.08 (marginal)
-  //   ❌ ETH  PF=0.69 T=53  (avoid — consistently underperforms)
-  //   ❌ SOL  PF=0.85 T=47  (avoid — volatile, low WR 30%)
-  //   ⚠️  Low N for XRP/DOT/AVAX — ~12-14 trades/year
-  preferredSymbols: ["AVAX", "XRP", "DOT", "BTC", "BNB"],
+    "Bollinger + OBV + Order Blocks + Fibonacci. Score ±10, STRONG signal at ±6. " +
+    "Dual TP: 1.5× (TP1) + 2.5× (TP2). Runs on 1H for optimal timing and trade frequency.",
+  interval: "1h",
+  minCandles: 250,  // EMA200 seed — 250×1H ≈ 10 days, reliable
+  // ── 3.7-year 1H backtest (25 coins, 32000 candles, ~2022–2026, MAX_BARS=800) ──
+  //   STRONG signals only (score≥6) + EMA200 macro filter
+  //   Ranked by PF + cross-year consistency (2022 bear / 2023 bull / 2024 / 2025)
+  //   ✅ ICP   PF=2.12 T=190 Sharpe=2.17 — all years positive ⭐ (best risk-adj)
+  //   ✅ MATIC PF=2.08 T=224 Sharpe=1.95 — 2021-2024 positive ⭐
+  //   ✅ BNB   PF=1.68 T=185 Sharpe=1.51 — all years positive
+  //   ✅ NEAR  PF=1.67 T=191 Sharpe=1.45 — all years positive
+  //   ✅ AVAX  PF=1.65 T=198 Sharpe=1.53 — all years positive
+  //   ✅ SOL   PF=1.59 T=204 Sharpe=1.39 — 2022 slight loss
+  //   ✅ DOT   PF=1.57 T=202 Sharpe=1.33 — 2022 slight loss
+  //   ✅ VET   PF=1.56 T=208 Sharpe=1.42 — all years positive
+  //   ✅ XRP   PF=1.51 T=178 Sharpe=1.07 — all years positive
+  //   ✅ BTC   PF=1.50 T=216 Sharpe=1.18 — 2023 slight loss
+  //   🟡 ADA   PF=1.48 T=201 — borderline, all years positive (keep for volume)
+  //   ❌ ETH   PF=1.07 T=197 (marginal — 2025 negative, avoid)
+  //   ❌ LINK  PF=1.08 T=199 (2023/2025/2026 negative, avoid)
+  preferredSymbols: ["ICP", "MATIC", "BNB", "NEAR", "AVAX", "SOL", "DOT", "VET", "XRP", "BTC"],
+  cooldownHours: 20,  // matches backtest COOLDOWN=20×1H bars (= 5×4H bars, same 20h real-time)
 
   analyze(candles: OHLCV[]): StrategySignal | null {
     const ind = analyzeIndicators(candles);

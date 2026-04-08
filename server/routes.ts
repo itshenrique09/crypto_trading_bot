@@ -7,7 +7,7 @@ import {
   getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
   getSetting, setSetting,
 } from "./storage";
-import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, type OHLCV } from "./analysis";
+import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 
@@ -267,20 +267,23 @@ export async function registerRoutes(server: Server, app: Express) {
       const { symbol } = req.params;
 
       // Fetch timeframes: 4H primary, 1D for trend, 15m for entry
-      // 4H limit=300: 300 bars → breakRetestSignal gets reliable EMA200 (needs ≥150)
-      const [candles4h, candles1d, candles15m] = await Promise.all([
-        fetchBinanceKlines(symbol, "4h",  300),   // primary analysis (≥150 needed for EMA200)
+      // 1H: Swing signal generation (needs 250+ for EMA200 seed)
+      // 4H: chart display + B&R/SMC context (needs ≥150 for EMA200)
+      const [candles1h, candles4h, candles1d, candles15m] = await Promise.all([
+        fetchBinanceKlines(symbol, "1h",  260),   // primary Swing signal (1H — matches live strategy)
+        fetchBinanceKlines(symbol, "4h",  300),   // chart display + EMA200 context
         fetchBinanceKlines(symbol, "1d",  100),   // trend filter
         fetchBinanceKlines(symbol, "15m", 200),   // entry refinement
       ]);
 
-      if (candles4h.length < 90) {
+      const swingCandles = candles1h.length >= 250 ? candles1h : candles4h;
+      if (swingCandles.length < 90) {
         return res.status(400).json({ error: "Not enough data for analysis" });
       }
 
-      // PRIMARY: 4H analysis — this generates the trade signal
-      const ind4h = analyzeIndicators(candles4h);
-      const sig4h = generateSignal(candles4h, ind4h);
+      // PRIMARY: 1H Swing analysis — matches live strategy interval
+      const ind4h = analyzeIndicators(swingCandles);
+      const sig4h = generateSignal(swingCandles, ind4h);
 
       // TREND FILTER: 1D analysis — used to confirm direction
       const ind1d = analyzeIndicators(candles1d);
@@ -307,7 +310,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const finalSignal = { ...sig4h };
       if (isContraTrend && Math.abs(sig4h.confluenceScore) < 6 && sig4h.type !== "HOLD") {
         finalSignal.type = "HOLD";
-        finalSignal.reason = `4H says ${sig4h.type} but daily trend is ${dailyTrend} — needs STRONG signal to override`;
+        finalSignal.reason = `1H says ${sig4h.type} but daily trend is ${dailyTrend} — needs STRONG signal to override`;
         finalSignal.entry = undefined;
         finalSignal.stopLoss = undefined;
         finalSignal.takeProfit1 = undefined;
@@ -343,7 +346,7 @@ export async function registerRoutes(server: Server, app: Express) {
         candles:      candles4h.slice(-150),
         // Timeframe breakdown
         timeframes: {
-          "4h":  { timeframe: "4h",  label: "4H (Signal)", confluenceScore: Math.round(sig4h.confluenceScore * 10) / 10, signalType: sig4h.type, trend: sig4h.trend, confidence: sig4h.confidence },
+          "4h":  { timeframe: "1h",  label: "1H (Signal)", confluenceScore: Math.round(sig4h.confluenceScore * 10) / 10, signalType: sig4h.type, trend: sig4h.trend, confidence: sig4h.confidence },
           "1d":  { timeframe: "1d",  label: "1D (Trend)",  confluenceScore: Math.round(sig1d.confluenceScore * 10) / 10, signalType: sig1d.type, trend: sig1d.trend, confidence: sig1d.confidence },
         },
         combined: {
@@ -369,18 +372,23 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // ── Multi-strategy signals for a coin ─────────────────────────────
+  // Swing + RSI Div → 1H candles; SMC + B&R → 4H candles
   app.get("/api/signals/:symbol", async (req, res) => {
     try {
       const { symbol } = req.params;
-      const candles4h = await fetchBinanceKlines(symbol, "4h", 400);  // 400→EMA200 seed ~2% (reliable)
+      const [candles1h, candles4h] = await Promise.all([
+        fetchBinanceKlines(symbol, "1h", 260),   // 260 → EMA200 reliable, covers DIV_RANGE
+        fetchBinanceKlines(symbol, "4h", 400),   // 400 → EMA200 seed ~2% (reliable)
+      ]);
       if (candles4h.length < 150) {
         return res.status(400).json({ error: "Not enough data" });
       }
 
-      const ind = analyzeIndicators(candles4h);
-      const swingSig = generateSignal(candles4h, ind);
-      const smcSig = smcSignal(candles4h);
-      const brSig = breakRetestSignal(candles4h);
+      const ind = analyzeIndicators(candles1h.length >= 250 ? candles1h : candles4h);
+      const swingSig  = generateSignal(candles1h.length >= 250 ? candles1h : candles4h, ind);
+      const smcSig    = smcSignal(candles4h);
+      const brSig     = breakRetestSignal(candles4h);
+      const rsiDivSig = candles1h.length >= 250 ? rsiDivergenceSignal(candles1h) : null;
 
       res.json({
         symbol: symbol.toUpperCase(),
@@ -389,6 +397,7 @@ export async function registerRoutes(server: Server, app: Express) {
           {
             id: "confluence-swing",
             name: "Confluence Swing",
+            interval: "1h",
             signal: swingSig.type,
             score: Math.round(swingSig.confluenceScore * 10) / 10,
             confidence: swingSig.confidence,
@@ -401,6 +410,7 @@ export async function registerRoutes(server: Server, app: Express) {
           {
             id: "smc",
             name: "SMC",
+            interval: "4h",
             signal: smcSig.type === "NONE" ? "HOLD" : smcSig.type === "LONG" ? "BUY" : "SELL",
             score: smcSig.confidence / 10,
             confidence: smcSig.confidence,
@@ -414,6 +424,7 @@ export async function registerRoutes(server: Server, app: Express) {
           {
             id: "break-retest",
             name: "Break & Retest",
+            interval: "4h",
             signal: brSig.type === "NONE" ? "HOLD" : brSig.type === "LONG" ? "BUY" : "SELL",
             score: brSig.confidence / 10,
             confidence: brSig.confidence,
@@ -423,6 +434,18 @@ export async function registerRoutes(server: Server, app: Express) {
             takeProfit: brSig.takeProfit || undefined,
             level: brSig.level,
           },
+          ...(rsiDivSig ? [{
+            id: "rsi-divergence",
+            name: "RSI Divergence",
+            interval: "1h",
+            signal: rsiDivSig.type === "NONE" ? "HOLD" : rsiDivSig.type === "LONG" ? "BUY" : "SELL",
+            score: rsiDivSig.confidence / 10,
+            confidence: rsiDivSig.confidence,
+            reason: rsiDivSig.reason || "No signal",
+            entry: rsiDivSig.entry || undefined,
+            stopLoss: rsiDivSig.stopLoss || undefined,
+            takeProfit: rsiDivSig.takeProfit || undefined,
+          }] : []),
         ],
       });
     } catch (err: any) {
@@ -440,14 +463,15 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const { symbol } = req.params;
 
-      // ── 4H confirmed throughout: strategy.interval = "4h", matching live signals
-      // WINDOW=250 → EMA200 seed influence ≈ 8% (reliable); was 90 (EMA200 always disabled)
+      // ── 1H confirmed throughout: strategy.interval = "1h", matching live Confluence Swing
+      // WINDOW=250 → EMA200 seed (200 bars) with enough history for reliable macro filter
+      // COOLDOWN=20×1H bars = 20h real-time (matches backtest-swing-1h.ts COOLDOWN=20)
       const WINDOW   = 250;
-      const FORWARD  = 30;   // 30×4H = 120h (5 days) time stop
-      const COOLDOWN = 5;
+      const FORWARD  = 200;  // 200×1H = 200h (≈8 days) time stop
+      const COOLDOWN = 20;   // 20h cooldown — matches live cooldownHours=20
 
-      // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone backtest-swing.ts
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
+      // 8000 1H candles ≈ 333 days (≈1 year) — fast web response, statistically useful
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
 
       if (allCandles.length < WINDOW + FORWARD + 10) {
         return res.status(400).json({ error: "Not enough historical data for backtest" });
@@ -524,8 +548,8 @@ export async function registerRoutes(server: Server, app: Express) {
         peakEq = Math.max(peakEq, equity);
         maxDD  = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
 
-        // Duration label
-        const durationLabel = barsToOutcome === 1 ? "1d" : `${barsToOutcome}d`;
+        // Duration label (1H bars → hours)
+        const durationLabel = barsToOutcome === 1 ? "1h" : `${barsToOutcome}h`;
         const hitLevel = outcome;
 
         trades.push({
@@ -574,8 +598,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
       res.json({
         symbol:       symbol.toUpperCase(),
-        strategy:     "Confluence Swing (4H)",
-        interval:     "4h",
+        strategy:     "Confluence Swing (1H)",
+        interval:     "1h",
         totalBars:    allCandles.length,
         totalTrades:  done.length,
         winRate:      done.length > 0 ? Math.round((wins.length / done.length) * 1000) / 10 : 0,
@@ -1213,11 +1237,18 @@ export async function registerRoutes(server: Server, app: Express) {
       const mode = await getSetting("mode");
       if (mode !== "paper" || !paperStatus.running) return;
 
-      const coins = await getTopCoinsByVolume(30);
-      paperStatus.coinsScanned = coins.length;
+      const topCoins = await getTopCoinsByVolume(30);
 
       const strategies = await getEnabledStrategies();
       if (strategies.length === 0) return;
+
+      // Always include preferredSymbols coins for each strategy (regardless of volume rank)
+      const preferredSet = new Set<string>(topCoins);
+      for (const strat of strategies) {
+        for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
+      }
+      const coins = Array.from(preferredSet);
+      paperStatus.coinsScanned = coins.length;
 
       const journal = await getJournal();
       // Track open trades per (symbol, strategy) to avoid duplicates
@@ -1226,6 +1257,19 @@ export async function registerRoutes(server: Server, app: Express) {
           .filter(e => e.mode === "paper" && e.outcome === "open")
           .map(e => `${e.symbol}:${e.strategy}`)
       );
+
+      // Build cooldown map: last closed_at per (symbol:strategy) pair
+      // Prevents re-entering too soon after a trade closes — matches backtest COOLDOWN
+      const lastClosedAt = new Map<string, number>();
+      for (const e of journal) {
+        if (e.mode === "paper" && e.outcome !== "open" && e.closed_at) {
+          const key = `${e.symbol}:${e.strategy}`;
+          const ts  = new Date(e.closed_at).getTime();
+          if (!lastClosedAt.has(key) || ts > lastClosedAt.get(key)!) {
+            lastClosedAt.set(key, ts);
+          }
+        }
+      }
 
       // Limit max open trades to avoid overexposure
       const totalOpen = journal.filter(e => e.mode === "paper" && e.outcome === "open").length;
@@ -1247,6 +1291,22 @@ export async function registerRoutes(server: Server, app: Express) {
 
           for (const strat of strats) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
+
+            // Skip strategy/coin combos with no proven edge (preferredSymbols filter)
+            // If the strategy defines preferredSymbols, only trade those coins
+            if (strat.preferredSymbols && strat.preferredSymbols.length > 0) {
+              if (!strat.preferredSymbols.includes(sym)) continue;
+            }
+
+            // Cooldown check: don't re-enter same coin/strategy too soon after last close
+            // Matches backtest COOLDOWN parameter — prevents overtrading after losses
+            if (strat.cooldownHours) {
+              const lastClose = lastClosedAt.get(`${sym}:${strat.id}`);
+              if (lastClose) {
+                const hoursSince = (Date.now() - lastClose) / (1000 * 60 * 60);
+                if (hoursSince < strat.cooldownHours) continue;
+              }
+            }
 
             // Re-check total open trades (may have added new ones this scan)
             if (totalOpen + openPairs.size >= 10) break;

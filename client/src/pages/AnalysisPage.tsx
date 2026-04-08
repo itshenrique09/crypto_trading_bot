@@ -184,7 +184,7 @@ export default function AnalysisPage() {
                   <div className="flex items-center gap-2 mb-3">
                     <Zap className="w-4 h-4 text-amber-400" />
                     <span className="text-xs font-bold">Strategy Signals</span>
-                    <span className="text-[10px] text-muted-foreground/50 ml-auto">All strategies · 4H candles</span>
+                    <span className="text-[10px] text-muted-foreground/50 ml-auto">Swing/RSI Div: 1H · SMC/B&R: 4H</span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     {stratSignals.map(s => {
@@ -230,7 +230,7 @@ export default function AnalysisPage() {
                 <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Clock className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-bold">v2 Swing — 4H Signal + 1D Trend Filter</span>
+                    <span className="text-xs font-bold">v2 Swing — 1H Signal + 1D Trend Filter</span>
                     {combined && (
                       <Badge variant="outline" className="ml-auto text-[10px]">
                         {combined.trendAligned
@@ -241,7 +241,7 @@ export default function AnalysisPage() {
                     )}
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    {/* 4H Signal Card */}
+                    {/* 1H Signal Card */}
                     {timeframes?.["4h"] && (
                       <div className={`rounded-md border-2 p-3 ${getSignalBg(timeframes["4h"].signalType)} border-cyan-500/40`}>
                         <div className="flex items-center justify-between mb-1.5">

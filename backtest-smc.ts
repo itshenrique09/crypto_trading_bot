@@ -6,9 +6,15 @@
 // ══════════════════════════════════════════════════════════
 import { smcSignal, type OHLCV } from "./server/analysis";
 
-const COINS        = ["BTC", "ETH", "SOL", "BNB", "ADA", "LINK", "DOT", "DOGE", "AVAX", "XRP"];
+const COINS        = [
+  // Top 10 by market cap (with 2022+ history)
+  "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "LINK",
+  // Extended — liquid coins with sufficient history
+  "MATIC", "UNI", "ATOM", "LTC", "BCH", "AAVE", "ALGO", "VET", "XLM", "TRX",
+  "ETC", "FIL", "NEAR", "ICP", "SAND",
+];
 const WINDOW       = 150;  // 150 bars → EMA200 converges (22% seed influence vs 55% at 60 bars)
-const TIME_STOP    = 15;
+const MAX_BARS     = 200;  // max bars to hold a trade — no artificial time-stop
 const COOLDOWN     = 3;
 const ZONE_COOLDOWN = 20;
 const ZONE_PCT     = 0.008;
@@ -50,7 +56,7 @@ interface TradeRecord {
 
 async function runBacktest(symbol: string) {
   const allCandles = await fetchKlines(symbol);
-  if (allCandles.length < WINDOW + TIME_STOP + 30) {
+  if (allCandles.length < WINDOW + MAX_BARS + 30) {
     console.log(`${symbol}: not enough data (${allCandles.length} bars)`);
     return;
   }
@@ -62,7 +68,7 @@ async function runBacktest(symbol: string) {
   let lastTradeIdx = -COOLDOWN;
   const zoneCooldown = new Map<string, number>();
 
-  for (let i = WINDOW; i < allCandles.length - TIME_STOP; i++) {
+  for (let i = WINDOW; i < allCandles.length - MAX_BARS; i++) {
     if (i - lastTradeIdx < COOLDOWN) continue;
 
     const sig = smcSignal(allCandles.slice(i - WINDOW, i + 1));
@@ -79,9 +85,9 @@ async function runBacktest(symbol: string) {
     lastTradeIdx = i;
 
     const isLong = sig.type === "LONG";
-    const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
+    const future = allCandles.slice(i + 1, i + 1 + MAX_BARS);
     let outcome: "tp" | "sl" | "timeout" = "timeout";
-    let barsToOutcome = TIME_STOP;
+    let barsToOutcome = MAX_BARS;
 
     for (let j = 0; j < future.length; j++) {
       const c = future[j];

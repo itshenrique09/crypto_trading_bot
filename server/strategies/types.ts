@@ -23,10 +23,16 @@ export interface Strategy {
   /** Minimum candles required */
   minCandles: number;
   /**
-   * Symbols that backtest well with this strategy (500-day 4H backtest).
-   * Used by the UI to show "best fit" coins for each strategy.
+   * Symbols that backtest well with this strategy.
+   * Used by the scanner to only trade proven coin/strategy combos.
    */
   preferredSymbols?: string[];
+  /**
+   * Minimum hours to wait after a trade closes before re-entering the same
+   * coin with this strategy. Matches the backtest COOLDOWN parameter.
+   * Swing 1H: 5h (CD=5×1H). B&R/SMC 4H: 12h (CD=3×4H).
+   */
+  cooldownHours?: number;
   /** Analyze candles and return a signal or null */
   analyze(candles: OHLCV[]): StrategySignal | null;
 }
