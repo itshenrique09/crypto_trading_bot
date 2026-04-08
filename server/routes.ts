@@ -1260,8 +1260,61 @@ export async function registerRoutes(server: Server, app: Express) {
   // ── Paper Trading Engine ─────────────────────────────────────────
   //
   // Server-side intervals: check every 30s, scan every 3min
-  // Scans top 30 coins by volume from MEXC
+  // Scans SCANNER_COINS + strategy preferred coins
   // Live prices endpoint for frontend P&L display
+
+  // ── Correlation groups — prevent overconcentration in correlated assets ──
+  // Max 2 open positions per group simultaneously
+  const COIN_GROUP: Record<string, string> = {
+    SOL: "L1", AVAX: "L1", NEAR: "L1", DOT: "L1", ICP: "L1", MATIC: "L1", ADA: "L1",
+    BTC: "major", ETH: "major", BNB: "major", XRP: "major", LTC: "major",
+    DOGE: "meme", SHIB: "meme", PEPE: "meme",
+    LINK: "defi", UNI: "defi", FIL: "defi", ATOM: "defi",
+    SAND: "gaming", VET: "infra",
+    SUI: "L1", ARB: "L1", OP: "L1", APT: "L1", INJ: "L1", SEI: "L1", TIA: "L1",
+  };
+  const MAX_PER_GROUP = 2;
+
+  // ── Minimum 24h volume (USDT) to trade — avoids illiquid / manipulated markets ──
+  const MIN_VOLUME_USDT = 30_000_000; // $30M
+
+  // ── Volume cache (5 min) — populated from MEXC ticker ──
+  let cachedVolumes: { map: Record<string, number>; fetchedAt: number } | null = null;
+
+  async function getVolumeMap(): Promise<Record<string, number>> {
+    if (cachedVolumes && Date.now() - cachedVolumes.fetchedAt < 5 * 60 * 1000) {
+      return cachedVolumes.map;
+    }
+    try {
+      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const map: Record<string, number> = {};
+      for (const t of tickers) {
+        if (t.symbol.endsWith("USDT")) {
+          map[t.symbol.replace("USDT", "")] = parseFloat(t.quoteVolume) || 0;
+        }
+      }
+      cachedVolumes = { map, fetchedAt: Date.now() };
+      return map;
+    } catch {
+      return cachedVolumes?.map || {};
+    }
+  }
+
+  // ── Scan activity log — last 60 events (visible in UI for debugging) ──
+  interface ScanEvent {
+    time: string;
+    symbol: string;
+    strategy: string;
+    result: "opened" | "filtered" | "no_signal";
+    reason: string;
+    signal?: string;
+    confidence?: number;
+  }
+  const scanLog: ScanEvent[] = [];
+  function logScan(ev: ScanEvent) {
+    scanLog.unshift(ev);
+    if (scanLog.length > 60) scanLog.pop();
+  }
 
   // Dynamic coin list from MEXC (cached 5 min)
   let cachedTopCoins: { coins: string[]; fetchedAt: number } | null = null;
@@ -1500,8 +1553,19 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       // Limit: max 6 concurrent open trades (6 × 2% = 12% total exposure)
-      const totalOpen = paperTrades.filter(e => e.outcome === "open").length;
+      const openTradesList = paperTrades.filter(e => e.outcome === "open");
+      const totalOpen = openTradesList.length;
       if (totalOpen >= 6) return;
+
+      // ── VOLUME MAP — fetch once per scan ──
+      const volumeMap = await getVolumeMap();
+
+      // ── CORRELATION — count open trades per group ──
+      const openByGroup: Record<string, number> = {};
+      for (const t of openTradesList) {
+        const g = COIN_GROUP[t.symbol];
+        if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
+      }
 
       // Group strategies by interval to avoid fetching same candles twice
       const byInterval: Record<string, Strategy[]> = {};
@@ -1511,6 +1575,16 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       for (const sym of coins) {
+        if (totalOpen + openPairs.size >= 6) break;
+
+        // ── VOLUME FILTER — skip illiquid coins ──
+        const vol24h = volumeMap[sym] ?? 0;
+        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+
+        // ── CORRELATION FILTER — skip if group is full ──
+        const group = COIN_GROUP[sym];
+        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) continue;
+
         // Daily trend filter — fetch once per coin
         const dailyTrend = await getDailyTrend(sym);
 
@@ -1521,13 +1595,11 @@ export async function registerRoutes(server: Server, app: Express) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
 
             // Skip strategy/coin combos with no proven edge (preferredSymbols filter)
-            // If the strategy defines preferredSymbols, only trade those coins
             if (strat.preferredSymbols && strat.preferredSymbols.length > 0) {
               if (!strat.preferredSymbols.includes(sym)) continue;
             }
 
-            // Cooldown check: don't re-enter same coin/strategy too soon after last close
-            // Matches backtest COOLDOWN parameter — prevents overtrading after losses
+            // Cooldown check — matches backtest COOLDOWN parameter
             if (strat.cooldownHours) {
               const lastClose = lastClosedAt.get(`${sym}:${strat.id}`);
               if (lastClose) {
@@ -1536,7 +1608,6 @@ export async function registerRoutes(server: Server, app: Express) {
               }
             }
 
-            // Re-check total open trades (may have added new ones this scan)
             if (totalOpen + openPairs.size >= 6) break;
 
             try {
@@ -1548,30 +1619,43 @@ export async function registerRoutes(server: Server, app: Express) {
               if (candles.length < strat.minCandles) continue;
 
               const signal = strat.analyze(candles);
-              if (!signal) continue;
+              if (!signal) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "no_signal", reason: "No setup detected" });
+                continue;
+              }
 
               // ── DAILY TREND FILTER ──
-              // Block contra-trend trades unless they have very high confidence
               const isContraTrend =
                 (signal.direction === "LONG" && dailyTrend === "down") ||
                 (signal.direction === "SHORT" && dailyTrend === "up");
 
               if (isContraTrend) {
-                // confluence-swing: needs STRONG signal (score ≥ 6) to override
-                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) continue;
-                // smc/break-retest: needs ≥ 75 confidence to override
-                if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
+                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra-trend (daily ${dailyTrend}), score ${signal.confluenceScore} < 6`, signal: signal.direction, confidence: signal.confidence });
+                  continue;
+                }
+                if (strat.id !== "confluence-swing" && signal.confidence < 75) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra-trend (daily ${dailyTrend}), confidence ${signal.confidence}% < 75%`, signal: signal.direction, confidence: signal.confidence });
+                  continue;
+                }
+              }
+
+              // ── SHORT confirmation — require higher confidence ──
+              // Shorts are riskier (squeezes, funding rates) — need stronger signal
+              if (signal.direction === "SHORT" && signal.confidence < 72) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT needs ≥72% confidence, got ${signal.confidence}%`, signal: "SHORT", confidence: signal.confidence });
+                continue;
               }
 
               // ── MINIMUM R:R CHECK ──
               const risk = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
-              if (risk <= 0 || reward / risk < 1.5) continue; // Minimum 1.5:1 R:R
+              if (risk <= 0 || reward / risk < 1.5) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
 
-              // ── POSITION SIZING ────────────────────────────────
-              // risk_usd = balance × effectiveRiskPct%
-              // sl_dist_pct = |entry - sl| / entry
-              // position_size = risk_usd / sl_dist_pct
+              // ── POSITION SIZING ──
               const slDistPct = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
               const riskUsd   = currentBalance * effectiveRiskPct / 100;
               const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
@@ -1589,8 +1673,14 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed: "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% — ${signal.reason}`,
+                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M — ${signal.reason}`,
               });
+
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
+              openPairs.add(`${sym}:${strat.id}`);
+              const g = COIN_GROUP[sym];
+              if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
+
             } catch { /* skip */ }
           }
         }
@@ -1771,6 +1861,11 @@ export async function registerRoutes(server: Server, app: Express) {
 
       res.json(candles);
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Scan activity log — last 60 events
+  app.get("/api/paper/scan-log", (_req, res) => {
+    res.json(scanLog);
   });
 
   // Keep tick for manual triggers
@@ -2006,6 +2101,16 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
 
+      // ── VOLUME MAP — fetch once per scan ──
+      const volumeMap = await getVolumeMap();
+
+      // ── CORRELATION — count open live trades per group ──
+      const openByGroup: Record<string, number> = {};
+      for (const t of openLive) {
+        const g = COIN_GROUP[t.symbol];
+        if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
+      }
+
       const byInterval: Record<string, Strategy[]> = {};
       for (const s of strategies) {
         if (!byInterval[s.interval]) byInterval[s.interval] = [];
@@ -2014,6 +2119,14 @@ export async function registerRoutes(server: Server, app: Express) {
 
       for (const sym of coins) {
         if (openLive.length + openPairs.size >= 6) break;
+
+        // ── VOLUME FILTER — skip illiquid coins ──
+        const vol24h = volumeMap[sym] ?? 0;
+        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+
+        // ── CORRELATION FILTER — skip if group is full ──
+        const group = COIN_GROUP[sym];
+        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) continue;
 
         const dailyTrend = await getDailyTrend(sym);
 
@@ -2029,6 +2142,8 @@ export async function registerRoutes(server: Server, app: Express) {
               if (lastClose && (Date.now() - lastClose) / 3600000 < strat.cooldownHours) continue;
             }
 
+            if (openLive.length + openPairs.size >= 6) break;
+
             try {
               if (!candles) {
                 const limit = Math.max(...strats.map(s => s.minCandles)) + 10;
@@ -2039,6 +2154,7 @@ export async function registerRoutes(server: Server, app: Express) {
               const signal = strat.analyze(candles);
               if (!signal) continue;
 
+              // ── DAILY TREND FILTER ──
               const isContraTrend =
                 (signal.direction === "LONG" && dailyTrend === "down") ||
                 (signal.direction === "SHORT" && dailyTrend === "up");
@@ -2047,11 +2163,15 @@ export async function registerRoutes(server: Server, app: Express) {
                 if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
               }
 
+              // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
+              if (signal.direction === "SHORT" && signal.confidence < 72) continue;
+
+              // ── MINIMUM R:R CHECK ──
               const risk   = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
               if (risk <= 0 || reward / risk < 1.5) continue;
 
-              // Position sizing
+              // ── POSITION SIZING ──
               const slDistPct = risk / signal.entry;
               const riskUsd   = currentBalance * effectiveRiskPct / 100;
               const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
@@ -2085,10 +2205,12 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed:          "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% | ${signal.reason}`,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M | ${signal.reason}`,
               });
 
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
+              if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
             } catch { /* skip — never crash the scan */ }
           }
         }

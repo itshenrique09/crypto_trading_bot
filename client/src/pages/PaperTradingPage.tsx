@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff } from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff, Activity, ChevronDown, ChevronUp } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -123,6 +123,14 @@ export default function PaperTradingPage() {
   const liveStopMutation = useMutation({
     mutationFn: async () => (await apiRequest("POST", "/api/live/stop", {})).json(),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/live/status"] }),
+  });
+
+  const [showScanLog, setShowScanLog] = useState(false);
+  const { data: scanLog = [] } = useQuery<any[]>({
+    queryKey: ["/api/paper/scan-log"],
+    queryFn: async () => (await apiRequest("GET", "/api/paper/scan-log")).json(),
+    refetchInterval: paperRunning ? 15000 : false,
+    enabled: showScanLog,
   });
 
   const paperTrades = journal.filter(e => e.mode === "paper");
@@ -517,6 +525,54 @@ export default function PaperTradingPage() {
           </button>
         )}
       </div>
+
+      {/* Scan Activity Log */}
+      <Card className="border-border/30">
+        <button
+          onClick={() => setShowScanLog(s => !s)}
+          className="w-full flex items-center justify-between px-4 py-3 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-muted-foreground/50" />
+            <span className="text-xs font-bold">Scan Activity</span>
+            {scanLog.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-card/60 border border-border/20 text-muted-foreground">
+                {scanLog.length} events
+              </span>
+            )}
+          </div>
+          {showScanLog ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground/40" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground/40" />}
+        </button>
+        {showScanLog && (
+          <div className="border-t border-border/20 px-4 pb-3">
+            {scanLog.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground/50 py-3 text-center">
+                {paperRunning ? "No activity yet — runs every 3 minutes" : "Start engine to see activity"}
+              </p>
+            ) : (
+              <div className="space-y-1 mt-2 max-h-64 overflow-y-auto">
+                {scanLog.map((ev: any, i: number) => (
+                  <div key={i} className="flex items-start gap-2 text-[10px] py-1 border-b border-border/10 last:border-0">
+                    <span className={`mt-0.5 px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                      ev.result === "opened" ? "bg-emerald-500/20 text-emerald-400" :
+                      ev.result === "filtered" ? "bg-amber-500/20 text-amber-400" :
+                      "bg-card/40 text-muted-foreground/40"
+                    }`}>
+                      {ev.result === "opened" ? "OPENED" : ev.result === "filtered" ? "FILTER" : "HOLD"}
+                    </span>
+                    <span className="font-bold text-foreground shrink-0 w-10">{ev.symbol}</span>
+                    <span className="text-muted-foreground/60 shrink-0 w-20 truncate">{ev.strategy}</span>
+                    <span className="text-muted-foreground/70 flex-1 leading-relaxed">{ev.reason}</span>
+                    <span className="text-muted-foreground/30 shrink-0 whitespace-nowrap">
+                      {new Date(ev.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
 
       {/* Trade List */}
       {isLoading ? (
