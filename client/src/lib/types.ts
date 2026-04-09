@@ -13,6 +13,9 @@ export interface JournalEntry {
   outcome: string;
   exit_price: number | null;
   pnl_pct: number | null;
+  pnl_usd: number | null;
+  risk_usd: number | null;
+  position_size_usd: number | null;
   notes: string;
   created_at: string;
   closed_at: string | null;

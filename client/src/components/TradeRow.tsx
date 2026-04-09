@@ -92,61 +92,74 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
             )}
             <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/30" />
           </div>
-          <div className="flex justify-between mt-0.5 text-[9px] text-muted-foreground/60">
-            <span>SL</span>
-            <span>Entry</span>
-            <span>TP</span>
+          <div className="flex justify-between mt-0.5 text-[9px] text-muted-foreground/40 font-mono">
+            <span>SL ${formatPrice(entry.stop_loss)}</span>
+            <span className="text-muted-foreground/60">Entry</span>
+            <span>TP ${formatPrice(entry.take_profit1)}</span>
           </div>
         </div>
       )}
 
-      {/* Close trade form */}
-      {isOpen && closingId === entry.id && (
-        <div className="flex items-center gap-2 mt-3 ml-12">
-          <input
-            type="number" step="any" placeholder="Exit price"
-            value={closeForm.exit_price}
-            onChange={e => onCloseFormChange({ exit_price: e.target.value })}
-            className="w-28 px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
-          />
-          <select
-            value={closeForm.outcome}
-            onChange={e => onCloseFormChange({ outcome: e.target.value })}
-            className="px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
-          >
-            <option value="win">Win</option>
-            <option value="loss">Loss</option>
-            <option value="breakeven">BE</option>
-          </select>
-          <button onClick={() => onConfirmClose(entry.id)} className="text-xs px-3 py-1.5 rounded-md bg-purple-500/15 border border-purple-500/30 text-purple-400 hover:bg-purple-500/25 font-medium">Save</button>
-          <button onClick={onCancelClose} className="text-xs px-3 py-1.5 text-muted-foreground hover:text-foreground">Cancel</button>
-        </div>
-      )}
-
-      {isOpen && closingId !== entry.id && (
-        <div className="flex justify-end mt-2">
-          <button
-            onClick={() => onStartClose(entry.id)}
-            className="text-[10px] px-3 py-1 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-card/40 transition-colors"
-          >
-            Close Trade
-          </button>
-        </div>
-      )}
-
-      {/* Closed info */}
-      {!isOpen && entry.exit_price != null && (
-        <div className="flex items-center gap-3 mt-2 ml-12 text-xs text-muted-foreground">
-          <span>Exit: <span className="font-mono text-foreground">${formatPrice(entry.exit_price)}</span></span>
-          {entry.closed_at && (
-            <span>
-              {new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+      {/* Risk info + Close button row */}
+      <div className="flex items-center justify-between mt-2 ml-12">
+        {/* Risk metadata — clean, no debug noise */}
+        <div className="flex items-center gap-2">
+          {entry.risk_usd != null && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-card/40 border border-border/15 text-muted-foreground/60 font-mono">
+              1R €{entry.risk_usd.toFixed(2)}
+            </span>
+          )}
+          {isOpen && price && (
+            <span className={`text-[10px] font-mono font-semibold ${(price.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              {price.unrealizedPnl != null && entry.risk_usd != null
+                ? `${(price.unrealizedPnl >= 0 ? "+" : "")}${(price.unrealizedPnl / Math.abs((entry.stop_loss - entry.entry_price) / entry.entry_price * 100) * (entry.risk_usd / (entry.risk_usd > 0 ? entry.risk_usd : 1))).toFixed(2)}R`
+                : null}
+            </span>
+          )}
+          {!isOpen && entry.pnl_usd != null && (
+            <span className={`text-[10px] font-mono font-semibold ${entry.pnl_usd >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              {entry.pnl_usd >= 0 ? "+" : ""}€{Math.abs(entry.pnl_usd).toFixed(2)}
             </span>
           )}
         </div>
-      )}
 
-      {entry.notes && <p className="text-xs text-muted-foreground mt-2 ml-12 italic">"{entry.notes}"</p>}
+        {/* Close trade controls */}
+        {isOpen && closingId === entry.id ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="number" step="any" placeholder="Exit price"
+              value={closeForm.exit_price}
+              onChange={e => onCloseFormChange({ exit_price: e.target.value })}
+              className="w-28 px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
+            />
+            <select
+              value={closeForm.outcome}
+              onChange={e => onCloseFormChange({ outcome: e.target.value })}
+              className="px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
+            >
+              <option value="win">Win</option>
+              <option value="loss">Loss</option>
+              <option value="breakeven">BE</option>
+            </select>
+            <button onClick={() => onConfirmClose(entry.id)} className="text-xs px-3 py-1.5 rounded-md bg-purple-500/15 border border-purple-500/30 text-purple-400 hover:bg-purple-500/25 font-medium">Save</button>
+            <button onClick={onCancelClose} className="text-xs px-2 py-1.5 text-muted-foreground hover:text-foreground">Cancel</button>
+          </div>
+        ) : isOpen ? (
+          <button
+            onClick={() => onStartClose(entry.id)}
+            className="text-[10px] px-3 py-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-card/40 transition-colors"
+          >
+            Close Trade
+          </button>
+        ) : entry.exit_price != null ? (
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground/50">
+            <span>Exit <span className="font-mono text-muted-foreground">${formatPrice(entry.exit_price)}</span></span>
+            {entry.closed_at && (
+              <span>{new Date(entry.closed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+            )}
+          </div>
+        ) : null}
+      </div>
 
       {/* Trade chart modal */}
       {showChart && <TradeChartModal entry={entry} onClose={() => setShowChart(false)} />}
