@@ -363,6 +363,27 @@ function calcADX(candles: OHLCV[], period = 14): number {
   return adx;
 }
 
+// ─── ATR Percentile — volatility regime detection ────────────────
+// Returns 0–100: where the current ATR sits vs the last `lookback` periods.
+// >90 = explosive / abnormally high volatility  → bad entries, inflated stops
+// <10 = extreme compression                     → not inherently bad, but signals unreliable for some strats
+// Engine uses >85 as a filter to skip entering in volatility spikes.
+export function calcATRPercentile(candles: OHLCV[], atrPeriod = 14, lookback = 50): number {
+  const minNeeded = atrPeriod + lookback;
+  if (candles.length < minNeeded) return 50; // insufficient history → neutral
+
+  const atrValues: number[] = [];
+  for (let end = candles.length - lookback; end < candles.length; end++) {
+    const slice = candles.slice(Math.max(0, end - atrPeriod * 2), end + 1);
+    atrValues.push(calcATR(slice, atrPeriod));
+  }
+
+  const current = atrValues[atrValues.length - 1];
+  const sorted  = [...atrValues].sort((a, b) => a - b);
+  const below   = sorted.filter(v => v <= current).length;
+  return Math.round((below / sorted.length) * 100);
+}
+
 // ─── Ichimoku Cloud — FIXED: displaced Senkou Span ───────────────
 
 function calcIchimoku(candles: OHLCV[]) {

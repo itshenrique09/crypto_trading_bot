@@ -7,7 +7,7 @@ import {
   getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
   getSetting, setSetting,
 } from "./storage";
-import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, type OHLCV } from "./analysis";
+import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, calcATRPercentile, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 import { getMexcClient, toMexcSymbol } from "./mexc-client";
@@ -1697,6 +1697,8 @@ export async function registerRoutes(server: Server, app: Express) {
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
 
+          let atrPercentile: number | null = null; // computed once per (sym, interval)
+
           for (const strat of strats) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
 
@@ -1723,6 +1725,15 @@ export async function registerRoutes(server: Server, app: Express) {
                 candles = await fetchBinanceKlines(sym, interval, limit);
               }
               if (candles.length < strat.minCandles) continue;
+
+              // ── VOLATILITY REGIME FILTER — computed once per (sym, interval) ──
+              // Skips entries when ATR is in the top 15% of its last 50-period range.
+              // Explosive volatility = wider stops, unreliable candle structure, poor fills.
+              if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
+              if (atrPercentile > 85) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Volatility regime: ATR at ${atrPercentile}th percentile (>85) — explosive, skip entry` });
+                continue;
+              }
 
               const signal = strat.analyze(candles);
               if (!signal) {
@@ -2290,6 +2301,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
+          let atrPercentile: number | null = null;
 
           for (const strat of strats) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
@@ -2308,6 +2320,10 @@ export async function registerRoutes(server: Server, app: Express) {
                 candles = await fetchBinanceKlines(sym, interval, limit);
               }
               if (candles.length < strat.minCandles) continue;
+
+              // ── VOLATILITY REGIME FILTER ──
+              if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
+              if (atrPercentile > 85) continue;
 
               const signal = strat.analyze(candles);
               if (!signal) continue;
