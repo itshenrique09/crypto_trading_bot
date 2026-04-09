@@ -10,18 +10,18 @@ export const liquiditySweepStrategy: Strategy = {
     "EMA200 macro filter (LONG in bull only). 2.5×/4× R:R. Best on FIL, OP, ADA, SUI, BTC, SOL.",
   interval: "1h",
   minCandles: 220,  // EMA200 seed (200) + signal window (80) buffer
-  // ── 5000-candle 1H backtest (~7 months, COOLDOWN=12h, TP=2.5×R) ──
-  //   ✅ FIL  PF=2.06 T=90  WR=42%  EQ=+154%
-  //   ✅ OP   PF=1.84 T=92  WR=42%  EQ=+92%
-  //   ✅ ADA  PF=1.73 T=71  WR=42%  EQ=+52%
-  //   ✅ SUI  PF=1.63 T=84  WR=44%  EQ=+69%
-  //   ✅ BTC  PF=1.54 T=67  WR=42%  EQ=+24%
-  //   ✅ SOL  PF=1.44 T=86  WR=41%  EQ=+36%
-  //   🟡 ETH  PF=1.34 | SAND PF=1.38 | DOT PF=1.37 | PEPE PF=1.36 (borderline, excluded)
-  //   ❌ ARB  PF=0.94 | INJ PF=0.90 | LINK PF=1.02 (negative/breakeven — excluded)
+  // ── 5000-candle 1H backtest (~7 months, COOLDOWN=12h, technical TPs) ──
+  //   ✅ FIL   PF=2.26 T=69  WR=41%  avgTP1=2.79R
+  //   ✅ PEPE  PF=2.32 T=44  WR=46%  avgTP1=2.69R
+  //   ✅ SAND  PF=2.07 T=56  WR=43%  avgTP1=2.80R
+  //   ✅ INJ   PF=1.79 T=61  WR=39%  avgTP1=2.77R
+  //   ✅ SUI   PF=1.67 T=59  WR=41%  avgTP1=2.70R
+  //   ✅ SOL   PF=1.57 T=58  WR=38%  avgTP1=2.58R
+  //   🟡 OP    PF=1.36 | ADA PF=1.41 | BTC PF=1.48 | ARB PF=1.06 | DOT PF=1.09 (borderline)
+  //   ❌ ETH   PF=0.99 | LINK PF=0.86 (excluded)
   //   ⚠️  Strategy fires on sharp stop-hunt wicks — most effective on 1H with liquid futures
   //   ⚠️  LONG macro filter (EMA50 > EMA200) keeps LONG signals in bull market only
-  preferredSymbols: ["FIL", "OP", "ADA", "SUI", "BTC", "SOL"],
+  preferredSymbols: ["FIL", "PEPE", "SAND", "INJ", "SUI", "SOL"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {

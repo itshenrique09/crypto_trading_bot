@@ -1919,8 +1919,8 @@ export async function registerRoutes(server: Server, app: Express) {
               // ── MINIMUM R:R CHECK ──
               const risk = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
-              if (risk <= 0 || reward / risk < 1.5) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
+              if (risk <= 0 || reward / risk < 2.0) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 2.0 minimum`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 

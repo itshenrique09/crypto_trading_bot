@@ -175,7 +175,7 @@ function findTechnicalTPs(
   isLong: boolean
 ): { tp1: number; tp2: number } {
   const risk = Math.abs(entry - stopLoss);
-  const minDist = risk * 1.5;          // must be at least 1.5R from entry
+  const minDist = risk * 2.0;          // must be at least 2R from entry (matches 2.5R fallback intent)
   const swingWindow = 3;               // bars on each side to confirm swing
 
   // Scan last ~100 bars; exclude last 2 (not yet confirmed as swing points)
@@ -1520,7 +1520,7 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       const tTPs = findTechnicalTPs(candles, price, sl, true);
       const tp   = tTPs.tp1;
       const rr   = Math.abs(tp - price) / risk;
-      if (rr < 1.8) continue;
+      if (rr < 2.0) continue;
 
       let conf = 50;
       if (ob.strength > 60) conf += 10;
@@ -1560,7 +1560,7 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
       const tTPs = findTechnicalTPs(candles, price, sl, false);
       const tp   = tTPs.tp1;
       const rr   = Math.abs(price - tp) / risk;
-      if (rr < 1.8) continue;
+      if (rr < 2.0) continue;
 
       let conf = 50;
       if (ob.strength > 60) conf += 10;
@@ -2029,12 +2029,13 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
         const risk = price - sl;
         if (risk <= 0 || risk / price > 0.05) break;
         const conf = rsiLow1 < 30 ? 80 : 72;
+        const tTPs = findTechnicalTPs(candles, price, sl, true);
         return {
           type: "LONG",
           entry: price,
           stopLoss: sl,
-          takeProfit:  price + risk * 2.5,
-          takeProfit2: price + risk * 4,
+          takeProfit:  tTPs.tp1,
+          takeProfit2: tTPs.tp2,
           confidence: conf,
           reason: `RSI Bull Div | PriceLow ${priceLow1.toFixed(4)}<${priceLow2.toFixed(4)} RSI ${rsiLow1.toFixed(1)}>${rsiLow2.toFixed(1)} | EMA200 bull`,
         };
@@ -2057,12 +2058,13 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
         const risk = sl - price;
         if (risk <= 0 || risk / price > 0.05) break;
         const conf = rsiHigh1 > 70 ? 80 : 72;
+        const tTPs = findTechnicalTPs(candles, price, sl, false);
         return {
           type: "SHORT",
           entry: price,
           stopLoss: sl,
-          takeProfit:  price - risk * 2.5,
-          takeProfit2: price - risk * 4,
+          takeProfit:  tTPs.tp1,
+          takeProfit2: tTPs.tp2,
           confidence: conf,
           reason: `RSI Bear Div | PriceHigh ${priceHigh1.toFixed(4)}>${priceHigh2.toFixed(4)} RSI ${rsiHigh1.toFixed(1)}<${rsiHigh2.toFixed(1)} | EMA200 bear`,
         };
@@ -2210,20 +2212,25 @@ export function liquiditySweepSignal(candles: OHLCV[]): {
   if (best.direction === "bullish") {
     entry    = sc.close;
     stopLoss = sc.low - atr * 0.15;
-    const risk = Math.max(entry - stopLoss, atr * 0.5);
-    takeProfit  = entry + risk * 2.5;
-    takeProfit2 = entry + risk * 4.0;
   } else {
     entry    = sc.close;
     stopLoss = sc.high + atr * 0.15;
-    const risk = Math.max(stopLoss - entry, atr * 0.5);
-    takeProfit  = entry - risk * 2.5;
-    takeProfit2 = entry - risk * 4.0;
+  }
+  // Ensure SL is at least 0.5 ATR away (minimum meaningful stop)
+  if (Math.abs(entry - stopLoss) < atr * 0.5) {
+    stopLoss = best.direction === "bullish" ? entry - atr * 0.5 : entry + atr * 0.5;
   }
 
   const risk   = Math.abs(entry - stopLoss);
+  if (risk <= 0) return none;
+
+  // TPs: nearest structural swing level beyond entry (technically derived)
+  const tTPs = findTechnicalTPs(candles, entry, stopLoss, best.direction === "bullish");
+  takeProfit  = tTPs.tp1;
+  takeProfit2 = tTPs.tp2;
+
   const reward = Math.abs(takeProfit - entry);
-  if (risk <= 0 || reward / risk < 2.0) return none;
+  if (reward / risk < 2.0) return none;
 
   // ── 6. Confidence ──
   let conf = 60;

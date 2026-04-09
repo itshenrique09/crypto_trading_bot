@@ -1,19 +1,15 @@
 // ══════════════════════════════════════════════════════════
-//  RSI Divergence — Backtest (1H) — uses rsiDivergenceSignal directly
+//  Liquidity Sweep — Backtest (1H) — uses liquiditySweepSignal directly
 //  Tests actual signal function (technical TPs via findTechnicalTPs)
 // ══════════════════════════════════════════════════════════
-import { rsiDivergenceSignal, type OHLCV } from "./server/analysis";
+import { liquiditySweepSignal, type OHLCV } from "./server/analysis";
 
-const COINS = [
-  "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "LINK",
-  "MATIC", "UNI", "ATOM", "LTC", "BCH", "AAVE", "ALGO", "VET", "XLM", "TRX",
-  "ETC", "FIL", "NEAR", "ICP", "SAND",
-];
+const COINS      = ["FIL", "OP", "ADA", "SUI", "BTC", "SOL", "ETH", "ARB", "INJ", "LINK", "SAND", "DOT", "PEPE"];
 const INTERVAL   = "1h";
-const WINDOW     = 250;   // EMA200 seed
+const WINDOW     = 220;   // EMA200 seed + buffer
 const MAX_BARS   = 200;   // max hold (200h ≈ 8 days)
-const COOLDOWN   = 20;    // 20h between signals per coin
-const TOTAL_BARS = 32000; // 3.7 years of 1H
+const COOLDOWN   = 12;    // 12h between signals per coin (matches backtest)
+const TOTAL_BARS = 5000;  // same as original backtest (~7 months)
 
 async function fetchKlines(symbol: string): Promise<OHLCV[]> {
   const candles: OHLCV[] = [];
@@ -40,7 +36,7 @@ async function fetchKlines(symbol: string): Promise<OHLCV[]> {
 
 async function runBacktest(symbol: string) {
   const allCandles = await fetchKlines(symbol);
-  if (allCandles.length < WINDOW + MAX_BARS + 50) {
+  if (allCandles.length < WINDOW + MAX_BARS + 10) {
     console.log(`${symbol}: not enough data`);
     return;
   }
@@ -52,10 +48,10 @@ async function runBacktest(symbol: string) {
     if (i - lastIdx < COOLDOWN) continue;
 
     const slice = allCandles.slice(Math.max(0, i - WINDOW + 1), i + 1);
-    const sig   = rsiDivergenceSignal(slice);
+    const sig   = liquiditySweepSignal(slice);
 
     if (sig.type === "NONE") continue;
-    if (sig.confidence < 72) continue;
+    if (sig.confidence < 68) continue;
     if (!sig.entry || !sig.stopLoss || !sig.takeProfit || !sig.takeProfit2) continue;
 
     const isLong = sig.type === "LONG";
@@ -106,27 +102,16 @@ async function runBacktest(symbol: string) {
   const pfNum  = Math.round(pf * 100) / 100;
   const avgRR1 = trades.reduce((s, t) => s + t.rr1, 0) / T;
   const status = pfNum >= 1.5 ? "✅" : pfNum >= 1.0 ? "🟡" : "❌";
-  const badge  = T >= 100 ? "" : T >= 50 ? " ⚠️" : " 💀";
-
-  const yearMap: Record<number, number> = {};
-  for (const t of trades) {
-    const yr = new Date(t.time * 1000).getFullYear();
-    yearMap[yr] = (yearMap[yr] ?? 0) + t.pnl;
-  }
-  const yrStr = Object.keys(yearMap).sort().map(yr => {
-    const v = yearMap[parseInt(yr)];
-    return `${yr}:${v > 0 ? "+" : ""}${v.toFixed(0)}%`;
-  }).join(" ");
+  const badge  = T >= 50 ? "" : T >= 20 ? " ⚠️" : " 💀";
 
   console.log(
-    `\n${symbol}${badge}  T=${T}  WR=${wr.toFixed(1)}%  PF=${pfNum}  avgTP1=${avgRR1.toFixed(2)}R  ${status}\n` +
-    `  [${yrStr}]`
+    `${symbol}${badge}  T=${T}  WR=${wr.toFixed(1)}%  PF=${pfNum}  avgTP1=${avgRR1.toFixed(2)}R  ${status}`
   );
 }
 
 (async () => {
   console.log(`\n═══════════════════════════════════════════════════`);
-  console.log(`  RSI Divergence — 1H Backtest (technical TPs)`);
+  console.log(`  Liquidity Sweep — 1H Backtest (technical TPs)`);
   console.log(`  COOLDOWN=${COOLDOWN}h · MAX_BARS=${MAX_BARS}h · ${TOTAL_BARS} bars`);
   console.log(`═══════════════════════════════════════════════════`);
   for (const coin of COINS) await runBacktest(coin);

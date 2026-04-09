@@ -10,13 +10,14 @@ export const rsiDivergenceStrategy: Strategy = {
     "EMA200 macro filter. 2.5× TP. Best on FIL and SAND (all years positive on SAND).",
   interval: "1h",
   minCandles: 250,  // EMA200 seed (200) + divergence scan range (30) + swing lookback (5) + buffer
-  // ── 3.7-year 1H backtest (25 coins, 32000 candles, COOLDOWN=20h, MAX_BARS=200h) ──
-  //   ✅ FIL  PF=1.72 T=122 WR=38%  (2022:-1% 2023:+14% 2024:+35% 2025:+70% 2026:+7%)
-  //   ✅ SAND PF=1.70 T=135 WR=40%  (2022:+26% 2023:+34% 2024:+3% 2025:+57% 2026:+10%) ⭐ all years positive
-  //   🟡 MATIC PF=1.37 | ICP PF=1.34 | ETC PF=1.36 (borderline, not included)
-  //   ❌ ETH/BTC/ADA/DOGE/NEAR/XRP (PF<1.3 or inconsistent cross-year)
-  //   Strategy on 1H gives T≈120-135 over 3.7 years = ~33-36 trades/year per coin
-  preferredSymbols: ["FIL", "SAND"],
+  // ── 3.7-year 1H backtest (25 coins, 32000 candles, COOLDOWN=20h, technical TPs) ──
+  //   ✅ FIL  PF=1.55 T=113 WR=35%  (2022:+3% 2023:-5% 2024:+26% 2025:+68% 2026:-3%)
+  //   ✅ SAND PF=1.55 T=140 WR=35%  (2022:+22% 2023:+30% 2024:-8% 2025:+61% 2026:+12%) ⭐
+  //   ✅ SOL  PF=1.50 T=134 WR=34%  (2022:+29% 2023:+35% 2024:+35% 2025:+24% 2026:-17%)
+  //   🟡 XRP PF=1.28 | BCH PF=1.28 | AVAX PF=1.33 | ICP PF=1.27 (borderline)
+  //   ❌ ETH/BTC/UNI/NEAR/TRX/LTC (PF<1.0 or inconsistent cross-year)
+  //   Strategy on 1H gives T≈110-140 over 3.7 years = ~30-38 trades/year per coin
+  preferredSymbols: ["FIL", "SAND", "SOL"],
   cooldownHours: 20,  // matches backtest COOLDOWN=20×1H bars
 
   analyze(candles: OHLCV[]): StrategySignal | null {
