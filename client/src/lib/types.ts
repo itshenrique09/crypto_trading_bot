@@ -50,6 +50,7 @@ export interface CoinData {
   high24h: number;
   low24h: number;
   rank: number;
+  fundingRate: number | null;
 }
 
 export const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {

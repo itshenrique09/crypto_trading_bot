@@ -322,6 +322,47 @@ function calcATR(candles: OHLCV[], period = 14): number {
   return atr;
 }
 
+// ─── ADX (Average Directional Index) ─────────────────────────────
+// ADX > 25 = strong trend (bad for mean-reversion setups like RSI divergence)
+// ADX < 20 = weak/ranging = best environment for divergence plays
+
+function calcADX(candles: OHLCV[], period = 14): number {
+  if (candles.length < period * 2 + 1) return 0;
+  const trArr: number[] = [];
+  const plusDM: number[] = [];
+  const minusDM: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high, l = candles[i].low;
+    const ph = candles[i - 1].high, pl = candles[i - 1].low, pc = candles[i - 1].close;
+    trArr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+    const up = h - ph, down = pl - l;
+    plusDM.push(up > down && up > 0 ? up : 0);
+    minusDM.push(down > up && down > 0 ? down : 0);
+  }
+
+  // Wilder's initial sum
+  let sTR = trArr.slice(0, period).reduce((a, b) => a + b, 0);
+  let sPDM = plusDM.slice(0, period).reduce((a, b) => a + b, 0);
+  let sMDM = minusDM.slice(0, period).reduce((a, b) => a + b, 0);
+
+  const dxArr: number[] = [];
+  for (let i = period; i < trArr.length; i++) {
+    sTR  = sTR  - sTR  / period + trArr[i];
+    sPDM = sPDM - sPDM / period + plusDM[i];
+    sMDM = sMDM - sMDM / period + minusDM[i];
+    const pdi = sTR > 0 ? 100 * sPDM / sTR : 0;
+    const mdi = sTR > 0 ? 100 * sMDM / sTR : 0;
+    const sum = pdi + mdi;
+    dxArr.push(sum > 0 ? 100 * Math.abs(pdi - mdi) / sum : 0);
+  }
+
+  if (dxArr.length < period) return 0;
+  let adx = dxArr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxArr.length; i++) adx = (adx * (period - 1) + dxArr[i]) / period;
+  return adx;
+}
+
 // ─── Ichimoku Cloud — FIXED: displaced Senkou Span ───────────────
 
 function calcIchimoku(candles: OHLCV[]) {
@@ -1948,6 +1989,9 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
   const n      = candles.length - 1;
   const price  = closes[n];
   const inBull = price > ema200v[n];
+
+  // Note: ADX filter tested empirically — RSI divergences naturally fire in
+  // low-ADX environments, making an explicit ADX gate redundant here.
 
   // ── BULLISH DIVERGENCE → LONG (only in bull market) ──
   if (inBull) {

@@ -95,6 +95,7 @@ export default function ScannerPage() {
                       <th className="text-right py-2.5 px-3 font-medium">1h</th>
                       <th className="text-right py-2.5 px-3 font-medium">24h</th>
                       <th className="text-right py-2.5 px-3 font-medium hidden sm:table-cell">Volume</th>
+                      <th className="text-right py-2.5 px-3 font-medium hidden xl:table-cell">Funding</th>
                       <th className="text-right py-2.5 px-3 font-medium hidden lg:table-cell">High / Low</th>
                       <th className="text-center py-2.5 px-3 font-medium hidden lg:table-cell">7d</th>
                       <th className="py-2.5 px-3 md:px-5 w-20"></th>
@@ -114,6 +115,17 @@ export default function ScannerPage() {
                         <td className={`py-2.5 px-3 text-right font-mono text-xs ${getChangeColor(coin.change1h)}`}>{formatPercent(coin.change1h)}</td>
                         <td className={`py-2.5 px-3 text-right font-mono text-xs font-medium ${getChangeColor(coin.change24h)}`}>{formatPercent(coin.change24h)}</td>
                         <td className="py-2.5 px-3 text-right font-mono text-xs text-muted-foreground/60 hidden sm:table-cell">${formatCompact(coin.volume24h)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[11px] hidden xl:table-cell">
+                          {coin.fundingRate != null ? (
+                            <span className={
+                              coin.fundingRate > 0.0005 ? "text-red-400 font-medium" :
+                              coin.fundingRate < -0.0005 ? "text-emerald-400 font-medium" :
+                              "text-muted-foreground/50"
+                            }>
+                              {coin.fundingRate >= 0 ? "+" : ""}{(coin.fundingRate * 100).toFixed(4)}%
+                            </span>
+                          ) : <span className="text-muted-foreground/20">—</span>}
+                        </td>
                         <td className="py-2.5 px-3 text-right font-mono text-[11px] text-muted-foreground/50 hidden lg:table-cell">
                           <span className="text-emerald-400/50">{formatPrice(coin.high24h)}</span>
                           <span className="mx-0.5 text-muted-foreground/20">/</span>

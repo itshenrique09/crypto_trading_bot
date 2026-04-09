@@ -133,8 +133,19 @@ export async function registerRoutes(server: Server, app: Express) {
   // Uses MEXC 24hr tickers for the coins we care about
   app.get("/api/market", async (_req, res) => {
     try {
-      // Fetch all 24h tickers from MEXC (single call, no rate limit issues)
-      const allTickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      // Fetch all 24h tickers from MEXC + funding rates (futures) in parallel
+      const MEXC_FUTURES = "https://contract.mexc.com/api/v1/contract";
+      const [allTickers, fundingData] = await Promise.all([
+        fetchJSON(`${MEXC_BASE}/ticker/24hr`),
+        fetchJSON(`${MEXC_FUTURES}/funding_rate`).catch(() => ({ data: [] })),
+      ]);
+      // Build funding rate map: symbol → rate (e.g. "BTC_USDT" → 0.0001)
+      const fundingMap: Record<string, number> = {};
+      const fList: any[] = fundingData?.data ?? [];
+      for (const f of fList) {
+        const sym = f.symbol?.replace("_USDT", "") ?? "";
+        if (sym) fundingMap[sym] = parseFloat(f.fundingRate) || 0;
+      }
       const tickerMap: Record<string, any> = {};
       for (const t of allTickers) {
         tickerMap[t.symbol] = t;
@@ -168,6 +179,7 @@ export async function registerRoutes(server: Server, app: Express) {
           high24h,
           low24h,
           rank: 0,
+          fundingRate: fundingMap[sym] ?? null,
         };
       }).filter(Boolean) as any[];
 
