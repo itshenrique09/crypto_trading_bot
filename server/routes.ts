@@ -1312,6 +1312,32 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   }
 
+  // ── Funding rate cache (5 min) — MEXC perpetual futures ──────────────
+  // Funding > +0.001 (0.1%) = crowded longs → skip LONG entries (squeeze risk)
+  // Funding < -0.001 (-0.1%) = crowded shorts → skip SHORT entries (squeeze risk)
+  const FUNDING_LONG_MAX  =  0.001;  // above this → don't open LONGs
+  const FUNDING_SHORT_MIN = -0.001;  // below this → don't open SHORTs
+  let cachedFunding: { map: Record<string, number>; fetchedAt: number } | null = null;
+
+  async function getFundingMap(): Promise<Record<string, number>> {
+    if (cachedFunding && Date.now() - cachedFunding.fetchedAt < 5 * 60 * 1000) {
+      return cachedFunding.map;
+    }
+    try {
+      const data: any = await fetchJSON("https://contract.mexc.com/api/v1/contract/funding_rate");
+      const map: Record<string, number> = {};
+      const list: any[] = data?.data ?? [];
+      for (const f of list) {
+        const sym = (f.symbol ?? "").replace("_USDT", "");
+        if (sym) map[sym] = parseFloat(f.fundingRate) || 0;
+      }
+      cachedFunding = { map, fetchedAt: Date.now() };
+      return map;
+    } catch {
+      return cachedFunding?.map || {};
+    }
+  }
+
   // ── Scan activity log — last 60 events (visible in UI for debugging) ──
   interface ScanEvent {
     time: string;
@@ -1569,8 +1595,8 @@ export async function registerRoutes(server: Server, app: Express) {
       const totalOpen = openTradesList.length;
       if (totalOpen >= 6) return;
 
-      // ── VOLUME MAP — fetch once per scan ──
-      const volumeMap = await getVolumeMap();
+      // ── VOLUME + FUNDING MAPS — fetch once per scan ──
+      const [volumeMap, fundingMap] = await Promise.all([getVolumeMap(), getFundingMap()]);
 
       // ── CORRELATION — count open trades per group ──
       const openByGroup: Record<string, number> = {};
@@ -1592,6 +1618,11 @@ export async function registerRoutes(server: Server, app: Express) {
         // ── VOLUME FILTER — skip illiquid coins ──
         const vol24h = volumeMap[sym] ?? 0;
         if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+
+        // ── FUNDING RATE FILTER — skip crowded side ──
+        // High positive funding = longs paying = market too long = squeeze risk for LONGs
+        // High negative funding = shorts paying = market too short = squeeze risk for SHORTs
+        const funding = fundingMap[sym];  // checked per-signal below
 
         // ── CORRELATION FILTER — skip if group is full ──
         const group = COIN_GROUP[sym];
@@ -1659,6 +1690,20 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // ── FUNDING RATE FILTER ──
+              // Crowded longs (funding > +0.1%) → squeeze risk for new LONGs
+              // Crowded shorts (funding < -0.1%) → squeeze risk for new SHORTs
+              if (funding != null) {
+                if (signal.direction === "LONG" && funding > FUNDING_LONG_MAX) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Funding ${(funding*100).toFixed(3)}% > +0.1% — longs crowded, squeeze risk`, signal: "LONG", confidence: signal.confidence });
+                  continue;
+                }
+                if (signal.direction === "SHORT" && funding < FUNDING_SHORT_MIN) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Funding ${(funding*100).toFixed(3)}% < -0.1% — shorts crowded, squeeze risk`, signal: "SHORT", confidence: signal.confidence });
+                  continue;
+                }
+              }
+
               // ── MINIMUM R:R CHECK ──
               const risk = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
@@ -1685,7 +1730,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed: "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M — ${signal.reason}`,
+                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
@@ -2113,8 +2158,8 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
 
-      // ── VOLUME MAP — fetch once per scan ──
-      const volumeMap = await getVolumeMap();
+      // ── VOLUME + FUNDING MAPS — fetch once per scan ──
+      const [volumeMap, fundingMap] = await Promise.all([getVolumeMap(), getFundingMap()]);
 
       // ── CORRELATION — count open live trades per group ──
       const openByGroup: Record<string, number> = {};
@@ -2135,6 +2180,9 @@ export async function registerRoutes(server: Server, app: Express) {
         // ── VOLUME FILTER — skip illiquid coins ──
         const vol24h = volumeMap[sym] ?? 0;
         if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+
+        // ── FUNDING RATE FILTER — skip crowded side ──
+        const funding = fundingMap[sym];
 
         // ── CORRELATION FILTER — skip if group is full ──
         const group = COIN_GROUP[sym];
@@ -2178,6 +2226,12 @@ export async function registerRoutes(server: Server, app: Express) {
               // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
               if (signal.direction === "SHORT" && signal.confidence < 72) continue;
 
+              // ── FUNDING RATE FILTER ──
+              if (funding != null) {
+                if (signal.direction === "LONG"  && funding > FUNDING_LONG_MAX)  continue;
+                if (signal.direction === "SHORT" && funding < FUNDING_SHORT_MIN) continue;
+              }
+
               // ── MINIMUM R:R CHECK ──
               const risk   = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
@@ -2217,7 +2271,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed:          "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M | ${signal.reason}`,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
