@@ -1594,6 +1594,37 @@ export async function registerRoutes(server: Server, app: Express) {
       } catch { /* use default */ }
       const effectiveRiskPct = baseRiskPct * riskMultiplier;
 
+      // ── FRACTIONAL KELLY PER STRATEGY ────────────────────────────
+      // Kelly% = WinRate - (LossRate / R:R)  — use half Kelly (more conservative)
+      // Only activates when a strategy has ≥10 closed trades (reliable stats)
+      // Falls back to baseRiskPct when insufficient data
+      // Capped at 2× baseRiskPct to prevent over-sizing
+      const strategyKellyPct = new Map<string, number>();
+      for (const strat of strategies) {
+        const closed = closedTrades.filter(e => e.strategy === strat.id);
+        if (closed.length < 10) {
+          strategyKellyPct.set(strat.id, baseRiskPct); // not enough data → use base
+          continue;
+        }
+        const wins   = closed.filter(e => e.outcome === "win").length;
+        const losses = closed.length - wins;
+        const winRate  = wins / closed.length;
+        const lossRate = losses / closed.length;
+        // Average R:R from actual trades (reward / risk, both in USD)
+        const winTrades  = closed.filter(e => e.outcome === "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
+        const lossTrades = closed.filter(e => e.outcome !== "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
+        const avgWinR  = winTrades.length  > 0 ? winTrades.reduce((s, e)  => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / winTrades.length  : 2.0;
+        const avgLossR = lossTrades.length > 0 ? lossTrades.reduce((s, e) => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / lossTrades.length : 1.0;
+        const rr = avgLossR > 0 ? avgWinR / avgLossR : avgWinR;
+        // Full Kelly: WR - (LR / R:R)
+        const fullKelly = winRate - (lossRate / Math.max(rr, 0.5));
+        // Half Kelly — captures ~75% of optimal growth with ~50% less drawdown
+        const halfKelly = fullKelly * 0.5;
+        // Clamp: minimum 0.5%, maximum 2× base risk
+        const kellyClamped = Math.min(Math.max(halfKelly * 100, 0.5), baseRiskPct * 2);
+        strategyKellyPct.set(strat.id, kellyClamped);
+      }
+
       // Track open trades per (symbol, strategy) to avoid duplicates
       const openPairs = new Set(
         paperTrades
@@ -1749,10 +1780,14 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
-              // ── POSITION SIZING ──
-              const slDistPct = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
-              const riskUsd   = currentBalance * effectiveRiskPct / 100;
-              const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
+              // ── POSITION SIZING (Fractional Kelly per strategy) ──
+              // Uses half-Kelly derived from real closed trades if ≥10 available,
+              // otherwise falls back to base risk %. Multiplied by BTC macro multiplier.
+              const kellyPct    = (strategyKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier;
+              const slDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
+              const riskUsd     = currentBalance * kellyPct / 100;
+              const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
+              const kellySource = (closedTrades.filter(e => e.strategy === strat.id).length >= 10) ? "kelly" : "base";
 
               await addJournalEntry({
                 symbol: sym,
@@ -1767,10 +1802,10 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed: "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
+                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${kellyPct.toFixed(2)}%(${kellySource}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
               });
 
-              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} kelly=${kellyPct.toFixed(2)}%(${kellySource})`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
@@ -2175,10 +2210,27 @@ export async function registerRoutes(server: Server, app: Express) {
         if      (btcDaily === "up")   riskMultiplier = 1.25;
         else if (btcDaily === "down") riskMultiplier = 0.75;
       } catch {}
-      const effectiveRiskPct = baseRiskPct * riskMultiplier;
 
       // Drawdown protection (same as paper)
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
+
+      // ── FRACTIONAL KELLY PER STRATEGY (live) ─────────────────────
+      // Uses live closed trades if ≥10, otherwise falls back to baseRiskPct
+      const liveKellyPct = new Map<string, number>();
+      for (const strat of strategies) {
+        const closed = closedLive.filter(e => e.strategy === strat.id);
+        if (closed.length < 10) { liveKellyPct.set(strat.id, baseRiskPct); continue; }
+        const wins    = closed.filter(e => e.outcome === "win").length;
+        const winRate = wins / closed.length;
+        const lossRate = 1 - winRate;
+        const winT  = closed.filter(e => e.outcome === "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
+        const lossT = closed.filter(e => e.outcome !== "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
+        const avgWinR  = winT.length  > 0 ? winT.reduce((s, e)  => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / winT.length  : 2.0;
+        const avgLossR = lossT.length > 0 ? lossT.reduce((s, e) => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / lossT.length : 1.0;
+        const rr = avgLossR > 0 ? avgWinR / avgLossR : avgWinR;
+        const halfKelly = (winRate - (lossRate / Math.max(rr, 0.5))) * 0.5;
+        liveKellyPct.set(strat.id, Math.min(Math.max(halfKelly * 100, 0.5), baseRiskPct * 2));
+      }
       const daily1R    = currentBalance * baseRiskPct / 100;
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
@@ -2283,9 +2335,10 @@ export async function registerRoutes(server: Server, app: Express) {
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
               if (risk <= 0 || reward / risk < 1.5) continue;
 
-              // ── POSITION SIZING ──
+              // ── POSITION SIZING (Fractional Kelly per strategy) ──
+              const kellyPct  = (liveKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier;
               const slDistPct = risk / signal.entry;
-              const riskUsd   = currentBalance * effectiveRiskPct / 100;
+              const riskUsd   = currentBalance * kellyPct / 100;
               const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
               const mexcSym  = toMexcSymbol(sym);
@@ -2317,7 +2370,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed:          "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${effectiveRiskPct.toFixed(1)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${kellyPct.toFixed(2)}%(${closedLive.filter(e=>e.strategy===strat.id).length>=10?"kelly":"base"}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
