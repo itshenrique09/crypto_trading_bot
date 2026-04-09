@@ -1518,6 +1518,29 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch { return "neutral"; }
   }
 
+  // Weekly trend using 1W candles — EMA20 weekly ≈ roughly 5-month moving average
+  // Used as an extra filter for 4H strategies (SMC, B&R) to avoid fighting macro structure
+  // neutral = don't block trades (when insufficient data or unclear direction)
+  const weeklyTrendCache = new Map<string, { trend: "up" | "down" | "neutral"; fetchedAt: number }>();
+
+  async function getWeeklyTrend(symbol: string): Promise<"up" | "down" | "neutral"> {
+    const cached = weeklyTrendCache.get(symbol);
+    if (cached && Date.now() - cached.fetchedAt < 60 * 60 * 1000) return cached.trend; // 1h cache
+    try {
+      const weeklyCandles = await fetchBinanceKlines(symbol, "1w", 26);
+      if (weeklyCandles.length < 20) return "neutral";
+      const closes = weeklyCandles.map(c => c.close);
+      const k = 2 / 21;
+      let ema = closes[0];
+      for (let i = 1; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+      const last = closes[closes.length - 1];
+      const dist = (last - ema) / ema;
+      const trend = dist > 0.02 ? "up" : dist < -0.02 ? "down" : "neutral";
+      weeklyTrendCache.set(symbol, { trend, fetchedAt: Date.now() });
+      return trend;
+    } catch { return "neutral"; }
+  }
+
   async function paperScan() {
     try {
       const mode = await getSetting("mode");
@@ -1679,6 +1702,20 @@ export async function registerRoutes(server: Server, app: Express) {
                 }
                 if (strat.id !== "confluence-swing" && signal.confidence < 75) {
                   logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra-trend (daily ${dailyTrend}), confidence ${signal.confidence}% < 75%`, signal: signal.direction, confidence: signal.confidence });
+                  continue;
+                }
+              }
+
+              // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
+              // 4H trades can last days; fighting the weekly structure kills edge.
+              // 1H strategies (Swing, RSI Div) already have daily filter — weekly too slow.
+              if (interval === "4h") {
+                const weeklyTrend = await getWeeklyTrend(sym);
+                const isContraWeekly =
+                  (signal.direction === "LONG"  && weeklyTrend === "down") ||
+                  (signal.direction === "SHORT" && weeklyTrend === "up");
+                if (isContraWeekly) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra weekly trend (${weeklyTrend}), 4H strategy needs weekly alignment`, signal: signal.direction, confidence: signal.confidence });
                   continue;
                 }
               }
@@ -2221,6 +2258,15 @@ export async function registerRoutes(server: Server, app: Express) {
               if (isContraTrend) {
                 if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) continue;
                 if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
+              }
+
+              // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
+              if (interval === "4h") {
+                const weeklyTrend = await getWeeklyTrend(sym);
+                const isContraWeekly =
+                  (signal.direction === "LONG"  && weeklyTrend === "down") ||
+                  (signal.direction === "SHORT" && weeklyTrend === "up");
+                if (isContraWeekly) continue;
               }
 
               // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
