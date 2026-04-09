@@ -1252,7 +1252,11 @@ export async function registerRoutes(server: Server, app: Express) {
       const paper = trades.filter(e => e.mode === "paper");
       const closed = paper.filter(e => e.outcome !== "open");
       const wins = closed.filter(e => e.outcome === "win");
+      const lossesArr = closed.filter(e => e.outcome === "loss");
       const totalPnl = closed.reduce((sum, e) => sum + (e.pnl_pct || 0), 0);
+      const grossProfit = wins.reduce((sum, e) => sum + (e.pnl_pct || 0), 0);
+      const grossLoss = Math.abs(lossesArr.reduce((sum, e) => sum + (e.pnl_pct || 0), 0));
+      const pnlValues = closed.map(e => e.pnl_pct || 0);
       return {
         strategyId: s.id,
         strategyName: s.name,
@@ -1260,10 +1264,15 @@ export async function registerRoutes(server: Server, app: Express) {
         openTrades: paper.filter(e => e.outcome === "open").length,
         closedTrades: closed.length,
         wins: wins.length,
-        losses: closed.filter(e => e.outcome === "loss").length,
+        losses: lossesArr.length,
         winRate: closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null,
         totalPnl: Math.round(totalPnl * 100) / 100,
         avgPnl: closed.length > 0 ? Math.round((totalPnl / closed.length) * 100) / 100 : null,
+        profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : null,
+        avgWin: wins.length > 0 ? Math.round((grossProfit / wins.length) * 100) / 100 : null,
+        avgLoss: lossesArr.length > 0 ? Math.round(-(grossLoss / lossesArr.length) * 100) / 100 : null,
+        bestTrade: pnlValues.length > 0 ? Math.round(Math.max(...pnlValues) * 100) / 100 : null,
+        worstTrade: pnlValues.length > 0 ? Math.round(Math.min(...pnlValues) * 100) / 100 : null,
       };
     });
     res.json(stats);

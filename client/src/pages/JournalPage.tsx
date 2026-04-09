@@ -9,8 +9,11 @@ import {
   ArrowLeft, BookOpen, CheckCircle2, XCircle, Clock,
   TrendingUp, TrendingDown, Minus, Zap, Radio,
   Trash2, Filter, AlertTriangle, FlaskConical, Play, Square, Loader2, Activity,
-  ToggleLeft, ToggleRight, BarChart2
+  ToggleLeft, ToggleRight, BarChart2, LineChart as LineChartIcon, ChevronDown, ChevronUp
 } from "lucide-react";
+import {
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid
+} from "recharts";
 import { formatPrice, getSignalColor } from "@/lib/utils";
 import TradeChartModal from "@/components/TradeChartModal";
 import { PaperPrice, JournalEntry, StrategyInfo, STRATEGY_COLORS, getStratColor } from "@/lib/types";
@@ -23,6 +26,7 @@ export default function JournalPage() {
   const [modeFilter, setModeFilter] = useState<"all" | "signal" | "auto" | "paper">("all");
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [closingId, setClosingId] = useState<number | null>(null);
+  const [equityVisible, setEquityVisible] = useState(true);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
   const [chartEntry, setChartEntry] = useState<any | null>(null);
 
@@ -160,6 +164,27 @@ export default function JournalPage() {
   const paperTrades = all.filter(e => e.mode === "paper");
   const paperClosed = paperTrades.filter(e => e.outcome !== "open");
   const paperPnl = paperClosed.reduce((s, e) => s + (e.pnl_pct || 0), 0);
+
+  // Equity curve: closed trades filtered by strategy, sorted by close time
+  const equityClosed = closed
+    .filter(e => strategyFilter === "all" || (e.strategy || DEFAULT_STRATEGY) === strategyFilter)
+    .filter(e => e.closed_at)
+    .sort((a, b) => new Date(a.closed_at!).getTime() - new Date(b.closed_at!).getTime());
+
+  let _runningPnl = 0;
+  let _peak = 0;
+  const equityData = equityClosed.map((e, i) => {
+    _runningPnl += e.pnl_pct || 0;
+    _peak = Math.max(_peak, _runningPnl);
+    const drawdown = _runningPnl - _peak;
+    return {
+      i: i + 1,
+      label: new Date(e.closed_at!).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      pnl: Math.round(_runningPnl * 100) / 100,
+      drawdown: Math.round(drawdown * 100) / 100,
+    };
+  });
+  const finalEquityPnl = equityData.length > 0 ? equityData[equityData.length - 1].pnl : 0;
 
   const handleClose = (id: number) => {
     const entry = all.find(e => e.id === id);
@@ -335,6 +360,83 @@ export default function JournalPage() {
           <StatCard label="Paper Trades" value={`${paperTrades.length}`} color="text-orange-400" />
           <StatCard label="Paper P&L" value={paperClosed.length > 0 ? `${paperPnl > 0 ? "+" : ""}${paperPnl.toFixed(2)}%` : "--"} color={paperPnl >= 0 ? "text-emerald-400" : "text-red-400"} />
         </div>
+
+        {/* Equity Curve */}
+        <Card className="border-border/20 overflow-hidden">
+          <button
+            onClick={() => setEquityVisible(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-card/30 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <LineChartIcon className="w-4 h-4 text-purple-400" />
+              <span className="text-sm font-bold">Equity Curve</span>
+              {strategyFilter !== "all" && (
+                <span className={`text-[10px] px-2 py-0.5 rounded ${getStratColor(strategyFilter).bg} ${getStratColor(strategyFilter).text}`}>
+                  {strategies.find(s => s.id === strategyFilter)?.name || strategyFilter}
+                </span>
+              )}
+              {equityClosed.length > 0 && (
+                <span className={`text-xs font-mono font-bold ml-1 ${finalEquityPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {finalEquityPnl >= 0 ? "+" : ""}{finalEquityPnl.toFixed(2)}%
+                </span>
+              )}
+            </div>
+            {equityVisible ? <ChevronUp className="w-4 h-4 text-muted-foreground/50" /> : <ChevronDown className="w-4 h-4 text-muted-foreground/50" />}
+          </button>
+
+          {equityVisible && (
+            <div className="px-2 pb-3">
+              {equityClosed.length < 2 ? (
+                <div className="h-28 flex items-center justify-center">
+                  <p className="text-[11px] text-muted-foreground/40">
+                    {equityClosed.length === 0 ? "No closed trades yet" : "Need at least 2 closed trades"}
+                  </p>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={140}>
+                  <AreaChart data={equityData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#22c55e" stopOpacity={0.2} />
+                        <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#ef4444" stopOpacity={0.15} />
+                        <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
+                      axisLine={false}
+                      tickLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      tick={{ fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`}
+                      width={42}
+                    />
+                    <ReferenceLine y={0} stroke="rgba(255,255,255,0.12)" strokeDasharray="4 4" />
+                    <Tooltip
+                      contentStyle={{ background: "#0f0f0f", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, fontSize: 11 }}
+                      labelStyle={{ color: "rgba(255,255,255,0.5)" }}
+                      formatter={(value: number, name: string) => [
+                        `${value >= 0 ? "+" : ""}${value}%`,
+                        name === "pnl" ? "Cumulative P&L" : "Drawdown",
+                      ]}
+                    />
+                    <Area type="monotone" dataKey="drawdown" stroke="#ef4444" strokeWidth={1} strokeOpacity={0.5} fill="url(#ddGrad)" dot={false} />
+                    <Area type="monotone" dataKey="pnl" stroke="#22c55e" strokeWidth={1.5} fill="url(#equityGrad)" dot={false} activeDot={{ r: 3, fill: "#22c55e" }} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+        </Card>
 
         {/* Filters */}
         <div className="flex items-center gap-2 flex-wrap">

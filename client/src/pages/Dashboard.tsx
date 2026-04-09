@@ -28,6 +28,11 @@ interface StrategyStats {
   winRate: number | null;
   totalPnl: number;
   avgPnl: number | null;
+  profitFactor: number | null;
+  avgWin: number | null;
+  avgLoss: number | null;
+  bestTrade: number | null;
+  worstTrade: number | null;
 }
 
 export default function Dashboard() {
@@ -463,21 +468,33 @@ export default function Dashboard() {
                   const wr = s.winRate ?? 0;
                   return (
                     <Card key={s.strategyId} className={`p-3 border ${sc.border} ${sc.bg} hover:brightness-110 transition-all`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className={`text-xs font-bold ${sc.text}`}>{s.strategyName}</span>
+                      {/* Row 1: name + total P&L */}
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold ${sc.text}`}>{s.strategyName}</span>
+                          {s.openTrades > 0 && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 font-semibold">
+                              {s.openTrades} open
+                            </span>
+                          )}
+                        </div>
                         <span className={`text-sm font-bold font-mono ${s.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {s.totalPnl > 0 ? "+" : ""}{s.totalPnl.toFixed(2)}%
                         </span>
                       </div>
+
+                      {/* Win rate bar */}
                       {s.closedTrades > 0 && (
                         <div className="mb-2">
-                          <div className="h-1.5 rounded-full bg-border/30 overflow-hidden">
+                          <div className="h-1 rounded-full bg-border/30 overflow-hidden">
                             <div className={`h-full rounded-full transition-all ${wr >= 50 ? "bg-emerald-500/60" : "bg-red-500/60"}`} style={{ width: `${Math.max(wr, 3)}%` }} />
                           </div>
                         </div>
                       )}
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-muted-foreground">
+
+                      {/* Row 2: W/L + WR + trades */}
+                      <div className="flex items-center justify-between text-[11px] mb-1.5">
+                        <span>
                           <span className="text-emerald-400 font-semibold">{s.wins}W</span>
                           <span className="mx-1 text-muted-foreground/30">/</span>
                           <span className="text-red-400 font-semibold">{s.losses}L</span>
@@ -485,8 +502,35 @@ export default function Dashboard() {
                         <span className="text-muted-foreground">
                           WR: <span className={`font-semibold ${wr >= 50 ? "text-emerald-400" : s.closedTrades > 0 ? "text-red-400" : "text-muted-foreground"}`}>{s.winRate != null ? `${wr}%` : "--"}</span>
                         </span>
-                        <span className="text-muted-foreground/60 text-[10px]">{s.totalTrades} trades</span>
+                        <span className="text-muted-foreground/50 text-[10px]">{s.closedTrades} closed</span>
                       </div>
+
+                      {/* Row 3: Avg P&L + Profit Factor + Avg Win/Loss */}
+                      {s.closedTrades > 0 && (
+                        <div className="flex items-center gap-3 pt-1.5 border-t border-border/15 text-[10px]">
+                          <div className="flex items-center gap-1">
+                            <span className="text-muted-foreground/50">Avg</span>
+                            <span className={`font-mono font-semibold ${(s.avgPnl ?? 0) >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                              {s.avgPnl != null ? `${s.avgPnl > 0 ? "+" : ""}${s.avgPnl.toFixed(2)}%` : "--"}
+                            </span>
+                          </div>
+                          {s.profitFactor != null && (
+                            <div className="flex items-center gap-1">
+                              <span className="text-muted-foreground/50">PF</span>
+                              <span className={`font-mono font-semibold ${s.profitFactor >= 1 ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                                {s.profitFactor.toFixed(2)}
+                              </span>
+                            </div>
+                          )}
+                          {s.avgWin != null && s.avgLoss != null && (
+                            <div className="flex items-center gap-1 ml-auto">
+                              <span className="text-emerald-400/60 font-mono">+{s.avgWin.toFixed(1)}%</span>
+                              <span className="text-muted-foreground/30">/</span>
+                              <span className="text-red-400/60 font-mono">{s.avgLoss.toFixed(1)}%</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </Card>
                   );
                 })}
