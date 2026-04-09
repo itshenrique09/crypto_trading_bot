@@ -7,11 +7,15 @@ import {
   Activity, TrendingUp, TrendingDown,
   BarChart3, Target, Clock, Zap, Play, Square, Loader2,
   ToggleLeft, ToggleRight, ArrowUpRight, ArrowDownRight,
-  CircleDot, Trophy, Percent, ChevronRight
+  CircleDot, Trophy, Percent, ChevronRight, LineChart
 } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
+import {
+  AreaChart, Area, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, ReferenceLine, CartesianGrid,
+} from "recharts";
 
 interface StrategyStats {
   strategyId: string;
@@ -92,6 +96,39 @@ export default function Dashboard() {
     const pnlB = priceMap.get(b.id)?.unrealizedPnl ?? 0;
     return Math.abs(pnlB) - Math.abs(pnlA);
   });
+
+  // ── Equity curve data ────────────────────────────────────────────
+  // Build cumulative P&L series from closed trades sorted by close date
+  const equityData = (() => {
+    const sorted = [...closedTrades]
+      .filter(t => t.closed_at && t.pnl_pct != null)
+      .sort((a, b) => new Date(a.closed_at!).getTime() - new Date(b.closed_at!).getTime());
+
+    if (sorted.length === 0) return [];
+
+    let cumulative = 0;
+    let peak = 0;
+    return [
+      { date: "Start", equity: 0, drawdown: 0 },
+      ...sorted.map(t => {
+        cumulative += t.pnl_pct!;
+        if (cumulative > peak) peak = cumulative;
+        const drawdown = peak > 0 ? cumulative - peak : 0;
+        return {
+          date: new Date(t.closed_at!).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          equity: Math.round(cumulative * 100) / 100,
+          drawdown: Math.round(drawdown * 100) / 100,
+          symbol: t.symbol,
+          outcome: t.outcome,
+        };
+      }),
+    ];
+  })();
+
+  const equityFinal = equityData.length > 0 ? equityData[equityData.length - 1].equity : 0;
+  const maxDrawdown = equityData.length > 0
+    ? Math.min(...equityData.map(d => d.drawdown))
+    : 0;
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1400px]">
@@ -191,6 +228,106 @@ export default function Dashboard() {
           sub="per trade"
         />
       </div>
+
+      {/* Equity Curve */}
+      <Card className="border-border/20 p-4">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <LineChart className="w-4 h-4 text-purple-400" />
+            <h2 className="text-sm font-bold">Equity Curve</h2>
+            <span className="text-[10px] text-muted-foreground/50">paper · cumulative P&L</span>
+          </div>
+          <div className="flex items-center gap-4 text-[11px]">
+            {equityData.length > 1 && (
+              <>
+                <span className={`font-mono font-bold ${equityFinal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {equityFinal > 0 ? "+" : ""}{equityFinal.toFixed(2)}%
+                </span>
+                {maxDrawdown < -0.01 && (
+                  <span className="font-mono text-red-400/70">
+                    DD {maxDrawdown.toFixed(2)}%
+                  </span>
+                )}
+                <span className="text-muted-foreground/40">{closedTrades.length} trades</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {equityData.length < 2 ? (
+          <div className="h-[160px] flex items-center justify-center">
+            <div className="text-center">
+              <LineChart className="w-8 h-8 text-muted-foreground/15 mx-auto mb-2" />
+              <p className="text-[11px] text-muted-foreground/40">Equity curve appears after first closed trade</p>
+            </div>
+          </div>
+        ) : (
+          <div className="h-[160px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={equityData} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={equityFinal >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.15} />
+                    <stop offset="95%" stopColor={equityFinal >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="drawdownGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#ef4444" stopOpacity={0.08} />
+                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                />
+                <YAxis
+                  tick={{ fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: "rgba(15,15,20,0.95)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: "8px",
+                    fontSize: "11px",
+                    padding: "6px 10px",
+                  }}
+                  labelStyle={{ color: "rgba(255,255,255,0.5)", marginBottom: "2px" }}
+                  formatter={(value: number, name: string) => [
+                    `${value > 0 ? "+" : ""}${value.toFixed(2)}%`,
+                    name === "equity" ? "Cumulative P&L" : "Drawdown",
+                  ]}
+                />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 4" />
+                {/* Drawdown shading */}
+                <Area
+                  type="monotone"
+                  dataKey="drawdown"
+                  stroke="transparent"
+                  fill="url(#drawdownGrad)"
+                  isAnimationActive={false}
+                />
+                {/* Equity line */}
+                <Area
+                  type="monotone"
+                  dataKey="equity"
+                  stroke={equityFinal >= 0 ? "#22c55e" : "#ef4444"}
+                  strokeWidth={1.5}
+                  fill="url(#equityGrad)"
+                  dot={false}
+                  activeDot={{ r: 3, strokeWidth: 0 }}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </Card>
 
       {/* Main Content: Open Trades + Strategy Performance side by side */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
