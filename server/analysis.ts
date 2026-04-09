@@ -2072,3 +2072,174 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
 
   return none;
 }
+
+// ─── Liquidity Sweep Signal ───────────────────────────────────────
+// Detects "stop hunts": price briefly pierces a key liquidity pool
+// (equal highs/lows or significant swing points) then closes back inside.
+// The sharp rejection indicates institutional participation — we trade
+// the reversal. EMA200 macro filter guards against LONGs in bear markets.
+// Interval: 1H. minCandles: 220.
+export function liquiditySweepSignal(candles: OHLCV[]): {
+  type: "LONG" | "SHORT" | "NONE";
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  takeProfit2: number;
+  confidence: number;
+  reason: string;
+} {
+  const none = { type: "NONE" as const, entry: 0, stopLoss: 0, takeProfit: 0, takeProfit2: 0, confidence: 0, reason: "" };
+
+  if (candles.length < 220) return none;
+
+  // ── EMA200 macro filter (full candle history) ──
+  const allCloses    = candles.map(c => c.close);
+  const allLast      = candles.length - 1;
+  const ema50Values  = ema(allCloses, 50);
+  const ema200Values = ema(allCloses, 200);
+  const rsiVals      = calcRSI(allCloses, 14);
+
+  const ema50Now  = ema50Values[allLast];
+  const ema200Now = ema200Values[allLast];
+  const rsiNow    = rsiVals[allLast];
+  const macroUp   = ema50Now > ema200Now;
+
+  // ── Signal window: last 80 bars for pool + sweep detection ──
+  const SIG_LEN    = Math.min(80, candles.length);
+  const sigCandles = candles.slice(-SIG_LEN);
+  const closes     = sigCandles.map(c => c.close);
+  const last       = closes.length - 1;
+  const price      = closes[last];
+  const atr        = calcATR(sigCandles);
+
+  const volAvg20 = sigCandles.slice(-20).reduce((s, c) => s + c.volume, 0) / 20;
+
+  // ── 1. Identify liquidity pools (swing highs/lows + equal levels) ──
+  const swings = findSwingPoints(sigCandles, 3);
+  if (swings.highs.length < 2 || swings.lows.length < 2) return none;
+
+  const EQ_TOL = 0.004; // 0.4% — within this = "equal" level (stops cluster at double tops/bottoms)
+
+  interface LiqPool { price: number; touches: number; isEqual: boolean; }
+  const highPools: LiqPool[] = [];
+  const lowPools:  LiqPool[] = [];
+
+  for (const h of swings.highs) {
+    const ex = highPools.find(p => Math.abs(p.price - h) / price < EQ_TOL);
+    if (ex) { ex.price = (ex.price + h) / 2; ex.touches++; ex.isEqual = true; }
+    else highPools.push({ price: h, touches: 1, isEqual: false });
+  }
+  for (const l of swings.lows) {
+    const ex = lowPools.find(p => Math.abs(p.price - l) / price < EQ_TOL);
+    if (ex) { ex.price = (ex.price + l) / 2; ex.touches++; ex.isEqual = true; }
+    else lowPools.push({ price: l, touches: 1, isEqual: false });
+  }
+
+  // Only consider pools near current price (within 8%) and not trivially close (>0.3%)
+  const nearHighs = highPools.filter(p => {
+    const d = Math.abs(p.price - price) / price;
+    return p.price > price && d < 0.08 && d > 0.003;
+  });
+  const nearLows = lowPools.filter(p => {
+    const d = Math.abs(p.price - price) / price;
+    return p.price < price && d < 0.08 && d > 0.003;
+  });
+
+  // ── 2. Detect sweep candles in last 3 bars ──
+  interface Sweep {
+    direction: "bullish" | "bearish";
+    pool: LiqPool;
+    candle: OHLCV;
+    wickRatio: number;
+    volRatio: number;
+    barIdx: number;
+  }
+
+  const sweeps: Sweep[] = [];
+
+  for (let i = Math.max(0, last - 2); i <= last; i++) {
+    const c    = sigCandles[i];
+    const body = Math.abs(c.close - c.open);
+    const vol  = volAvg20 > 0 ? c.volume / volAvg20 : 1;
+
+    // Bullish sweep: wick below a low pool, close back above
+    for (const pool of nearLows) {
+      const tol = atr * 0.08;
+      if (c.low < pool.price - tol && c.close > pool.price) {
+        const wick = pool.price - c.low;
+        const wr   = body > 0 ? wick / body : 2.0;
+        if (wr >= 0.8 && vol >= 1.1) {
+          sweeps.push({ direction: "bullish", pool, candle: c, wickRatio: wr, volRatio: vol, barIdx: i });
+        }
+      }
+    }
+
+    // Bearish sweep: wick above a high pool, close back below
+    for (const pool of nearHighs) {
+      const tol = atr * 0.08;
+      if (c.high > pool.price + tol && c.close < pool.price) {
+        const wick = c.high - pool.price;
+        const wr   = body > 0 ? wick / body : 2.0;
+        if (wr >= 0.8 && vol >= 1.1) {
+          sweeps.push({ direction: "bearish", pool, candle: c, wickRatio: wr, volRatio: vol, barIdx: i });
+        }
+      }
+    }
+  }
+
+  if (sweeps.length === 0) return none;
+
+  // Pick best sweep (prioritise equal levels, high wick ratio, high volume)
+  const best = sweeps.sort((a, b) => {
+    const sa = a.wickRatio * a.volRatio * (a.pool.isEqual ? 1.5 : 1);
+    const sb = b.wickRatio * b.volRatio * (b.pool.isEqual ? 1.5 : 1);
+    return sb - sa;
+  })[0];
+
+  // ── 3. RSI bounds ──
+  if (best.direction === "bullish" && rsiNow > 68) return none;
+  if (best.direction === "bearish" && rsiNow < 32) return none;
+
+  // ── 4. Macro filter: LONG only in bull market structure ──
+  if (best.direction === "bullish" && !macroUp) return none;
+
+  // ── 5. Entry / Stop / TP ──
+  const sc = best.candle;
+  let entry: number, stopLoss: number, takeProfit: number, takeProfit2: number;
+
+  if (best.direction === "bullish") {
+    entry    = sc.close;
+    stopLoss = sc.low - atr * 0.15;
+    const risk = Math.max(entry - stopLoss, atr * 0.5);
+    takeProfit  = entry + risk * 2.5;
+    takeProfit2 = entry + risk * 4.0;
+  } else {
+    entry    = sc.close;
+    stopLoss = sc.high + atr * 0.15;
+    const risk = Math.max(stopLoss - entry, atr * 0.5);
+    takeProfit  = entry - risk * 2.5;
+    takeProfit2 = entry - risk * 4.0;
+  }
+
+  const risk   = Math.abs(entry - stopLoss);
+  const reward = Math.abs(takeProfit - entry);
+  if (risk <= 0 || reward / risk < 2.0) return none;
+
+  // ── 6. Confidence ──
+  let conf = 60;
+  if (best.pool.isEqual)                           conf += 10;
+  if (best.wickRatio >= 1.5)                       conf += 5;
+  if (best.volRatio  >= 1.5)                       conf += 5;
+  if (best.direction === "bullish" && rsiNow < 40) conf += 5;
+  if (best.direction === "bearish" && rsiNow > 60) conf += 5;
+  if (best.direction === "bullish" && macroUp)     conf += 5;
+  conf = Math.min(conf, 88);
+
+  const dir = best.direction === "bullish" ? "LONG" : "SHORT";
+  const reason =
+    `[Liq Sweep ${dir}] ${best.pool.isEqual ? "EQL/EQH" : "swing"} @ ${best.pool.price.toFixed(5)} ` +
+    `| wick ${best.wickRatio.toFixed(1)}× body | vol ${best.volRatio.toFixed(1)}× avg ` +
+    `| RSI ${rsiNow.toFixed(0)} | macro ${macroUp ? "bull" : "bear"} | conf ${conf}%`;
+
+  return { type: dir, entry, stopLoss, takeProfit, takeProfit2, confidence: conf, reason };
+}

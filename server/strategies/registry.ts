@@ -3,6 +3,7 @@ import { v2SwingStrategy } from "./v2-swing";
 import { smcStrategy } from "./smc";
 import { breakRetestStrategy } from "./break-retest";
 import { rsiDivergenceStrategy } from "./rsi-divergence";
+import { liquiditySweepStrategy } from "./liquidity-sweep";
 
 // Mean-reversion and breakout disabled — backtests showed poor performance.
 // Files kept for reference: ./mean-reversion.ts, ./breakout.ts
@@ -12,6 +13,7 @@ const ALL_STRATEGIES: Strategy[] = [
   smcStrategy,
   breakRetestStrategy,
   rsiDivergenceStrategy,
+  liquiditySweepStrategy,
 ];
 
 export function getAllStrategies(): Strategy[] {

@@ -59,6 +59,7 @@ export const STRATEGY_COLORS: Record<string, { bg: string; text: string; border:
   "smc":              { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
   "break-retest":     { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
   "rsi-divergence":   { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
+  "liquidity-sweep":  { bg: "bg-rose-500/10", text: "text-rose-400", border: "border-rose-500/30" },
 };
 
 export function getStratColor(id: string) {

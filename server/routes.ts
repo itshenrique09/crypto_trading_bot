@@ -7,7 +7,7 @@ import {
   getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
   getSetting, setSetting,
 } from "./storage";
-import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, calcATRPercentile, type OHLCV } from "./analysis";
+import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, calcATRPercentile, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 import { getMexcClient, toMexcSymbol } from "./mexc-client";
@@ -1064,6 +1064,130 @@ export async function registerRoutes(server: Server, app: Express) {
       res.json({
         symbol:       symbol.toUpperCase(),
         strategy:     "RSI Divergence (1H)",
+        interval:     "1h",
+        totalBars:    allCandles.length,
+        totalTrades:  trades.length,
+        winRate:      trades.length > 0 ? Math.round((wins.length / trades.length) * 1000) / 10 : 0,
+        avgWinPct:    Math.round(avgWin  * 100) / 100,
+        avgLossPct:   Math.round(avgLoss * 100) / 100,
+        profitFactor: Math.round(profitFactor * 100) / 100,
+        expectancy:   Math.round(expectancy * 1000) / 1000,
+        sharpe:       Math.round(sharpe * 100) / 100,
+        totalReturn:  Math.round((equity - 100) * 100) / 100,
+        maxDrawdown:  Math.round(maxDD * 100) / 100,
+        finalEquity:  Math.round(equity * 100) / 100,
+        trades:       trades.slice(-50),
+        spanDays:     Math.round((lastTime - firstTime) / 86400),
+        barHours:     1,
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Liquidity Sweep Backtest (1H) ───────────────────────────────
+  // Stop-hunt reversal: sweep of EQL/EQH + rejection candle + volume spike
+  // SL below/above wick, TP 2.5× and 4× R:R, COOLDOWN=12h
+
+  app.get("/api/backtest-liquidity-sweep/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+
+      const WINDOW   = 220;  // EMA200 seed + signal window buffer
+      const MAX_BARS = 200;  // 200h max hold (~8 days)
+      const COOLDOWN = 12;   // 12h between signals on same coin
+
+      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
+      if (allCandles.length < WINDOW + MAX_BARS + 10) {
+        return res.status(400).json({ error: "Not enough 1H data for Liquidity Sweep backtest" });
+      }
+
+      const trades: any[] = [];
+      let equity = 100, peakEq = 100, maxDD = 0;
+      let lastTradeIdx = -COOLDOWN;
+
+      for (let i = WINDOW; i < allCandles.length - MAX_BARS; i++) {
+        if (i - lastTradeIdx < COOLDOWN) continue;
+
+        const window = allCandles.slice(i - WINDOW, i + 1);
+        const sig = liquiditySweepSignal(window);
+        if (sig.type === "NONE") continue;
+
+        lastTradeIdx = i;
+        const isLong  = sig.type === "LONG";
+        const future  = allCandles.slice(i + 1, i + 1 + MAX_BARS);
+
+        let outcome: "tp1" | "tp2" | "loss" | "timeout" = "timeout";
+        let barsToOutcome = MAX_BARS;
+
+        for (let j = 0; j < future.length; j++) {
+          const c = future[j];
+          if (isLong) {
+            if (c.low  <= sig.stopLoss)    { outcome = "loss"; barsToOutcome = j + 1; break; }
+            if (c.high >= sig.takeProfit2) { outcome = "tp2";  barsToOutcome = j + 1; break; }
+            if (c.high >= sig.takeProfit)  { outcome = "tp1";  barsToOutcome = j + 1; break; }
+          } else {
+            if (c.high >= sig.stopLoss)    { outcome = "loss"; barsToOutcome = j + 1; break; }
+            if (c.low  <= sig.takeProfit2) { outcome = "tp2";  barsToOutcome = j + 1; break; }
+            if (c.low  <= sig.takeProfit)  { outcome = "tp1";  barsToOutcome = j + 1; break; }
+          }
+        }
+
+        const risk    = Math.abs(sig.entry - sig.stopLoss);
+        const tp1Rew  = Math.abs(sig.takeProfit  - sig.entry);
+        const tp2Rew  = Math.abs(sig.takeProfit2 - sig.entry);
+
+        let pnlPct: number;
+        let outcomeLabel: "win" | "loss";
+        if      (outcome === "tp2")  { pnlPct =  (tp2Rew / sig.entry) * 100; outcomeLabel = "win"; }
+        else if (outcome === "tp1")  { pnlPct =  (tp1Rew / sig.entry) * 100; outcomeLabel = "win"; }
+        else if (outcome === "loss") { pnlPct = -(risk    / sig.entry) * 100; outcomeLabel = "loss"; }
+        else {
+          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
+          pnlPct = isLong
+            ? ((exitPrice - sig.entry) / sig.entry) * 100
+            : ((sig.entry - exitPrice) / sig.entry) * 100;
+          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
+        }
+
+        const posRisk = 0.01;
+        equity += equity * (pnlPct / 100) * posRisk * 100;
+        peakEq  = Math.max(peakEq, equity);
+        maxDD   = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
+
+        const durationLabel = barsToOutcome >= 24 ? `${Math.round(barsToOutcome / 24)}d` : `${barsToOutcome}h`;
+        trades.push({
+          time: allCandles[i].time, signal: sig.type,
+          entry: sig.entry, stopLoss: sig.stopLoss, takeProfit1: sig.takeProfit,
+          outcome: outcomeLabel, pnlPct: Math.round(pnlPct * 100) / 100,
+          barsToOutcome, durationLabel, confluenceScore: sig.confidence,
+          hitLevel: outcome, confidence: sig.confidence,
+        });
+      }
+
+      const wins        = trades.filter(t => t.outcome === "win");
+      const losses      = trades.filter(t => t.outcome === "loss");
+      const avgWin      = wins.length   ? wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length : 0;
+      const avgLoss     = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length) : 0;
+      const grossProfit = wins.reduce((s, t) => s + t.pnlPct, 0);
+      const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
+      const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+      const wr          = trades.length > 0 ? wins.length / trades.length : 0;
+      const expectancy  = wr * avgWin - (1 - wr) * avgLoss;
+
+      const pnls      = trades.map(t => t.pnlPct);
+      const pnlMean   = pnls.length > 0 ? pnls.reduce((s, x) => s + x, 0) / pnls.length : 0;
+      const pnlVar    = pnls.length > 1 ? pnls.reduce((s, x) => s + (x - pnlMean) ** 2, 0) / (pnls.length - 1) : 0;
+      const years     = allCandles.length / 8760;
+      const tpy       = trades.length / Math.max(years, 0.01);
+      const annReturn = pnlMean * tpy;
+      const annStd    = Math.sqrt(pnlVar) * Math.sqrt(tpy);
+      const sharpe    = annStd > 0 ? annReturn / annStd : 0;
+
+      const firstTime = allCandles[WINDOW]?.time || 0;
+      const lastTime  = allCandles[allCandles.length - 1]?.time || 0;
+
+      res.json({
+        symbol:       symbol.toUpperCase(),
+        strategy:     "Liquidity Sweep (1H)",
         interval:     "1h",
         totalBars:    allCandles.length,
         totalTrades:  trades.length,
