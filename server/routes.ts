@@ -11,6 +11,27 @@ import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestS
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 import { getMexcClient, toMexcSymbol } from "./mexc-client";
+import crypto from "crypto";
+
+// Derive a 32-byte key from APP_PASSWORD (or a fixed fallback for dev)
+const ENC_KEY = crypto.createHash("sha256")
+  .update(process.env.APP_PASSWORD ?? "dev-key-not-secret")
+  .digest();
+
+function encryptValue(plaintext: string): string {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", ENC_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return iv.toString("hex") + ":" + encrypted.toString("hex");
+}
+
+function decryptValue(ciphertext: string): string {
+  const [ivHex, encHex] = ciphertext.split(":");
+  if (!ivHex || !encHex) return ciphertext; // not encrypted (legacy plain value)
+  const iv = Buffer.from(ivHex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", ENC_KEY, iv);
+  return Buffer.concat([decipher.update(Buffer.from(encHex, "hex")), decipher.final()]).toString("utf8");
+}
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
@@ -2208,7 +2229,7 @@ export async function registerRoutes(server: Server, app: Express) {
     const apiKey    = await getSetting("mexc_api_key");
     const apiSecret = await getSetting("mexc_api_secret");
     if (!apiKey || !apiSecret) throw new Error("MEXC API keys not configured. Use POST /api/live/config first.");
-    return getMexcClient(apiKey, apiSecret);
+    return getMexcClient(decryptValue(apiKey), decryptValue(apiSecret));
   }
 
   async function liveCheck() {
@@ -2555,8 +2576,8 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const { apiKey, apiSecret, riskPct } = req.body;
       if (!apiKey || !apiSecret) return res.status(400).json({ error: "apiKey and apiSecret are required" });
-      await setSetting("mexc_api_key",    apiKey);
-      await setSetting("mexc_api_secret", apiSecret);
+      await setSetting("mexc_api_key",    encryptValue(apiKey));
+      await setSetting("mexc_api_secret", encryptValue(apiSecret));
       if (riskPct && riskPct > 0 && riskPct <= 3) await setSetting("live_risk_pct", String(riskPct));
       // Immediately test the connection
       const client = getMexcClient(apiKey, apiSecret);
