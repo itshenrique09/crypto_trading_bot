@@ -200,13 +200,15 @@ export async function registerRoutes(server: Server, app: Express) {
       ]);
       // Build funding rate map: symbol → rate (e.g. "BTC_USDT" → 0.0001)
       const fundingMap: Record<string, number> = {};
-      const fList: any[] = fundingData?.data ?? [];
+      const fList: Array<{ symbol: string; fundingRate: string }> = fundingData?.data ?? [];
       for (const f of fList) {
         const sym = f.symbol?.replace("_USDT", "") ?? "";
         if (sym) fundingMap[sym] = parseFloat(f.fundingRate) || 0;
       }
-      const tickerMap: Record<string, any> = {};
-      for (const t of allTickers) {
+      type MexcTicker = { symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string };
+      const allTickersList: MexcTicker[] = allTickers;
+      const tickerMap: Record<string, MexcTicker> = {};
+      for (const t of allTickersList) {
         tickerMap[t.symbol] = t;
       }
 
@@ -270,9 +272,9 @@ export async function registerRoutes(server: Server, app: Express) {
 
             // Sparkline (hourly closes, downsample to ~50 points)
             const step = Math.max(1, Math.floor(klines.length / 50));
-            coin.sparkline = klines.filter((_: any, i: number) => i % step === 0).map((k: any) => parseFloat(k[4]));
+            coin.sparkline = klines.filter((_: any[], i: number) => i % step === 0).map((k: any[]) => parseFloat(k[4]));
           }
-        } catch { /* skip kline errors */ }
+        } catch (err) { console.error("[klines] fetch failed:", err); }
       });
       await Promise.all(klinePromises);
 
@@ -1497,7 +1499,7 @@ export async function registerRoutes(server: Server, app: Express) {
       return cachedVolumes.map;
     }
     try {
-      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
       const map: Record<string, number> = {};
       for (const t of tickers) {
         if (t.symbol.endsWith("USDT")) {
@@ -1506,7 +1508,8 @@ export async function registerRoutes(server: Server, app: Express) {
       }
       cachedVolumes = { map, fetchedAt: Date.now() };
       return map;
-    } catch {
+    } catch (err) {
+      console.error("[volume-map] fetch failed:", err);
       return cachedVolumes?.map || {};
     }
   }
@@ -1532,7 +1535,8 @@ export async function registerRoutes(server: Server, app: Express) {
       }
       cachedFunding = { map, fetchedAt: Date.now() };
       return map;
-    } catch {
+    } catch (err) {
+      console.error("[funding-map] fetch failed:", err);
       return cachedFunding?.map || {};
     }
   }
@@ -1562,7 +1566,7 @@ export async function registerRoutes(server: Server, app: Express) {
       return cachedTopCoins.coins;
     }
     try {
-      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
       const coins = tickers
         .filter(t => t.symbol.endsWith("USDT"))
         .map(t => ({ symbol: t.symbol.replace("USDT", ""), vol: parseFloat(t.quoteVolume) || 0 }))
@@ -1572,7 +1576,8 @@ export async function registerRoutes(server: Server, app: Express) {
         .map(t => t.symbol);
       cachedTopCoins = { coins, fetchedAt: Date.now() };
       return coins;
-    } catch {
+    } catch (err) {
+      console.error("[top-coins] fetch failed:", err);
       return cachedTopCoins?.coins || ["BTC", "ETH", "SOL", "XRP", "BNB", "AVAX", "LINK", "ADA"];
     }
   }
@@ -1596,7 +1601,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (openPaper.length === 0) return;
 
       // Fetch all MEXC tickers in one call
-      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
       const priceMap: Record<string, number> = {};
       for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
 
@@ -1696,7 +1701,7 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
       paperStatus.lastCheck = new Date().toISOString();
-    } catch { /* silent */ }
+    } catch (err) { console.error("[paper-check] failed:", err); }
   }
 
   // Helper: determine daily trend for a coin using 1D EMA50
@@ -1790,7 +1795,7 @@ export async function registerRoutes(server: Server, app: Express) {
         const btcDaily = await getDailyTrend("BTC");
         if      (btcDaily === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
         else if (btcDaily === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
-      } catch { /* use default */ }
+      } catch (err) { console.error("[btc-filter] failed:", err); }
       const effectiveRiskPct = baseRiskPct * riskMultiplier;
 
       // ── FRACTIONAL KELLY PER STRATEGY ────────────────────────────
@@ -2020,12 +2025,12 @@ export async function registerRoutes(server: Server, app: Express) {
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
 
-            } catch { /* skip */ }
+            } catch (err) { console.error("[paper-scan] signal error:", err); }
           }
         }
       }
       paperStatus.lastScan = new Date().toISOString();
-    } catch { /* silent */ }
+    } catch (err) { console.error("[paper-scan] scan failed:", err); }
   }
 
   function startPaperEngine() {
@@ -2119,7 +2124,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (openPaper.length === 0) return res.json([]);
 
       // Single MEXC call for all prices
-      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
       const priceMap: Record<string, number> = {};
       for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
 
@@ -2293,7 +2298,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const liveTrades = journal.filter(e => e.mode === "live" && e.outcome === "open");
 
       // Fetch all prices once
-      const tickers: any[] = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
+      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
       const priceMap: Record<string, number> = {};
       for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
 
@@ -2377,7 +2382,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 closed_at: new Date().toISOString(),
                 notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`,
               });
-            } catch { /* position may already be closed */ }
+            } catch (err) { console.error("[live-trail] journal update failed (position may already be closed):", err); }
           }
         }
       }
@@ -2422,7 +2427,7 @@ export async function registerRoutes(server: Server, app: Express) {
         const btcDaily = await getDailyTrend("BTC");
         if      (btcDaily === "up")   riskMultiplier = 1.25;
         else if (btcDaily === "down") riskMultiplier = 0.75;
-      } catch {}
+      } catch (err) { console.error("[btc-filter] failed:", err); }
 
       // Drawdown protection (same as paper)
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
@@ -2594,7 +2599,7 @@ export async function registerRoutes(server: Server, app: Express) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
-            } catch { /* skip — never crash the scan */ }
+            } catch (err) { console.error("[live-scan] signal error:", err); }
           }
         }
       }
