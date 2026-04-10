@@ -63,9 +63,15 @@ function getBinanceSymbol(symbol: string): string {
 }
 
 async function fetchJSON(url: string) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`API error: ${res.status} from ${url}`);
-  return res.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`API error: ${res.status} from ${url}`);
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // CoinGecko free tier: ~30 req/min
@@ -127,7 +133,39 @@ const insertWatchlistSchema = z.object({
   addedAt: z.string(),
 });
 
+const insertJournalSchema = z.object({
+  symbol:        z.string().min(1).max(20).toUpperCase(),
+  direction:     z.enum(["LONG", "SHORT"]),
+  entry_price:   z.number().positive(),
+  stop_loss:     z.number().positive(),
+  take_profit1:  z.number().positive(),
+  take_profit2:  z.number().positive().optional(),
+  confluence_score: z.number().optional(),
+  mode:          z.enum(["signal", "auto", "paper", "live"]).default("signal"),
+  strategy:      z.string().optional(),
+  followed:      z.enum(["pending", "yes", "no"]).optional(),
+  notes:         z.string().max(2000).optional(),
+  position_size_usd: z.number().positive().optional(),
+  risk_usd:      z.number().positive().optional(),
+}).refine(d => {
+  if (d.direction === "LONG")  return d.stop_loss < d.entry_price && d.take_profit1 > d.entry_price;
+  if (d.direction === "SHORT") return d.stop_loss > d.entry_price && d.take_profit1 < d.entry_price;
+  return true;
+}, { message: "SL/TP must be on the correct side of entry price" });
+
+const capitalSchema = z.object({
+  capital: z.number().positive().max(1_000_000).optional(),
+  riskPct: z.number().positive().max(5).optional(),
+});
+
 export async function registerRoutes(server: Server, app: Express) {
+
+  function validateSymbol(symbol: string): string | null {
+    const s = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (s.length < 2 || s.length > 20) return null;
+    return s;
+  }
+
 
   // ── Market Scanner (MEXC data) ───────────────────────────────────
   // Uses MEXC 24hr tickers for the coins we care about
@@ -238,7 +276,8 @@ export async function registerRoutes(server: Server, app: Express) {
   // CoinGecko for metadata, Binance for real OHLC candles
   app.get("/api/coin/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
       const days = parseInt((req.query.days as string) || "30", 10);
       const id = getCoingeckoId(symbol);
 
@@ -280,7 +319,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/analyze/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       // Fetch timeframes: 4H primary, 1D for trend, 15m for entry
       // 1H: Swing signal generation (needs 250+ for EMA200 seed)
@@ -391,7 +431,8 @@ export async function registerRoutes(server: Server, app: Express) {
   // Swing + RSI Div → 1H candles; SMC + B&R → 4H candles
   app.get("/api/signals/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
       const [candles1h, candles4h] = await Promise.all([
         fetchBinanceKlines(symbol, "1h", 260),   // 260 → EMA200 reliable, covers DIV_RANGE
         fetchBinanceKlines(symbol, "4h", 400),   // 400 → EMA200 seed ~2% (reliable)
@@ -477,7 +518,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       // ── 1H confirmed throughout: strategy.interval = "1h", matching live Confluence Swing
       // WINDOW=250 → EMA200 seed (200 bars) with enough history for reliable macro filter
@@ -644,7 +686,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest-smc/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       const WINDOW         = 150;  // reliable EMA200 (22% seed influence vs 55% at 60 bars)
       const TIME_STOP      = 15;
@@ -805,7 +848,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest-breakretest/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       const WINDOW         = 150;  // 150 bars → reliable EMA200 (22% seed vs 55% at 60 bars)
       const TIME_STOP      = 15;
@@ -967,7 +1011,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest-rsi-div/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       const WINDOW   = 250;  // EMA200 seed
       const MAX_BARS = 200;  // 200h max hold
@@ -1089,7 +1134,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest-liquidity-sweep/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
 
       const WINDOW   = 220;  // EMA200 seed + signal window buffer
       const MAX_BARS = 200;  // 200h max hold (~8 days)
@@ -1214,7 +1260,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/backtest-all/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
       const base = `http://localhost:${process.env.PORT || 5000}`;
 
       const [resA, resB, resC] = await Promise.all([
@@ -1288,11 +1335,9 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.post("/api/journal", async (req, res) => {
     try {
-      const entry = req.body;
-      if (!entry.symbol || !entry.direction || !entry.entry_price || !entry.stop_loss || !entry.take_profit1) {
-        return res.status(400).json({ error: "Missing required fields" });
-      }
-      res.json(await addJournalEntry(entry));
+      const parsed = insertJournalSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      res.json(await addJournalEntry(parsed.data));
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -2034,11 +2079,13 @@ export async function registerRoutes(server: Server, app: Express) {
   // Set paper trading capital and risk %
   app.post("/api/paper/capital", async (req, res) => {
     try {
-      const { capital, riskPct } = req.body;
-      if (capital !== undefined && capital > 0) await setSetting("paper_capital", String(capital));
-      if (riskPct !== undefined && riskPct > 0 && riskPct <= 5) await setSetting("paper_risk_pct", String(riskPct));
-      const ic  = parseFloat(await getSetting("paper_capital") || "1000");
-      const rp  = parseFloat(await getSetting("paper_risk_pct") || "2");
+      const parsed = capitalSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { capital, riskPct } = parsed.data;
+      if (capital !== undefined) await setSetting("paper_capital", String(capital));
+      if (riskPct !== undefined) await setSetting("paper_risk_pct", String(riskPct));
+      const ic = parseFloat(await getSetting("paper_capital") || "1000");
+      const rp = parseFloat(await getSetting("paper_risk_pct") || "2");
       res.json({ capital: ic, riskPct: rp, oneR: Math.round(ic * rp) / 100 });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -2101,7 +2148,8 @@ export async function registerRoutes(server: Server, app: Express) {
   // Returns OHLCV candles around a trade's entry/exit for chart display
   app.get("/api/trade-chart/:symbol", async (req, res) => {
     try {
-      const { symbol } = req.params;
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
       const from     = parseInt(req.query.from as string);   // unix seconds
       const to       = parseInt(req.query.to   as string);   // unix seconds
       const interval = (req.query.interval as string) || "4h";
