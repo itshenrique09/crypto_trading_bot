@@ -76,7 +76,7 @@ export async function removeFromWatchlist(id: number): Promise<void> {
 
 export async function getSignals(): Promise<Signal[]> {
   const db = await getDb();
-  return rowsToObjects<Signal>(db, "SELECT * FROM signals ORDER BY id DESC LIMIT 100");
+  return rowsToObjects<Signal>(db, "SELECT * FROM signals ORDER BY timestamp DESC LIMIT 100");
 }
 
 export async function addSignal(signal: InsertSignal): Promise<Signal> {
@@ -155,7 +155,7 @@ export interface InsertJournal {
 
 export async function getJournal(): Promise<JournalEntry[]> {
   const db = await getDb();
-  return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY id DESC LIMIT 200");
+  return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY created_at DESC LIMIT 200");
 }
 
 export async function addJournalEntry(entry: InsertJournal): Promise<JournalEntry> {

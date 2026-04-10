@@ -1,5 +1,6 @@
 import initSqlJs, { type Database } from "sql.js";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { writeFile } from "fs/promises";
 import { join } from "path";
 
 const DB_PATH = join(process.cwd(), "data.db");
@@ -83,6 +84,18 @@ export async function getDb(): Promise<Database> {
     try { _db.run(sql); } catch { /* already exists */ }
   }
 
+  // Performance indices
+  const indices = [
+    "CREATE INDEX IF NOT EXISTS idx_journal_created_at ON journal(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_strategy    ON journal(strategy)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_outcome     ON journal(outcome)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_timestamp   ON signals(timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_symbol      ON signals(symbol)",
+  ];
+  for (const sql of indices) {
+    _db.run(sql);
+  }
+
   // Default mode = signal
   const existing = rowsToObjectsSync<{ key: string; value: string }>(_db, "SELECT * FROM bot_settings WHERE key = 'mode'");
   if (existing.length === 0) {
@@ -93,8 +106,24 @@ export async function getDb(): Promise<Database> {
   return _db;
 }
 
-// Save to disk after every write
-export function persist(db: Database) {
-  const data = db.export();
-  writeFileSync(DB_PATH, Buffer.from(data));
+// Save to disk after every write — non-blocking with write queue
+let _persistPending = false;
+let _persistQueued  = false;
+
+export function persist(db: Database): void {
+  if (_persistPending) {
+    _persistQueued = true;
+    return;
+  }
+  _persistPending = true;
+  const data = Buffer.from(db.export());
+  writeFile(DB_PATH, data)
+    .catch(err => console.error("[db] persist failed:", err))
+    .finally(() => {
+      _persistPending = false;
+      if (_persistQueued) {
+        _persistQueued = false;
+        persist(db);
+      }
+    });
 }
