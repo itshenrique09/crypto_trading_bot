@@ -23,7 +23,10 @@ app.use(
 app.use(express.urlencoded({ extended: false }));
 
 // Simple password protection
-const AUTH_PASSWORD = process.env.APP_PASSWORD || "Rickee09!";
+const AUTH_PASSWORD = process.env.APP_PASSWORD ?? "";
+if (!AUTH_PASSWORD && process.env.NODE_ENV === "production") {
+  console.warn("[security] APP_PASSWORD env var not set — server is unprotected!");
+}
 const AUTH_TOKEN = Buffer.from(`admin:${AUTH_PASSWORD}`).toString("base64");
 
 app.use((req, res, next) => {
