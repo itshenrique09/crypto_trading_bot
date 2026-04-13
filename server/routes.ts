@@ -1874,8 +1874,11 @@ export async function registerRoutes(server: Server, app: Express) {
         if (totalOpen + openPairs.size >= 6) break;
 
         // ── VOLUME FILTER — skip illiquid coins ──
+        // Backtested preferred symbols are exempt — their liquidity was validated during research.
+        // Volume filter only guards against unknown dynamic coins with no proven edge.
         const vol24h = volumeMap[sym] ?? 0;
-        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
+        const isPreferred = strategies.some(s => s.preferredSymbols?.includes(sym));
+        if (!isPreferred && vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
           for (const strat of strategies) {
             if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
@@ -2503,8 +2506,10 @@ export async function registerRoutes(server: Server, app: Express) {
         if (openLive.length + openPairs.size >= 6) break;
 
         // ── VOLUME FILTER — skip illiquid coins ──
+        // Preferred symbols are exempt — validated via backtest, volume checked separately.
         const vol24h = volumeMap[sym] ?? 0;
-        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
+        const isPreferred = strategies.some(s => s.preferredSymbols?.includes(sym));
+        if (!isPreferred && vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
           for (const strat of strategies) {
             if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
