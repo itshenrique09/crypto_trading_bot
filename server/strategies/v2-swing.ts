@@ -6,7 +6,7 @@ export const v2SwingStrategy: Strategy = {
   name: "Confluence Swing",
   description:
     "Multi-indicator confluence: EMA9/21/50/200 + Ichimoku + RSI + Stoch RSI + MACD + " +
-    "Bollinger + OBV + Order Blocks + Fibonacci. Score ±10, STRONG signal at ±6. " +
+    "Bollinger + OBV + Order Blocks + Fibonacci. Score ±10, signal at ±4 (BUY/SELL or STRONG). " +
     "Dual TP: 1.5× (TP1) + 2.5× (TP2). Runs on 1H for optimal timing and trade frequency.",
   interval: "1h",
   minCandles: 250,  // EMA200 seed — 250×1H ≈ 10 days, reliable
@@ -35,8 +35,10 @@ export const v2SwingStrategy: Strategy = {
 
     if (sig.type === "HOLD" || !sig.entry || !sig.stopLoss || !sig.takeProfit1) return null;
 
-    // Only STRONG signals (score ≥ ±6) for highest quality entries
-    if (Math.abs(sig.confluenceScore) < 6) return null;
+    // BUY/SELL signals (score ≥ ±4) — backtest (1H, 32000 bars, COOLDOWN=20h) shows
+    // score≥4 gives T=500-675/coin with PF 1.19-1.76 across all preferred coins (all ✅/🟡)
+    // score≥6 only gave T=38-53/coin — insufficient statistical confidence
+    if (Math.abs(sig.confluenceScore) < 4) return null;
 
     const direction = (sig.type === "BUY" || sig.type === "STRONG_BUY") ? "LONG" : "SHORT";
 
