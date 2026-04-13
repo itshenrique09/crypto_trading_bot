@@ -1554,7 +1554,7 @@ export async function registerRoutes(server: Server, app: Express) {
   const scanLog: ScanEvent[] = [];
   function logScan(ev: ScanEvent) {
     scanLog.unshift(ev);
-    if (scanLog.length > 60) scanLog.pop();
+    if (scanLog.length > 500) scanLog.pop();
   }
 
   // Dynamic coin list from MEXC (cached 5 min)
@@ -1875,7 +1875,13 @@ export async function registerRoutes(server: Server, app: Express) {
 
         // ── VOLUME FILTER — skip illiquid coins ──
         const vol24h = volumeMap[sym] ?? 0;
-        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
+          }
+          continue;
+        }
 
         // ── FUNDING RATE FILTER — skip crowded side ──
         // High positive funding = longs paying = market too long = squeeze risk for LONGs
@@ -1884,7 +1890,13 @@ export async function registerRoutes(server: Server, app: Express) {
 
         // ── CORRELATION FILTER — skip if group is full ──
         const group = COIN_GROUP[sym];
-        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) continue;
+        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Group limit: ${group} already has ${MAX_PER_GROUP} open trades` });
+          }
+          continue;
+        }
 
         // Daily trend filter — fetch once per coin
         const dailyTrend = await getDailyTrend(sym);
@@ -1899,7 +1911,10 @@ export async function registerRoutes(server: Server, app: Express) {
 
             // Skip strategy/coin combos with no proven edge (preferredSymbols filter)
             if (strat.preferredSymbols && strat.preferredSymbols.length > 0) {
-              if (!strat.preferredSymbols.includes(sym)) continue;
+              if (!strat.preferredSymbols.includes(sym)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
+                continue;
+              }
             }
 
             // Cooldown check — matches backtest COOLDOWN parameter
@@ -1907,7 +1922,10 @@ export async function registerRoutes(server: Server, app: Express) {
               const lastClose = lastClosedAt.get(`${sym}:${strat.id}`);
               if (lastClose) {
                 const hoursSince = (Date.now() - lastClose) / (1000 * 60 * 60);
-                if (hoursSince < strat.cooldownHours) continue;
+                if (hoursSince < strat.cooldownHours) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Cooldown: ${hoursSince.toFixed(1)}h / ${strat.cooldownHours}h elapsed` });
+                  continue;
+                }
               }
             }
 
@@ -2486,14 +2504,26 @@ export async function registerRoutes(server: Server, app: Express) {
 
         // ── VOLUME FILTER — skip illiquid coins ──
         const vol24h = volumeMap[sym] ?? 0;
-        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) continue;
+        if (vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
+          }
+          continue;
+        }
 
         // ── FUNDING RATE FILTER — skip crowded side ──
         const funding = fundingMap[sym];
 
         // ── CORRELATION FILTER — skip if group is full ──
         const group = COIN_GROUP[sym];
-        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) continue;
+        if (group && (openByGroup[group] || 0) >= MAX_PER_GROUP) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Group limit: ${group} already has ${MAX_PER_GROUP} open trades` });
+          }
+          continue;
+        }
 
         const dailyTrend = await getDailyTrend(sym);
 
@@ -2503,11 +2533,18 @@ export async function registerRoutes(server: Server, app: Express) {
 
           for (const strat of strats) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
-            if (strat.preferredSymbols?.length && !strat.preferredSymbols.includes(sym)) continue;
+            if (strat.preferredSymbols?.length && !strat.preferredSymbols.includes(sym)) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
+              continue;
+            }
 
             if (strat.cooldownHours) {
               const lastClose = lastClosedAt.get(`${sym}:${strat.id}`);
-              if (lastClose && (Date.now() - lastClose) / 3600000 < strat.cooldownHours) continue;
+              if (lastClose && (Date.now() - lastClose) / 3600000 < strat.cooldownHours) {
+                const hoursSince = (Date.now() - lastClose) / 3600000;
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Cooldown: ${hoursSince.toFixed(1)}h / ${strat.cooldownHours}h elapsed` });
+                continue;
+              }
             }
 
             if (openLive.length + openPairs.size >= 6) break;
