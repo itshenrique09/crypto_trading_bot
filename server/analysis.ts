@@ -175,7 +175,14 @@ function findTechnicalTPs(
   isLong: boolean
 ): { tp1: number; tp2: number } {
   const risk = Math.abs(entry - stopLoss);
-  const minDist = risk * 2.0;          // must be at least 2R from entry (matches 2.5R fallback intent)
+
+  // Minimum TP distance: the greater of 2R or 1% of entry price.
+  // The 1% floor prevents micro-priced coins (PEPE, SHIB) from producing
+  // TPs that are indistinguishable from entry when risk ≈ 0 due to tiny ATR.
+  const minDistR   = risk * 2.0;
+  const minDistPct = entry * 0.01;    // 1% of entry price
+  const minDist    = Math.max(minDistR, minDistPct);
+
   const swingWindow = 3;               // bars on each side to confirm swing
 
   // Scan last ~100 bars; exclude last 2 (not yet confirmed as swing points)
@@ -201,18 +208,24 @@ function findTechnicalTPs(
   if (isLong) levels.sort((a, b) => a - b);
   else        levels.sort((a, b) => b - a);
 
-  // Cap at 5R — prevents unreachable TPs on very wide swings
-  const maxTp  = isLong ? entry + risk * 5 : entry - risk * 5;
+  // Cap at 5R or 8% — prevents unreachable TPs on very wide swings
+  const maxTp  = isLong ? entry + Math.max(risk * 5, entry * 0.08) : entry - Math.max(risk * 5, entry * 0.08);
   const capFn  = isLong ? (v: number) => Math.min(v, maxTp) : (v: number) => Math.max(v, maxTp);
-  const capped = levels.map(capFn).filter(v => isLong ? v > entry + risk * 1.5 : v < entry - risk * 1.5);
+  const capped = levels.map(capFn).filter(v => isLong ? v > entry + minDist * 0.75 : v < entry - minDist * 0.75);
+
+  // TP2 must be meaningfully further than TP1 — at least 1% of entry price apart.
+  // Prevents clustered swing highs from producing two nearly-identical targets.
+  const minSep = entry * 0.01;
+  let tp1 = capped[0];
+  let tp2 = capped.find(v => isLong ? v > (tp1 ?? 0) + minSep : v < (tp1 ?? Infinity) - minSep);
 
   // Fallback: R:R multiples (TP1=2.5R, TP2=4R — trailing stop handles the rest)
-  const tp1Fallback = isLong ? entry + risk * 2.5 : entry - risk * 2.5;
-  const tp2Fallback = isLong ? entry + risk * 4.0 : entry - risk * 4.0;
+  const tp1Fallback = isLong ? entry + Math.max(risk * 2.5, entry * 0.025) : entry - Math.max(risk * 2.5, entry * 0.025);
+  const tp2Fallback = isLong ? entry + Math.max(risk * 4.0, entry * 0.04)  : entry - Math.max(risk * 4.0, entry * 0.04);
 
   return {
-    tp1: capped[0] ?? tp1Fallback,
-    tp2: capped[1] ?? tp2Fallback,
+    tp1: tp1 ?? tp1Fallback,
+    tp2: tp2 ?? tp2Fallback,
   };
 }
 
