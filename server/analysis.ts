@@ -185,9 +185,10 @@ function findTechnicalTPs(
 
   const swingWindow = 3;               // bars on each side to confirm swing
 
-  // Scan last ~100 bars; exclude last 2 (not yet confirmed as swing points)
+  // Scan last ~200 bars; exclude last 2 (not yet confirmed as swing points)
+  // Wider window gives more candidate levels for TP2, reducing fallback to % targets
   const end   = Math.max(0, candles.length - 2);
-  const start = Math.max(0, end - 100);
+  const start = Math.max(0, end - 200);
 
   const levels: number[] = [];
   for (let i = start + swingWindow; i < end - swingWindow; i++) {
