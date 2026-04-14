@@ -2727,4 +2727,14 @@ export async function registerRoutes(server: Server, app: Express) {
       });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
+
+  // ── AUTO-START on server boot ──────────────────────────────────────
+  // If the mode was "paper" before the server restarted (PM2 restart etc.),
+  // resume scanning automatically — no need to click "Start" after every deploy.
+  getSetting("mode").then(mode => {
+    if (mode === "paper") {
+      console.log("[auto-start] mode=paper detected — starting paper engine");
+      startPaperEngine();
+    }
+  }).catch(err => console.error("[auto-start] failed:", err));
 }
