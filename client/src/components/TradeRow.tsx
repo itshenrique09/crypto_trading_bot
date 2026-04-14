@@ -47,10 +47,13 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
             {entry.outcome === "loss" && <Badge variant="outline" className="text-[10px] border-red-500/30 text-red-400">Loss</Badge>}
             {entry.outcome === "breakeven" && <Badge variant="outline" className="text-[10px] border-gray-500/30 text-gray-400">BE</Badge>}
           </div>
-          <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground flex-wrap">
             <span className="font-mono">Entry ${formatPrice(entry.entry_price)}</span>
             <span className="font-mono text-red-400/70">SL ${formatPrice(entry.stop_loss)}</span>
-            <span className="font-mono text-emerald-400/70">TP ${formatPrice(entry.take_profit1)}</span>
+            <span className="font-mono text-emerald-400/70">TP1 ${formatPrice(entry.take_profit1)}</span>
+            {entry.take_profit2 != null && (
+              <span className="font-mono text-emerald-300/60">TP2 ${formatPrice(entry.take_profit2)}</span>
+            )}
             {entry.confluence_score != null && <span>Score {entry.confluence_score}</span>}
           </div>
         </div>
@@ -121,6 +124,21 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
               {entry.pnl_usd >= 0 ? "+" : ""}€{Math.abs(entry.pnl_usd).toFixed(2)}
             </span>
           )}
+          {!isOpen && entry.pnl_usd != null && entry.risk_usd != null && entry.risk_usd > 0 && (
+            <span className={`text-[10px] font-mono font-semibold ${entry.pnl_usd >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              {entry.pnl_usd >= 0 ? "+" : ""}{(entry.pnl_usd / entry.risk_usd).toFixed(2)}R
+            </span>
+          )}
+          {!isOpen && entry.created_at && entry.closed_at && (() => {
+            const ms = new Date(entry.closed_at).getTime() - new Date(entry.created_at).getTime();
+            const h = Math.floor(ms / 3600000);
+            const m = Math.floor((ms % 3600000) / 60000);
+            return (
+              <span className="text-[10px] text-muted-foreground/40 font-mono">
+                {h > 0 ? `${h}h ` : ""}{m}m
+              </span>
+            );
+          })()}
         </div>
 
         {/* Close trade controls */}
