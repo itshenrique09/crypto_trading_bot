@@ -2014,10 +2014,13 @@ export async function registerRoutes(server: Server, app: Express) {
               }
 
               // ── MINIMUM R:R CHECK ──
+              // Matches live engine. Strategies set their own floor:
+              //   Conf Swing TP1 = 1.5R by design, LiqSweep enforces ≥2.0 internally.
+              // This just guards against degenerate signals (risk=0, inverted TPs).
               const risk = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
-              if (risk <= 0 || reward / risk < 2.0) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 2.0 minimum`, signal: signal.direction, confidence: signal.confidence });
+              if (risk <= 0 || reward / risk < 1.5) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 
@@ -2480,7 +2483,13 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (todayPnl < -4 * daily1R) return;
+      if (todayPnl < -4 * daily1R) return;  // Daily DD limit: -4R
+
+      // Monthly drawdown pause — matches paper engine
+      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+      const monthPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= monthStart)
+                                   .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
+      if (monthPnl < -8 * daily1R) return;  // Monthly DD limit: -8R
 
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
       const lastClosedAt = new Map<string, number>();
