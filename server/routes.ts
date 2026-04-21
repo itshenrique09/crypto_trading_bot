@@ -1870,8 +1870,13 @@ export async function registerRoutes(server: Server, app: Express) {
         byInterval[s.interval].push(s);
       }
 
+      // Count only NEW trades opened during this scan. openPairs is pre-populated
+      // with existing open trades for duplicate prevention — counting it would
+      // cause the 6-trade cap check to fire before any scanning happens.
+      let newOpens = 0;
+
       for (const sym of coins) {
-        if (totalOpen + openPairs.size >= 6) break;
+        if (totalOpen + newOpens >= 6) break;
 
         // ── VOLUME FILTER — skip illiquid coins ──
         // Backtested preferred symbols are exempt — their liquidity was validated during research.
@@ -1932,7 +1937,7 @@ export async function registerRoutes(server: Server, app: Express) {
               }
             }
 
-            if (totalOpen + openPairs.size >= 6) break;
+            if (totalOpen + newOpens >= 6) break;
 
             try {
               // Lazy-fetch candles for this interval
@@ -2043,6 +2048,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} kelly=${kellyPct.toFixed(2)}%(${kellySource})`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
+              newOpens++;
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
 
@@ -2502,8 +2508,11 @@ export async function registerRoutes(server: Server, app: Express) {
         byInterval[s.interval].push(s);
       }
 
+      // Count only NEW trades opened in this scan (openPairs is pre-seeded with existing).
+      let newOpens = 0;
+
       for (const sym of coins) {
-        if (openLive.length + openPairs.size >= 6) break;
+        if (openLive.length + newOpens >= 6) break;
 
         // ── VOLUME FILTER — skip illiquid coins ──
         // Preferred symbols are exempt — validated via backtest, volume checked separately.
@@ -2552,7 +2561,7 @@ export async function registerRoutes(server: Server, app: Express) {
               }
             }
 
-            if (openLive.length + openPairs.size >= 6) break;
+            if (openLive.length + newOpens >= 6) break;
 
             try {
               if (!candles) {
@@ -2640,6 +2649,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
+              newOpens++;
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
             } catch (err) { console.error("[live-scan] signal error:", err); }
           }
