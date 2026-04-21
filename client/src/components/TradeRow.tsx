@@ -114,9 +114,15 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
           )}
           {isOpen && price && (
             <span className={`text-[10px] font-mono font-semibold ${(price.unrealizedPnl ?? 0) >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
-              {price.unrealizedPnl != null && entry.risk_usd != null
-                ? `${(price.unrealizedPnl >= 0 ? "+" : "")}${(price.unrealizedPnl / Math.abs((entry.stop_loss - entry.entry_price) / entry.entry_price * 100) * (entry.risk_usd / (entry.risk_usd > 0 ? entry.risk_usd : 1))).toFixed(2)}R`
-                : null}
+              {(() => {
+                // R-multiple = pnl_usd / risk_usd. Derive pnl_usd from pnl% × position size.
+                // Using position_size_usd + risk_usd is stable even after BE trailing moves SL to entry.
+                if (price.unrealizedPnl == null || entry.risk_usd == null || entry.risk_usd <= 0) return null;
+                if (entry.position_size_usd == null || entry.position_size_usd <= 0) return null;
+                const pnlUsd = (price.unrealizedPnl / 100) * entry.position_size_usd;
+                const rMult = pnlUsd / entry.risk_usd;
+                return `${rMult >= 0 ? "+" : ""}${rMult.toFixed(2)}R`;
+              })()}
             </span>
           )}
           {!isOpen && entry.pnl_usd != null && (
