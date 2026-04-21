@@ -18,7 +18,19 @@ export const breakRetestStrategy: Strategy = {
   //   ⚠️  ALL results have T<30 — B&R is inherently low-frequency on 4H
   //   ❌ BTC  PF=0.85 T=47 | BNB PF=0.85 T=39 | DOT PF=0.40 T=21
   //   ❌ LINK PF=0.58 T=15 | LTC PF=0.62 T=29 | ATOM PF=0.60 T=27
-  preferredSymbols: ["SOL", "AVAX", "SAND"],
+  // Per-coin re-test Apr 2026 (BE@1R trailing, 3.7y):
+  //   SAND T=34 WR=50% PF=3.48 netR=+114  | NEAR T=18 WR=44% PF=3.38 netR=+82
+  //   SOL  T=35 WR=43% PF=1.74 netR=+59   | BNB  T=60 WR=33% PF=2.19 netR=+52
+  //   MATIC T=23 WR=30% PF=3.72 netR=+51  | ETC  T=29 WR=35% PF=2.67 netR=+44
+  //   AVAX T=22 WR=23% PF=1.53 netR=+19 — DROPPED (marginal, low WR)
+  // NOTE: MATIC (PF=3.72 netR=+51) excluded — Binance delisted MATICUSDT (→ POL migration)
+  // Walk-forward Apr 2026 (65/35 train/test) — only SOL/SAND/BNB robust OOS:
+  //   🟢 SOL  train +15 / test +30 PF 2.26
+  //   🟢 SAND train +118 / test +18 PF 2.50
+  //   🟢 BNB  train +2 / test +19 PF 3.23
+  //   ❌ NEAR (train -14 → test +85 but only 9 trades train, unstable)
+  //   ❌ ETC  (train +78 → test -5) overfit
+  preferredSymbols: ["SOL", "SAND", "BNB"],
   cooldownHours: 12,  // matches backtest COOLDOWN=3×4H bars
 
   analyze(candles: OHLCV[]): StrategySignal | null {

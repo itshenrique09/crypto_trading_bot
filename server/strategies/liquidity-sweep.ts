@@ -21,7 +21,16 @@ export const liquiditySweepStrategy: Strategy = {
   //   ⚠️  FVG filter reduces trade count ~45% but improves quality (WR +5-8% on most coins)
   //   ⚠️  Strategy fires on sharp stop-hunt wicks — most effective on 1H with liquid futures
   //   ⚠️  LONG macro filter (EMA50 > EMA200) keeps LONG signals in bull market only
-  preferredSymbols: ["FIL", "PEPE", "SAND", "INJ", "SUI", "SOL"],
+  // Per-coin re-test Apr 2026 (3.7y, BE@1R, conf≥70): strategy works on ~every liquid coin.
+  //   TOP tier (netR >150): UNI=+220 AAVE=+214 NEAR=+206 INJ=+177 SUI=+154 PEPE=+150
+  //   Strong  (netR 100-150): MATIC=+138 AVAX=+128 LINK=+126 FIL=+113 DOT=+111 SOL=+104
+  //   Added to preferred: UNI, AAVE, NEAR, MATIC, AVAX, LINK, DOT — all PF>1.7
+  // NOTE: MATIC (netR=+138) excluded — Binance delisted MATICUSDT (→ POL migration)
+  // Walk-forward Apr 2026 (65/35 train/test split) — 18 coins robust in OOS:
+  //   UNI(+97) ICP(+65) AAVE(+65) PEPE(+63) INJ(+58) BCH(+56) FIL(+51) LTC(+51)
+  //   ATOM(+51) AVAX(+48) XRP(+40) DOGE(+39) SOL(+32) ETC(+31) NEAR(+28) DOT(+24)
+  //   SAND(+22) LINK(+15). Strategy is the MOST robust of the suite out-of-sample.
+  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {

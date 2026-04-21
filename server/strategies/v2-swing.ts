@@ -10,23 +10,23 @@ export const v2SwingStrategy: Strategy = {
     "Dual TP: 1.5× (TP1) + 2.5× (TP2). Runs on 1H for optimal timing and trade frequency.",
   interval: "1h",
   minCandles: 250,  // EMA200 seed — 250×1H ≈ 10 days, reliable
-  // ── 3.7-year 1H backtest (25 coins, 32000 candles, ~2022–2026, MAX_BARS=800) ──
-  //   STRONG signals only (score≥6) + EMA200 macro filter
-  //   Ranked by PF + cross-year consistency (2022 bear / 2023 bull / 2024 / 2025)
-  //   ✅ ICP   PF=2.12 T=190 Sharpe=2.17 — all years positive ⭐ (best risk-adj)
-  //   ✅ MATIC PF=2.08 T=224 Sharpe=1.95 — 2021-2024 positive ⭐
-  //   ✅ BNB   PF=1.68 T=185 Sharpe=1.51 — all years positive
-  //   ✅ NEAR  PF=1.67 T=191 Sharpe=1.45 — all years positive
-  //   ✅ AVAX  PF=1.65 T=198 Sharpe=1.53 — all years positive
-  //   ✅ SOL   PF=1.59 T=204 Sharpe=1.39 — 2022 slight loss
-  //   ✅ DOT   PF=1.57 T=202 Sharpe=1.33 — 2022 slight loss
-  //   ✅ VET   PF=1.56 T=208 Sharpe=1.42 — all years positive
-  //   ✅ XRP   PF=1.51 T=178 Sharpe=1.07 — all years positive
-  //   ✅ BTC   PF=1.50 T=216 Sharpe=1.18 — 2023 slight loss
-  //   🟡 ADA   PF=1.48 T=201 — borderline, all years positive (keep for volume)
-  //   ❌ ETH   PF=1.07 T=197 (marginal — 2025 negative, avoid)
-  //   ❌ LINK  PF=1.08 T=199 (2023/2025/2026 negative, avoid)
-  preferredSymbols: ["ICP", "MATIC", "BNB", "NEAR", "AVAX", "SOL", "DOT", "VET", "XRP", "BTC"],
+  // ── Walk-forward Apr 2026 (3.7y, 65% train / 35% test split, score≥4, BE@1R) ──
+  // Only coins with netR>+20% in TEST (out-of-sample) + PF≥1.1 kept. Prevents overfit.
+  // Coin | TRAIN netR/PF        | TEST netR/PF         | verdict
+  //   🟢 ICP  | +30   1.05        | +102  1.30           | keep (test > train — real edge)
+  //   🟢 DOGE | +252  1.50        | +94   1.36           | keep (strong both windows)
+  //   🟢 ETH  | +12   1.05        | +85   1.42           | keep (improving OOS)
+  //   🟢 AVAX | +242  1.43        | +60   1.22           | keep
+  //   🟢 BNB  | +8    1.03        | +45   1.30           | keep (OOS much stronger)
+  //   🟢 XRP  | +104  1.25        | +32   1.13           | keep
+  //   ❌ DROPPED as overfit (train positive but test flat/negative):
+  //     ATOM (train +84 → test -17.9)  — big regime shift
+  //     PEPE (train +104 → test -43)   — memecoin noise, can't time
+  //     ADA  (train +197 → test +21 PF 1.08)  — marginal, excluded
+  //     SAND/SOL/INJ/BTC/LTC/FIL/UNI/NEAR/DOT/AAVE/LINK/BCH/SUI — test<0
+  //   ❌ Still excluded: MATIC (Binance delisted → POL migration)
+  //   Low WR 20-26% is expected — R-multiple strategy (TP1=1.5R, TP2=2.5R).
+  preferredSymbols: ["DOGE", "AVAX", "XRP", "ICP", "ETH", "BNB"],
   cooldownHours: 20,  // matches backtest COOLDOWN=20×1H bars (= 5×4H bars, same 20h real-time)
 
   analyze(candles: OHLCV[]): StrategySignal | null {
