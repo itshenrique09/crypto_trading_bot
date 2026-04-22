@@ -11,7 +11,7 @@ Full technical reference for all trading strategies implemented in the bot.
 - [Strategy 2 — SMC (Smart Money Concepts)](#2-smc-smart-money-concepts)
 - [Strategy 3 — Break & Retest](#3-break--retest)
 - [Strategy 4 — RSI Divergence](#4-rsi-divergence)
-- [Disabled Strategies](#disabled-strategies)
+- [Strategy 5 — Liquidity Sweep](#5-liquidity-sweep)
 - [Common Components](#common-components)
 - [Engine Filters](#engine-filters)
 
@@ -19,24 +19,27 @@ Full technical reference for all trading strategies implemented in the bot.
 
 ## Overview
 
-| | Confluence Swing | SMC | Break & Retest | RSI Divergence |
-|---|---|---|---|---|
-| **ID** | `confluence-swing` | `smc` | `break-retest` | `rsi-divergence` |
-| **Timeframe** | 1H | 4H | 4H | 1H |
-| **Min candles** | 250 | 150 | 150 | 250 |
-| **Cooldown** | 20h | 12h | 12h | 20h |
-| **Signal type** | Score ±10 | Confidence % | Confidence % | Binary + confidence |
-| **SL basis** | ATR | Behind OB zone | Behind S/R level | 0.5% beyond swing |
-| **TP1 basis** | Next swing high/low | Next swing high/low | Next S/R level | 2.5R |
-| **TP2 basis** | Second structure level | Second structure level | Next S/R level | 4R |
-| **EMA200 guard** | Yes (±1% margin) | Yes (macro bull for LONG) | Yes (macro bull for LONG) | Yes (price vs EMA200) |
-| **Preferred symbols** | 10 coins | 3 coins | 3 coins | 2 coins |
+| | Confluence Swing | SMC | Break & Retest | RSI Divergence | Liquidity Sweep |
+|---|---|---|---|---|---|
+| **ID** | `confluence-swing` | `smc` | `break-retest` | `rsi-divergence` | `liquidity-sweep` |
+| **File** | `v2-swing.ts` | `smc.ts` | `break-retest.ts` | `rsi-divergence.ts` | `liquidity-sweep.ts` |
+| **Timeframe** | 1H | 4H | 4H | 1H | 1H |
+| **Min candles** | 250 | 150 | 150 | 250 | 100 |
+| **Cooldown** | 20h | 12h | 12h | 20h | 8h |
+| **Signal type** | Score ±10 | Confidence % | Confidence % | Binary + confidence | Confidence % |
+| **SL basis** | ATR | Behind OB zone | Behind S/R level | 0.5% beyond swing | Above/below sweep wick |
+| **TP1 basis** | Next swing high/low | Next swing high/low | Next S/R level | 2.5R | ≥2R structural |
+| **TP2 basis** | Second structure level | Second structure level | Next S/R level | 4R | Opposite liquidity pool |
+| **EMA200 guard** | Yes (±1% margin) | Yes (macro bull for LONG) | Yes (macro bull for LONG) | Yes (price vs EMA200) | No (mean-reverts after sweep) |
+| **Preferred symbols** | 10 coins | 3 coins | 3 coins | 2 coins | See strategy file |
+
+> **Source of truth**: `server/strategies/registry.ts` is the canonical list of enabled strategies. If the table above and the registry disagree, the registry wins — fix the doc.
 
 ---
 
 ## 1. Confluence Swing
 
-**File**: `server/strategies/confluence-swing.ts`  
+**File**: `server/strategies/v2-swing.ts` (strategy id: `confluence-swing`)  
 **Timeframe**: 1H (uses EMA9, EMA21, EMA50, EMA200)  
 **Philosophy**: Wait for multiple independent indicators to agree before entering. The more indicators align, the stronger the signal. Never trade on one indicator alone.
 
@@ -444,25 +447,20 @@ ATR% > 5.5% → skip (unpredictable price action, SL gets blown frequently).
 
 ---
 
-## Disabled Strategies
+## 5. Liquidity Sweep
 
-These strategies are implemented but disabled due to poor backtest performance. Files are kept for reference.
+**File**: `server/strategies/liquidity-sweep.ts` (strategy id: `liquidity-sweep`)  
+**Timeframe**: 1H  
+**Philosophy**: Price hunts resting liquidity above prior swing highs (or below lows), then reverses. The sweep wick + immediate reclaim is the entry trigger — institutional stop-runs that fade quickly.
 
-### Mean Reversion (`mean-reversion`)
-- **Timeframe**: 4H
-- **Indicators**: Bollinger Bands(20, 2σ) + RSI(7) + EMA(50) trend
-- **Entry**: Price outside BB + RSI extreme (< 25 or > 75) + 3 consecutive extreme candles
-- **Exit**: Bollinger midline (the mean)
-- **SL**: 1.5× ATR
-- **Reason disabled**: Choppy markets cause frequent SL hits before mean reversion occurs
+**Entry**: Candle wicks through a recent swing high/low but closes back inside the prior range, with confirmation from the following candle.  
+**SL**: Just beyond the sweep wick's extreme.  
+**TP1**: Nearest opposite-side structural level (≥ 2R minimum enforced internally).  
+**TP2**: Opposing liquidity pool (previous low for a high-sweep, previous high for a low-sweep).  
+**Cooldown**: 8h per symbol.  
+**Min candles**: 100.
 
-### Breakout (`breakout`)
-- **Timeframe**: 4H
-- **Indicators**: Donchian Channel(20) + volume spike (> 1.3× avg) + EMA(20) trend
-- **Entry**: Price closes above/below 20-bar Donchian channel with trend alignment + volume spike
-- **Exit**: 2.0× risk
-- **SL**: 1.5× ATR
-- **Reason disabled**: False breakouts in ranging markets, low R:R
+See `server/strategies/liquidity-sweep.ts` for the exact thresholds and reclaim logic.
 
 ---
 
@@ -508,11 +506,15 @@ These filters run in the paper and live engines **after** a strategy returns a s
 | Duplicate position | Same symbol + strategy already open | No averaging in |
 | Cooldown | Closed < cooldownHours ago | Avoid re-entering same zone |
 | Preferred symbols | Signal not in strategy's symbol list | Only trade proven edge |
+| Volatility regime | ATR above 85th percentile (last 50 bars) | Explosive vol → wider stops, unreliable fills |
 | Daily trend (contra) | LONG when daily is down (or vice versa) | Reduce contra-trend trades |
 | Contra-trend exception | Confluence score ≥ 6 (swing) or conf ≥ 75% (others) | Allow very strong signals |
+| Weekly trend (4H only) | 4H signal against weekly direction | 4H trades last days — weekly matters |
 | SHORT confidence | Signal < 72% confidence | Squeezes + funding risk |
+| Funding rate | Funding > +0.1% for LONG, < −0.1% for SHORT | Avoid crowded side |
 | R:R gate | reward / risk < 1.5 | Minimum acceptable trade |
 | Volume | 24h volume < $30M USDT | Avoid illiquid markets |
 | Correlation | Group already has 2 open positions | Avoid overconcentration |
 | Daily drawdown | Today's P&L < −4R | Capital preservation |
+| Monthly drawdown | Month P&L < −8R | Longer-horizon capital preservation |
 | Max positions | 6 open positions reached | Exposure cap |

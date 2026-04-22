@@ -86,11 +86,12 @@ export async function getDb(): Promise<Database> {
 
   // Performance indices
   const indices = [
-    "CREATE INDEX IF NOT EXISTS idx_journal_created_at ON journal(created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_journal_strategy    ON journal(strategy)",
-    "CREATE INDEX IF NOT EXISTS idx_journal_outcome     ON journal(outcome)",
-    "CREATE INDEX IF NOT EXISTS idx_signals_timestamp   ON signals(timestamp DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_signals_symbol      ON signals(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_created_at   ON journal(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_strategy     ON journal(strategy)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_outcome      ON journal(outcome)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_mode_outcome ON journal(mode, outcome)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_timestamp    ON signals(timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_symbol       ON signals(symbol)",
   ];
   for (const sql of indices) {
     _db.run(sql);

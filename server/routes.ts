@@ -83,16 +83,36 @@ function getBinanceSymbol(symbol: string): string {
   return BINANCE_OVERRIDES[upper] ?? `${upper}USDT`;
 }
 
-async function fetchJSON(url: string) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) throw new Error(`API error: ${res.status} from ${url}`);
-    return res.json();
-  } finally {
-    clearTimeout(timer);
+async function fetchJSON(url: string, opts: { retries?: number; retryDelayMs?: number } = {}) {
+  const { retries = 2, retryDelayMs = 500 } = opts;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      // Only retry transient responses (5xx, 429). 4xx other than 429 = real error, don't retry.
+      if (!res.ok) {
+        const transient = res.status >= 500 || res.status === 429;
+        if (transient && attempt < retries) {
+          lastErr = new Error(`API error: ${res.status} from ${url}`);
+        } else {
+          throw new Error(`API error: ${res.status} from ${url}`);
+        }
+      } else {
+        return res.json();
+      }
+    } catch (err) {
+      lastErr = err;
+      // Don't retry explicit aborts from upstream callers.
+      if (attempt >= retries) throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    // Exponential backoff with jitter
+    await new Promise(r => setTimeout(r, retryDelayMs * Math.pow(2, attempt) + Math.random() * 200));
   }
+  throw lastErr ?? new Error(`fetchJSON exhausted retries for ${url}`);
 }
 
 // CoinGecko free tier: ~30 req/min
@@ -1634,9 +1654,15 @@ export async function registerRoutes(server: Server, app: Express) {
         let exitPrice = price;
         let closeReason = "";
 
+        // Check trailing stop BEFORE SL: after TP1 the SL sits at entry, so a fast
+        // drop below entry in one tick could otherwise close at break-even instead
+        // of the (higher, in favour) trailing stop level — converting a win into 0R.
         if (isLong) {
-          if (price <= sl) {
-            // SL hit — full loss (or break-even if TP1 was already hit)
+          if (tp1Hit && price <= trailStop) {
+            outcome = "win";
+            exitPrice = trailStop;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+          } else if (price <= sl) {
             outcome = tp1Hit ? "breakeven" : "loss";
             exitPrice = sl;
             closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
@@ -1645,21 +1671,20 @@ export async function registerRoutes(server: Server, app: Express) {
             await updateJournalEntry(trade.id, {
               tp1_hit: 1,
               stop_loss: trade.entry_price,  // SL → break-even
+              peak_price: newPeak,
             });
             closeReason = "TP1 — trailing active, SL moved to entry";
-          } else if (tp1Hit && price <= trailStop) {
-            // Trailing stop triggered after TP1
-            outcome = "win";
-            exitPrice = trailStop;
-            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
           } else if (tp2 && price >= tp2) {
-            // TP2 — full target reached
             outcome = "win";
             exitPrice = tp2;
             closeReason = "TP2";
           }
         } else {
-          if (price >= sl) {
+          if (tp1Hit && price >= trailStop) {
+            outcome = "win";
+            exitPrice = trailStop;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+          } else if (price >= sl) {
             outcome = tp1Hit ? "breakeven" : "loss";
             exitPrice = sl;
             closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
@@ -1667,12 +1692,9 @@ export async function registerRoutes(server: Server, app: Express) {
             await updateJournalEntry(trade.id, {
               tp1_hit: 1,
               stop_loss: trade.entry_price,
+              peak_price: newPeak,
             });
             closeReason = "TP1 — trailing active, SL moved to entry";
-          } else if (tp1Hit && price >= trailStop) {
-            outcome = "win";
-            exitPrice = trailStop;
-            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
           } else if (tp2 && price <= tp2) {
             outcome = "win";
             exitPrice = tp2;
@@ -2055,7 +2077,10 @@ export async function registerRoutes(server: Server, app: Express) {
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
 
-            } catch (err) { console.error("[paper-scan] signal error:", err); }
+            } catch (err: any) {
+              console.error(`[paper-scan] ${sym}/${strat.id} error:`, err);
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy error: ${err?.message ?? String(err)}` });
+            }
           }
         }
       }
@@ -2640,10 +2665,41 @@ export async function registerRoutes(server: Server, app: Express) {
                 takeProfitPrice: signal.takeProfit2 ?? signal.takeProfit1,
               });
 
+              // ── Reconcile actual fill price ──────────────────────────
+              // MEXC returns only orderId; market fills may slip meaningfully.
+              // Poll the position endpoint briefly to pick up openAvgPrice
+              // before we persist the trade. If we can't find the position
+              // (rejected, still pending), skip the journal entry so the
+              // engine doesn't record a ghost trade.
+              let actualEntry = signal.entry;
+              let actualVol   = vol;
+              let filled      = false;
+              for (let attempt = 0; attempt < 6; attempt++) {
+                await new Promise(r => setTimeout(r, 500));
+                try {
+                  const pos = await client.getPosition(mexcSym);
+                  if (pos && pos.holdVol > 0 && pos.openAvgPrice > 0) {
+                    actualEntry = pos.openAvgPrice;
+                    actualVol   = pos.holdVol;
+                    filled      = true;
+                    break;
+                  }
+                } catch (err) { console.error("[live-fill-check] failed:", err); }
+              }
+
+              if (!filled) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Order ${order.orderId} not visible in positions after 3s — skipping journal entry`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
+              // Recompute position_size_usd at actual fill price
+              const actualPosSize = actualEntry * actualVol; // rough — adjusted by contractSize in calcContractVol
+              const slipBps = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
+
               await addJournalEntry({
                 symbol:            sym,
                 direction:         signal.direction,
-                entry_price:       signal.entry,
+                entry_price:       Math.round(actualEntry * 10000) / 10000,
                 stop_loss:         signal.stopLoss,
                 take_profit1:      signal.takeProfit1,
                 take_profit2:      signal.takeProfit2,
@@ -2651,16 +2707,19 @@ export async function registerRoutes(server: Server, app: Express) {
                 mode:              "live",
                 strategy:          strat.id,
                 followed:          "yes",
-                position_size_usd: Math.round(posSize * 100) / 100,
+                position_size_usd: Math.round(actualPosSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${vol} lev=${leverage}x risk=${kellyPct.toFixed(2)}%(${closedLive.filter(e=>e.strategy===strat.id).length>=10?"kelly":"base"}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${kellyPct.toFixed(2)}%(${closedLive.filter(e=>e.strategy===strat.id).length>=10?"kelly":"base"}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               newOpens++;
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
-            } catch (err) { console.error("[live-scan] signal error:", err); }
+            } catch (err: any) {
+              console.error(`[live-scan] ${sym}/${strat.id} error:`, err);
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy error: ${err?.message ?? String(err)}` });
+            }
           }
         }
       }
@@ -2750,10 +2809,17 @@ export async function registerRoutes(server: Server, app: Express) {
   // ── AUTO-START on server boot ──────────────────────────────────────
   // If the mode was "paper" before the server restarted (PM2 restart etc.),
   // resume scanning automatically — no need to click "Start" after every deploy.
-  getSetting("mode").then(mode => {
+  // Awaited so that registerRoutes doesn't return before the engine is armed:
+  // prevents any early /api/paper/start request from racing against this and
+  // double-registering the interval (which would double-fire every scan).
+  try {
+    const mode = await getSetting("mode");
     if (mode === "paper") {
       console.log("[auto-start] mode=paper detected — starting paper engine");
       startPaperEngine();
+    } else if (mode === "live") {
+      console.log("[auto-start] mode=live detected — starting live engine");
+      startLiveEngine();
     }
-  }).catch(err => console.error("[auto-start] failed:", err));
+  } catch (err) { console.error("[auto-start] failed:", err); }
 }

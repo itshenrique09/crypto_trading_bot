@@ -3,7 +3,7 @@
 //  Tests: minTouches=2 with conf≥60/65/68 vs current (3-touch, conf≥68)
 //  Goal: more signals without killing quality
 // ══════════════════════════════════════════════════════════
-import { breakRetestSignal, type OHLCV } from "./server/analysis";
+import { breakRetestSignal, type OHLCV } from "../../server/analysis";
 
 const COINS = [
   "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "LINK",

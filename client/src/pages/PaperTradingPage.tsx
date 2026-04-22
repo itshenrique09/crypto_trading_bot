@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
@@ -69,18 +69,27 @@ export default function PaperTradingPage() {
     enabled: paperRunning,
   });
 
-  const priceMap = new Map(paperPrices.map(p => [p.id, p]));
+  const priceMap = useMemo(
+    () => new Map(paperPrices.map(p => [p.id, p])),
+    [paperPrices]
+  );
 
   const updateMutation = useMutation({
     mutationFn: async ({ id, updates }: { id: number; updates: any }) => {
       await apiRequest("PATCH", `/api/journal/${id}`, updates);
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/journal"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/journal"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/prices"] });
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/journal/${id}`); },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/journal"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/journal"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/prices"] });
+    },
   });
 
   const capitalMutation = useMutation({
@@ -271,7 +280,7 @@ export default function PaperTradingPage() {
                 <label className="text-[10px] text-muted-foreground block mb-1">Capital (€)</label>
                 <input
                   type="number" value={capitalInput} onChange={e => setCapitalInput(e.target.value)}
-                  className="w-28 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-purple-500/60"
+                  className="w-28 px-2 py-1.5 text-xs rounded-md bg-zinc-900 border border-zinc-800 focus:outline-none focus:border-purple-500/60"
                   placeholder="1000"
                 />
               </div>
@@ -280,7 +289,7 @@ export default function PaperTradingPage() {
                 <input
                   type="number" value={riskInput} onChange={e => setRiskInput(e.target.value)}
                   step="0.5" min="0.5" max="5"
-                  className="w-20 px-2 py-1.5 text-xs rounded-md bg-card border border-border/40 focus:outline-none focus:border-purple-500/60"
+                  className="w-20 px-2 py-1.5 text-xs rounded-md bg-zinc-900 border border-zinc-800 focus:outline-none focus:border-purple-500/60"
                   placeholder="2"
                 />
               </div>

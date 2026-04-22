@@ -5,7 +5,7 @@
 //  • Per-year breakdown to test consistency
 //  • PF, Expectancy, Sharpe estimate, MDD, Trade count
 // ══════════════════════════════════════════════════════════
-import { breakRetestSignal, type OHLCV } from "./server/analysis";
+import { breakRetestSignal, type OHLCV } from "../../server/analysis";
 
 const COINS = [
   // Top 10 by market cap (with 2022+ history)

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Trash2, BarChart2 } from "lucide-react";
@@ -6,6 +6,7 @@ import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor, getStratName } from "@/lib/types";
 import TradeChartModal from "./TradeChartModal";
+import { ConfirmButton } from "./ConfirmButton";
 
 interface TradeRowProps {
   entry: JournalEntry;
@@ -20,7 +21,7 @@ interface TradeRowProps {
   onDelete: (id: number) => void;
 }
 
-export default function TradeRow({ entry, strategies, price, closingId, closeForm, onStartClose, onCancelClose, onCloseFormChange, onConfirmClose, onDelete }: TradeRowProps) {
+function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStartClose, onCancelClose, onCloseFormChange, onConfirmClose, onDelete }: TradeRowProps) {
   const sc = getStratColor(entry.strategy || "confluence-swing");
   const isOpen = entry.outcome === "open";
   const pnl = isOpen ? price?.unrealizedPnl : entry.pnl_pct;
@@ -79,9 +80,16 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
         <button onClick={() => setShowChart(true)} className="text-muted-foreground/40 hover:text-purple-400 transition-colors p-1.5 shrink-0" title="View chart">
           <BarChart2 className="w-3.5 h-3.5" />
         </button>
-        <button onClick={() => onDelete(entry.id)} className="text-muted-foreground/40 hover:text-red-400 transition-colors p-1.5 shrink-0">
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        <ConfirmButton
+          onConfirm={() => onDelete(entry.id)}
+          title="Delete trade?"
+          description={`Permanently remove ${entry.symbol} ${entry.direction} from the journal. This cannot be undone.`}
+          confirmText="Delete"
+        >
+          <button className="text-muted-foreground/40 hover:text-red-400 transition-colors p-1.5 shrink-0" aria-label="Delete trade">
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </ConfirmButton>
       </div>
 
       {/* Live P&L progress bar */}
@@ -190,3 +198,21 @@ export default function TradeRow({ entry, strategies, price, closingId, closeFor
     </div>
   );
 }
+
+// Skip re-render when neither this row's data, price tick, nor its close-form state changed.
+// With 15s journal polls and 10s price polls over 100+ trades, this turns an O(n) render
+// into O(k) where k = rows whose price actually changed.
+const TradeRow = memo(TradeRowInner, (prev, next) => {
+  if (prev.entry !== next.entry) return false;
+  if (prev.price?.unrealizedPnl !== next.price?.unrealizedPnl) return false;
+  if (prev.price?.progressPct !== next.price?.progressPct) return false;
+  if (prev.price?.slProgress !== next.price?.slProgress) return false;
+  const prevActive = prev.closingId === prev.entry.id;
+  const nextActive = next.closingId === next.entry.id;
+  if (prevActive !== nextActive) return false;
+  if (nextActive && prev.closeForm !== next.closeForm) return false;
+  if (prev.strategies !== next.strategies) return false;
+  return true;
+});
+
+export default TradeRow;

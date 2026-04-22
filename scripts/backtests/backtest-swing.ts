@@ -7,7 +7,7 @@
 //  • PF, Expectancy, Sharpe, MDD, Trade count
 //  • Dual TP: TP1 at 1.5×, TP2 at 2.5× risk
 // ══════════════════════════════════════════════════════════
-import { analyzeIndicators, generateSignal, type OHLCV } from "./server/analysis";
+import { analyzeIndicators, generateSignal, type OHLCV } from "../../server/analysis";
 
 const COINS      = [
   // Top 10 by market cap (with 2022+ history)

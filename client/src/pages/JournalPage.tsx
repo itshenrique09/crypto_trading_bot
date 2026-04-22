@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import { formatPrice, getSignalColor } from "@/lib/utils";
 import TradeChartModal from "@/components/TradeChartModal";
+import { ConfirmButton } from "@/components/ConfirmButton";
 import { PaperPrice, JournalEntry, StrategyInfo, STRATEGY_COLORS, getStratColor } from "@/lib/types";
 
 const DEFAULT_STRATEGY = "confluence-swing";
@@ -84,7 +85,10 @@ export default function JournalPage() {
     enabled: currentMode === "paper" && paperRunning,
   });
 
-  const priceMap = new Map(paperPrices.map((p: PaperPrice) => [p.id, p]));
+  const priceMap = useMemo(
+    () => new Map(paperPrices.map((p: PaperPrice) => [p.id, p])),
+    [paperPrices]
+  );
 
   // Set mode
   const modeMutation = useMutation({
@@ -136,7 +140,10 @@ export default function JournalPage() {
     mutationFn: async ({ id, updates }: { id: number; updates: any }) => {
       await apiRequest("PATCH", `/api/journal/${id}`, updates);
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/journal"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/journal"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/prices"] });
+    },
   });
 
   // Delete journal entry
@@ -144,7 +151,10 @@ export default function JournalPage() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/journal/${id}`);
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/journal"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/journal"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/prices"] });
+    },
   });
 
   // Filter entries
@@ -565,12 +575,16 @@ export default function JournalPage() {
                   <BarChart2 className="w-3 h-3" />
                 </button>
                 {/* Delete */}
-                <button
-                  onClick={() => deleteMutation.mutate(entry.id)}
-                  className="text-muted-foreground hover:text-red-400 transition-colors p-1"
+                <ConfirmButton
+                  onConfirm={() => deleteMutation.mutate(entry.id)}
+                  title="Delete trade?"
+                  description={`Permanently remove ${entry.symbol} ${entry.direction} from the journal. This cannot be undone.`}
+                  confirmText="Delete"
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                  <button className="text-muted-foreground hover:text-red-400 transition-colors p-1" aria-label="Delete trade">
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </ConfirmButton>
               </div>
             </div>
 

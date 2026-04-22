@@ -1,10 +1,10 @@
 // ══════════════════════════════════════════════════════════
-//  Break & Retest — Tuning: confidence threshold + 1H test
+//  SMC — Tuning: confidence threshold + 1H test
 //  • Tests confidence 60 / 65 / 68 on 4H
 //  • Also tests 1H with confidence 68
 //  • Goal: find threshold that gives T≥30 with PF≥1.5
 // ══════════════════════════════════════════════════════════
-import { breakRetestSignal, type OHLCV } from "./server/analysis";
+import { smcSignal, type OHLCV } from "../../server/analysis";
 
 const COINS = [
   "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "LINK",
@@ -52,11 +52,11 @@ function runSim(allCandles: OHLCV[], minConf: number, maxBars: number, cooldown:
 
   for (let i = WINDOW; i < allCandles.length - maxBars; i++) {
     if (i - lastIdx < cooldown) continue;
-    const sig = breakRetestSignal(allCandles.slice(i - WINDOW, i + 1));
+    const sig = smcSignal(allCandles.slice(i - WINDOW, i + 1));
     if (sig.type === "NONE") continue;
     if (sig.confidence < minConf) continue;
 
-    const lvl = sig.level ?? sig.entry;
+    const lvl     = sig.obZone ? (sig.obZone.high + sig.obZone.low) / 2 : sig.entry;
     const zoneKey = Math.round(lvl / (lvl * ZONE_PCT)).toString() + "_" + sig.type;
     if (i - (zoneCooldown.get(zoneKey) ?? -999) < zoneCd) continue;
     zoneCooldown.set(zoneKey, i);
@@ -94,8 +94,8 @@ function runSim(allCandles: OHLCV[], minConf: number, maxBars: number, cooldown:
   const wr     = (wins.length / T) * 100;
   const pfNum  = Math.round(pf * 100) / 100;
   const status = pfNum >= 1.5 ? "✅" : pfNum >= 1.0 ? "🟡" : "❌";
-  const conf_badge = T >= 30 ? "" : T >= 15 ? "⚠️" : "💀";
-  return `T=${T}${conf_badge}  WR=${wr.toFixed(0)}%  PF=${pfNum}  ${status}`;
+  const badge  = T >= 30 ? "" : T >= 15 ? "⚠️" : "💀";
+  return `T=${T}${badge}  WR=${wr.toFixed(0)}%  PF=${pfNum}  ${status}`;
 }
 
 async function runBacktest(symbol: string) {
@@ -103,14 +103,14 @@ async function runBacktest(symbol: string) {
   const candles1h = await fetchKlines(symbol, "1h", TOTAL_BARS * 4);
 
   if (candles4h.length < WINDOW + MAX_BARS + 30) {
-    console.log(`${symbol}: not enough 4H data`);
+    console.log(`${symbol}: not enough data`);
     return;
   }
 
-  const r60  = candles4h.length >= WINDOW + MAX_BARS + 30 ? runSim(candles4h, 60, MAX_BARS, COOLDOWN, ZONE_COOLDOWN) : "no data";
-  const r65  = candles4h.length >= WINDOW + MAX_BARS + 30 ? runSim(candles4h, 65, MAX_BARS, COOLDOWN, ZONE_COOLDOWN) : "no data";
-  const r68  = candles4h.length >= WINDOW + MAX_BARS + 30 ? runSim(candles4h, 68, MAX_BARS, COOLDOWN, ZONE_COOLDOWN) : "no data";
-  const r1h  = candles1h.length >= WINDOW + MAX_BARS * 4 + 30
+  const r60 = runSim(candles4h, 60, MAX_BARS, COOLDOWN, ZONE_COOLDOWN);
+  const r65 = runSim(candles4h, 65, MAX_BARS, COOLDOWN, ZONE_COOLDOWN);
+  const r68 = runSim(candles4h, 68, MAX_BARS, COOLDOWN, ZONE_COOLDOWN);
+  const r1h = candles1h.length >= WINDOW + MAX_BARS * 4 + 30
     ? runSim(candles1h, 68, MAX_BARS * 4, COOLDOWN, ZONE_COOLDOWN * 4)
     : "no data";
 
@@ -123,7 +123,7 @@ async function runBacktest(symbol: string) {
 
 (async () => {
   console.log(`\n═══════════════════════════════════════════════════`);
-  console.log(`  Break & Retest — Confidence Threshold + 1H Tuning`);
+  console.log(`  SMC — Confidence Threshold + 1H Tuning`);
   console.log(`  Finding optimal threshold for T≥30 with PF≥1.5`);
   console.log(`═══════════════════════════════════════════════════`);
   for (const coin of COINS) await runBacktest(coin);

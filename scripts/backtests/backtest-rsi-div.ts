@@ -2,7 +2,7 @@
 //  RSI Divergence — Backtest (1H) — uses rsiDivergenceSignal directly
 //  Tests actual signal function (technical TPs via findTechnicalTPs)
 // ══════════════════════════════════════════════════════════
-import { rsiDivergenceSignal, type OHLCV } from "./server/analysis";
+import { rsiDivergenceSignal, type OHLCV } from "../../server/analysis";
 
 const COINS = [
   "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "LINK",

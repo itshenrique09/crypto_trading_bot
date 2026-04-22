@@ -1,5 +1,5 @@
 // Detailed trade breakdown for debugging problem coins
-import { breakRetestSignal, type OHLCV } from "./server/analysis";
+import { breakRetestSignal, type OHLCV } from "../../server/analysis";
 
 const COINS = process.argv[2] ? [process.argv[2]] : ["DOT", "DOGE", "BNB", "XRP"];
 const WINDOW = 60, TIME_STOP = 15, COOLDOWN = 3, LEVEL_COOLDOWN = 20;
