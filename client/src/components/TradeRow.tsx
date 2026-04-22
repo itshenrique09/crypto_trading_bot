@@ -92,24 +92,63 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
         </ConfirmButton>
       </div>
 
-      {/* Live P&L progress bar */}
-      {isOpen && price && (
-        <div className="mt-3 ml-12">
-          <div className="relative h-1.5 rounded-full bg-border/20 overflow-hidden">
-            {price.progressPct >= 0 ? (
-              <div className="absolute left-1/2 h-full bg-emerald-500/50 rounded-full" style={{ width: `${Math.min(price.progressPct, 100) / 2}%` }} />
-            ) : (
-              <div className="absolute right-1/2 h-full bg-red-500/50 rounded-full" style={{ width: `${Math.min(price.slProgress, 100) / 2}%` }} />
-            )}
-            <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/30" />
+      {/* Live P&L progress bar — SL | Entry | TP1 tick | TP2 (if set) */}
+      {isOpen && price && (() => {
+        const isLong = entry.direction === "LONG";
+        const tp1 = entry.take_profit1;
+        const tp2 = entry.take_profit2 ?? null;
+        // Right edge of the bar = the farther TP (TP2 if set, else TP1)
+        const farTp = tp2 ?? tp1;
+        const tp1Reach   = Math.abs(tp1   - entry.entry_price);
+        const farTpReach = Math.abs(farTp - entry.entry_price);
+        // Where does TP1 sit on the right half? (0..50% of bar width, measured from center)
+        const tp1OffsetPct = farTpReach > 0 ? (tp1Reach / farTpReach) * 50 : 50;
+        // Progress of current price toward farTp
+        const moveFromEntry = isLong
+          ? price.currentPrice - entry.entry_price
+          : entry.entry_price - price.currentPrice;
+        const upProgressPct = farTpReach > 0 ? Math.max(0, (moveFromEntry / farTpReach) * 50) : 0;
+        const pastTp1 = moveFromEntry >= tp1Reach;
+        return (
+          <div className="mt-3 ml-12">
+            <div className="relative h-1.5 rounded-full bg-border/20 overflow-hidden">
+              {moveFromEntry >= 0 ? (
+                <div
+                  className={`absolute left-1/2 h-full rounded-full ${pastTp1 ? "bg-emerald-400/70" : "bg-emerald-500/50"}`}
+                  style={{ width: `${Math.min(upProgressPct, 50)}%` }}
+                />
+              ) : (
+                <div className="absolute right-1/2 h-full bg-red-500/50 rounded-full" style={{ width: `${Math.min(price.slProgress, 100) / 2}%` }} />
+              )}
+              {/* Entry marker (center) */}
+              <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/30" />
+              {/* TP1 tick — only show if TP2 exists (otherwise TP1 IS the right edge) */}
+              {tp2 != null && (
+                <div
+                  className={`absolute top-[-2px] bottom-[-2px] w-[2px] ${pastTp1 ? "bg-emerald-400" : "bg-emerald-500/60"}`}
+                  style={{ left: `calc(50% + ${tp1OffsetPct}%)`, transform: "translateX(-50%)" }}
+                  title={`TP1 $${formatPrice(tp1)}`}
+                />
+              )}
+            </div>
+            <div className="relative mt-0.5 text-[9px] text-muted-foreground/40 font-mono h-3">
+              <span className="absolute left-0">SL ${formatPrice(entry.stop_loss)}</span>
+              <span className="absolute left-1/2 -translate-x-1/2 text-muted-foreground/60">Entry</span>
+              {tp2 != null && (
+                <span
+                  className={`absolute -translate-x-1/2 ${pastTp1 ? "text-emerald-300" : "text-muted-foreground/50"}`}
+                  style={{ left: `calc(50% + ${tp1OffsetPct}%)` }}
+                >
+                  TP1
+                </span>
+              )}
+              <span className={`absolute right-0 ${tp2 != null ? "text-emerald-300/70" : ""}`}>
+                {tp2 != null ? "TP2 " : "TP "}${formatPrice(farTp)}
+              </span>
+            </div>
           </div>
-          <div className="flex justify-between mt-0.5 text-[9px] text-muted-foreground/40 font-mono">
-            <span>SL ${formatPrice(entry.stop_loss)}</span>
-            <span className="text-muted-foreground/60">Entry</span>
-            <span>TP ${formatPrice(entry.take_profit1)}</span>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Risk info + Close button row */}
       <div className="flex items-center justify-between mt-2 ml-12">
