@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff, Activity, ChevronDown, ChevronUp, Shield, KeyRound, AlertTriangle, CheckCircle2, Circle, Power } from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff, Activity, ChevronDown, ChevronUp, Shield, KeyRound, AlertTriangle, CheckCircle2, Circle, Power, Play, Square, Loader2, ToggleLeft, ToggleRight } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -31,6 +31,7 @@ export default function PaperTradingPage() {
   const [showCapitalForm, setShowCapitalForm] = useState(false);
   const [capitalInput, setCapitalInput] = useState("");
   const [riskInput, setRiskInput] = useState("");
+  const [paperLeverageInput, setPaperLeverageInput] = useState("5");
   const [showLiveForm, setShowLiveForm] = useState(false);
   const [liveApiKey, setLiveApiKey] = useState("");
   const [liveApiSecret, setLiveApiSecret] = useState("");
@@ -94,14 +95,30 @@ export default function PaperTradingPage() {
   });
 
   const capitalMutation = useMutation({
-    mutationFn: async ({ capital, riskPct }: { capital?: number; riskPct?: number }) => {
-      const res = await apiRequest("POST", "/api/paper/capital", { capital, riskPct });
+    mutationFn: async ({ capital, riskPct, leverage }: { capital?: number; riskPct?: number; leverage?: number }) => {
+      const res = await apiRequest("POST", "/api/paper/capital", { capital, riskPct, leverage });
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] });
       setShowCapitalForm(false);
     },
+  });
+
+  const paperStartMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/paper/start", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
+  });
+  const paperStopMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/paper/stop", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
+  });
+
+  const toggleStrategyMutation = useMutation({
+    mutationFn: async ({ id, enabled, mode }: { id: string; enabled: boolean; mode: "paper" | "live" }) => {
+      await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled, mode });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/strategies"] }),
   });
 
   const { data: liveStatus } = useQuery({
@@ -218,6 +235,45 @@ export default function PaperTradingPage() {
         </div>
       </div>
 
+      {/* ═══ Paper Engine Control ═══ */}
+      <Card className={`border-border/30 overflow-hidden ${paperRunning ? "bg-emerald-500/[0.03] border-emerald-500/30" : ""}`}>
+        <div className="px-4 py-3 flex items-center gap-3">
+          <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${
+            paperRunning ? "bg-emerald-500/15 text-emerald-400" : "bg-card/60 text-muted-foreground"
+          }`}>
+            {paperRunning ? <Activity className="w-4 h-4 animate-pulse" /> : <FlaskConical className="w-4 h-4" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold leading-tight flex items-center gap-1.5">
+              Paper Engine
+              {paperRunning && <Circle className="w-1.5 h-1.5 fill-emerald-400 text-emerald-400" />}
+            </p>
+            <p className="text-[10px] text-muted-foreground/70 truncate">
+              {paperRunning
+                ? `Scanning every 3 min · ${paperStatus?.coinsScanned ?? 0} coins last cycle`
+                : "Stopped — start to begin scanning for signals"}
+            </p>
+          </div>
+          {paperRunning ? (
+            <button
+              onClick={() => paperStopMutation.mutate()}
+              disabled={paperStopMutation.isPending}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs rounded-md bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors font-semibold disabled:opacity-50"
+            >
+              {paperStopMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />} Stop
+            </button>
+          ) : (
+            <button
+              onClick={() => paperStartMutation.mutate()}
+              disabled={paperStartMutation.isPending}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 transition-colors font-semibold disabled:opacity-50"
+            >
+              {paperStartMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} Start
+            </button>
+          )}
+        </div>
+      </Card>
+
       {/* Capital Management Card */}
       {paperStatus?.capital && (
         <Card className="border-border/30 p-4">
@@ -225,9 +281,15 @@ export default function PaperTradingPage() {
             <div className="flex items-center gap-2">
               <Wallet className="w-4 h-4 text-emerald-400" />
               <span className="text-xs font-bold">Capital Management</span>
+              <span className="text-[10px] text-muted-foreground/60">paper</span>
             </div>
             <button
-              onClick={() => { setShowCapitalForm(!showCapitalForm); setCapitalInput(String(paperStatus.capital.initial)); setRiskInput(String(paperStatus.capital.riskPct)); }}
+              onClick={() => {
+                setShowCapitalForm(!showCapitalForm);
+                setCapitalInput(String(paperStatus.capital.initial));
+                setRiskInput(String(paperStatus.capital.riskPct));
+                setPaperLeverageInput(String(paperStatus.capital.leverage ?? 5));
+              }}
               className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
             >
               <Settings2 className="w-3 h-3" /> Configure
@@ -247,7 +309,9 @@ export default function PaperTradingPage() {
             <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
               <p className="text-[10px] text-muted-foreground mb-0.5">1R (risk/trade)</p>
               <p className="text-sm font-bold font-mono text-amber-400">€{paperStatus.capital.oneR.toFixed(2)}</p>
-              <p className="text-[10px] text-muted-foreground">{paperStatus.capital.riskPct}% of balance</p>
+              <p className="text-[10px] text-muted-foreground">
+                {paperStatus.capital.riskPct}% risk · {paperStatus.capital.leverage ?? 5}× lev
+              </p>
             </div>
             <div className="rounded-md bg-card/40 border border-border/20 p-2.5">
               <p className="text-[10px] text-muted-foreground mb-0.5">Today P&L</p>
@@ -278,34 +342,80 @@ export default function PaperTradingPage() {
             </span>
           </div>
 
-          {/* Configure form */}
+          {/* Configure form — symmetric with Live: capital + risk slider + leverage slider */}
           {showCapitalForm && (
-            <div className="mt-3 pt-3 border-t border-border/20 flex items-end gap-2 flex-wrap">
-              <div>
-                <label className="text-[10px] text-muted-foreground block mb-1">Capital (€)</label>
-                <input
-                  type="number" value={capitalInput} onChange={e => setCapitalInput(e.target.value)}
-                  className="w-28 px-2 py-1.5 text-xs rounded-md bg-zinc-900 border border-zinc-800 focus:outline-none focus:border-purple-500/60"
-                  placeholder="1000"
-                />
+            <div className="mt-3 pt-3 border-t border-border/20 space-y-3">
+              <div className="flex items-end gap-3 flex-wrap">
+                <div>
+                  <label className="text-[10px] text-muted-foreground block mb-1">Initial capital (€)</label>
+                  <input
+                    type="number" value={capitalInput} onChange={e => setCapitalInput(e.target.value)}
+                    className="w-32 px-2.5 py-1.5 text-xs rounded-md bg-background border border-border/40 focus:outline-none focus:border-emerald-500/60 font-mono"
+                    placeholder="1000"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="text-[10px] text-muted-foreground block mb-1">Risk per trade (%)</label>
-                <input
-                  type="number" value={riskInput} onChange={e => setRiskInput(e.target.value)}
-                  step="0.5" min="0.5" max="5"
-                  className="w-20 px-2 py-1.5 text-xs rounded-md bg-zinc-900 border border-zinc-800 focus:outline-none focus:border-purple-500/60"
-                  placeholder="2"
-                />
+
+              <div className="grid sm:grid-cols-2 gap-4">
+                {/* Risk per trade */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] text-muted-foreground">Risk per trade</label>
+                    <span className="text-xs font-mono font-bold text-emerald-400">{parseFloat(riskInput || "0").toFixed(2)}%</span>
+                  </div>
+                  <input
+                    type="range" min="0.25" max="3" step="0.25"
+                    value={riskInput || "0"}
+                    onChange={e => setRiskInput(e.target.value)}
+                    className="w-full h-1.5 bg-border/40 rounded-full appearance-none cursor-pointer accent-emerald-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-muted-foreground/60 mt-0.5">
+                    <span>0.25%</span><span>1%</span><span>2%</span><span>3%</span>
+                  </div>
+                </div>
+
+                {/* Leverage */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] text-muted-foreground">Leverage</label>
+                    <span className={`text-xs font-mono font-bold ${
+                      parseInt(paperLeverageInput) >= 15 ? "text-red-400" :
+                      parseInt(paperLeverageInput) >= 10 ? "text-amber-400" :
+                      "text-emerald-400"
+                    }`}>{paperLeverageInput}×</span>
+                  </div>
+                  <input
+                    type="range" min="1" max="20" step="1"
+                    value={paperLeverageInput}
+                    onChange={e => setPaperLeverageInput(e.target.value)}
+                    className="w-full h-1.5 bg-border/40 rounded-full appearance-none cursor-pointer accent-emerald-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-muted-foreground/60 mt-0.5">
+                    <span>1×</span><span>5×</span><span>10×</span><span>20×</span>
+                  </div>
+                </div>
               </div>
-              <button
-                onClick={() => capitalMutation.mutate({ capital: parseFloat(capitalInput), riskPct: parseFloat(riskInput) })}
-                disabled={capitalMutation.isPending}
-                className="px-3 py-1.5 text-xs rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/30 transition-colors font-medium"
-              >
-                Save
-              </button>
-              <button onClick={() => setShowCapitalForm(false)} className="text-[10px] text-muted-foreground hover:text-foreground">Cancel</button>
+
+              <p className="text-[10px] text-muted-foreground/70">
+                Paper mirrors the live engine's sizing model — tweak here to A/B test risk % or leverage side-by-side with live.
+              </p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => capitalMutation.mutate({
+                    capital: parseFloat(capitalInput),
+                    riskPct: parseFloat(riskInput),
+                    leverage: parseInt(paperLeverageInput, 10),
+                  })}
+                  disabled={capitalMutation.isPending}
+                  className="px-3.5 py-2 text-xs rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 transition-colors font-semibold disabled:opacity-50"
+                >
+                  {capitalMutation.isPending ? "Saving…" : "Save Settings"}
+                </button>
+                <button onClick={() => setShowCapitalForm(false)} className="px-3 py-2 text-xs text-muted-foreground hover:text-foreground">
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
         </Card>
@@ -601,6 +711,73 @@ export default function PaperTradingPage() {
         )}
       </Card>
 
+      {/* ═══ Strategy Activation — per mode ═══ */}
+      <Card className="border-border/30 overflow-hidden">
+        <div className="px-4 py-3 border-b border-border/20 flex items-center gap-2">
+          <Zap className="w-3.5 h-3.5 text-purple-400" />
+          <span className="text-xs font-bold">Strategy Activation</span>
+          <span className="text-[10px] text-muted-foreground/60">choose which strategies run in each engine</span>
+        </div>
+        <div className="divide-y divide-border/10">
+          {/* Header row */}
+          <div className="px-4 py-2 grid grid-cols-[1fr_auto_auto] gap-3 text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold">
+            <span>Strategy</span>
+            <span className="w-20 text-center">Paper</span>
+            <span className="w-20 text-center">Live</span>
+          </div>
+          {strategies.map(s => {
+            const c = getStratColor(s.id);
+            const counts = paperStatus?.strategyCounts?.[s.id];
+            const paperOn = s.paperEnabled ?? s.enabled;
+            const liveOn  = s.liveEnabled ?? false;
+            return (
+              <div key={s.id} className="px-4 py-2.5 grid grid-cols-[1fr_auto_auto] gap-3 items-center hover:bg-card/30 transition-colors">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs font-bold truncate ${c.text}`}>{s.name}</span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-card/60 text-muted-foreground/70 font-mono">{s.interval}</span>
+                    {counts && counts.total > 0 && (
+                      <span className="text-[9px] text-muted-foreground/50">{counts.open} open · {counts.total} total</span>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/60 truncate mt-0.5">{s.description}</p>
+                </div>
+                <button
+                  onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !paperOn, mode: "paper" })}
+                  className={`w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
+                    paperOn
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      : "bg-card/40 border-border/30 text-muted-foreground/50"
+                  }`}
+                  title="Toggle for paper engine"
+                >
+                  {paperOn ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {paperOn ? "ON" : "OFF"}
+                </button>
+                <button
+                  onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !liveOn, mode: "live" })}
+                  className={`w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
+                    liveOn
+                      ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                      : "bg-card/40 border-border/30 text-muted-foreground/50"
+                  }`}
+                  title="Toggle for live engine (real capital)"
+                >
+                  {liveOn ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {liveOn ? "ON" : "OFF"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="px-4 py-2 bg-card/20 border-t border-border/20 flex items-start gap-1.5">
+          <AlertTriangle className="w-3 h-3 text-amber-400/70 mt-0.5 shrink-0" />
+          <p className="text-[10px] text-muted-foreground/70">
+            Paper is for backtesting the strategy mix. Live is real capital — only enable here after paper validates.
+          </p>
+        </div>
+      </Card>
+
       {/* Strategy Mini Stats — only if there's data */}
       {activeStrats.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
@@ -733,7 +910,7 @@ export default function PaperTradingPage() {
           <FlaskConical className="w-10 h-10 text-muted-foreground/15 mx-auto mb-3" />
           <p className="text-sm text-muted-foreground">{tab === "open" ? "No open trades" : "No closed trades"}</p>
           {tab === "open" && !paperRunning && (
-            <p className="text-[11px] text-muted-foreground/50 mt-1">Start the engine from the Dashboard to begin scanning</p>
+            <p className="text-[11px] text-muted-foreground/50 mt-1">Start the paper engine above to begin scanning</p>
           )}
         </Card>
       ) : (

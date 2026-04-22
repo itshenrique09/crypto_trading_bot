@@ -195,8 +195,9 @@ const insertJournalSchema = z.object({
 }, { message: "SL/TP must be on the correct side of entry price" });
 
 const capitalSchema = z.object({
-  capital: z.number().positive().max(1_000_000).optional(),
-  riskPct: z.number().positive().max(5).optional(),
+  capital:  z.number().positive().max(1_000_000).optional(),
+  riskPct:  z.number().positive().max(5).optional(),
+  leverage: z.number().int().min(1).max(20).optional(),
 });
 
 export async function registerRoutes(server: Server, app: Express) {
@@ -1427,32 +1428,54 @@ export async function registerRoutes(server: Server, app: Express) {
 
   // ── Strategy Management ──────────────────────────────────────────
 
+  // Read the per-mode enabled list. Falls back to legacy global "enabled_strategies" for migration.
+  async function readEnabled(mode: "paper" | "live"): Promise<string[]> {
+    const all = getAllStrategies();
+    const validIds = all.map(s => s.id);
+    const key = mode === "paper" ? "paper_enabled_strategies" : "live_enabled_strategies";
+    const json = await getSetting(key);
+    if (json) {
+      const parsed: string[] = JSON.parse(json);
+      if (parsed.some(id => validIds.includes(id))) return parsed.filter(id => validIds.includes(id));
+    }
+    // Legacy fallback: read old global list
+    const legacy = await getSetting("enabled_strategies");
+    if (legacy) {
+      const parsed: string[] = JSON.parse(legacy);
+      if (parsed.some(id => validIds.includes(id))) {
+        const filtered = parsed.filter(id => validIds.includes(id));
+        await setSetting(key, JSON.stringify(filtered));
+        return filtered;
+      }
+    }
+    // Default: everything enabled
+    await setSetting(key, JSON.stringify(validIds));
+    return validIds;
+  }
+
   app.get("/api/strategies", async (_req, res) => {
     const all = getAllStrategies();
-    const enabledJson = await getSetting("enabled_strategies");
-    let enabled: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
-    // Migrate: if stored IDs don't match any current strategy, reset to all enabled
-    const validIds = all.map(s => s.id);
-    if (enabled.length > 0 && !enabled.some(id => validIds.includes(id))) {
-      enabled = validIds;
-      await setSetting("enabled_strategies", JSON.stringify(enabled));
-    }
+    const [paper, live] = await Promise.all([readEnabled("paper"), readEnabled("live")]);
     res.json(all.map(s => ({
-      id: s.id, name: s.name, description: s.description,
-      interval: s.interval, enabled: enabled.includes(s.id),
+      id: s.id, name: s.name, description: s.description, interval: s.interval,
+      paperEnabled: paper.includes(s.id),
+      liveEnabled:  live.includes(s.id),
+      // Back-compat: some older UI code may still read `enabled`
+      enabled: paper.includes(s.id),
     })));
   });
 
   app.put("/api/strategies/:id/toggle", async (req, res) => {
     const { id } = req.params;
-    const { enabled } = req.body;
-    const all = getAllStrategies();
-    const enabledJson = await getSetting("enabled_strategies");
-    let enabledList: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
-    if (enabled) { if (!enabledList.includes(id)) enabledList.push(id); }
-    else { enabledList = enabledList.filter((s: string) => s !== id); }
-    await setSetting("enabled_strategies", JSON.stringify(enabledList));
-    res.json({ id, enabled });
+    const { enabled, mode } = req.body as { enabled: boolean; mode?: "paper" | "live" };
+    const targetMode: "paper" | "live" = mode === "live" ? "live" : "paper";
+    const key = targetMode === "paper" ? "paper_enabled_strategies" : "live_enabled_strategies";
+    const list = await readEnabled(targetMode);
+    let next = list.slice();
+    if (enabled) { if (!next.includes(id)) next.push(id); }
+    else { next = next.filter(s => s !== id); }
+    await setSetting(key, JSON.stringify(next));
+    res.json({ id, enabled, mode: targetMode });
   });
 
   // Per-strategy stats
@@ -1602,10 +1625,9 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   }
 
-  async function getEnabledStrategies(): Promise<Strategy[]> {
+  async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
     const all = getAllStrategies();
-    const enabledJson = await getSetting("enabled_strategies");
-    const enabledIds: string[] = enabledJson ? JSON.parse(enabledJson) : all.map(s => s.id);
+    const enabledIds = await readEnabled(mode);
     return all.filter(s => enabledIds.includes(s.id));
   }
 
@@ -1772,7 +1794,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const mode = await getSetting("mode");
       if (mode !== "paper" || !paperStatus.running) return;
 
-      const strategies = await getEnabledStrategies();
+      const strategies = await getEnabledStrategies("paper");
       if (strategies.length === 0) return;
 
       // Use the same coin list as the market page + any strategy-specific preferred coins
@@ -2125,6 +2147,7 @@ export async function registerRoutes(server: Server, app: Express) {
     // Capital stats
     const initialCapital = parseFloat(await getSetting("paper_capital") || "1000");
     const baseRiskPct    = parseFloat(await getSetting("paper_risk_pct") || "2");
+    const leverage       = parseInt(await getSetting("paper_leverage") || "5", 10);
     const totalPnlUsd    = closed.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
     const currentBalance = initialCapital + totalPnlUsd;
 
@@ -2150,6 +2173,7 @@ export async function registerRoutes(server: Server, app: Express) {
         balance:    Math.round(currentBalance * 100) / 100,
         totalPnlUsd: Math.round(totalPnlUsd * 100) / 100,
         riskPct:    baseRiskPct,
+        leverage,
         oneR:       Math.round(daily1R * 100) / 100,
         todayPnlUsd: Math.round(todayPnl * 100) / 100,
         todayR:     daily1R > 0 ? Math.round((todayPnl / daily1R) * 100) / 100 : 0,
@@ -2162,12 +2186,14 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const parsed = capitalSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-      const { capital, riskPct } = parsed.data;
-      if (capital !== undefined) await setSetting("paper_capital", String(capital));
-      if (riskPct !== undefined) await setSetting("paper_risk_pct", String(riskPct));
-      const ic = parseFloat(await getSetting("paper_capital") || "1000");
+      const { capital, riskPct, leverage } = parsed.data;
+      if (capital  !== undefined) await setSetting("paper_capital",  String(capital));
+      if (riskPct  !== undefined) await setSetting("paper_risk_pct", String(riskPct));
+      if (leverage !== undefined) await setSetting("paper_leverage", String(leverage));
+      const ic = parseFloat(await getSetting("paper_capital")  || "1000");
       const rp = parseFloat(await getSetting("paper_risk_pct") || "2");
-      res.json({ capital: ic, riskPct: rp, oneR: Math.round(ic * rp) / 100 });
+      const lv = parseInt  (await getSetting("paper_leverage") || "5", 10);
+      res.json({ capital: ic, riskPct: rp, leverage: lv, oneR: Math.round(ic * rp) / 100 });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -2454,7 +2480,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (!liveEngineStatus.running) return;
 
       const client = await getLiveClient();
-      const strategies = await getEnabledStrategies();
+      const strategies = await getEnabledStrategies("live");
       if (strategies.length === 0) return;
 
       // Same coin universe as market page + strategy-specific preferred coins

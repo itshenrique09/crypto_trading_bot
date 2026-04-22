@@ -1,12 +1,12 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Activity, TrendingUp, TrendingDown,
-  BarChart3, Target, Clock, Zap, Play, Square, Loader2,
-  ToggleLeft, ToggleRight, ArrowUpRight, ArrowDownRight,
+  BarChart3, Target, Clock, Zap,
+  ArrowUpRight, ArrowDownRight,
   CircleDot, Trophy, Percent, ChevronRight, LineChart
 } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
@@ -36,8 +36,6 @@ interface StrategyStats {
 }
 
 export default function Dashboard() {
-  const queryClient = useQueryClient();
-
   const { data: paperStatus } = useQuery({
     queryKey: ["/api/paper/status"],
     queryFn: async () => (await apiRequest("GET", "/api/paper/status")).json(),
@@ -66,23 +64,6 @@ export default function Dashboard() {
     queryFn: async () => (await apiRequest("GET", "/api/paper/prices")).json(),
     refetchInterval: 10000,
     enabled: paperStatus?.running,
-  });
-
-  const paperStartMutation = useMutation({
-    mutationFn: async () => { await apiRequest("POST", "/api/paper/start"); },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
-  });
-
-  const paperStopMutation = useMutation({
-    mutationFn: async () => { await apiRequest("POST", "/api/paper/stop"); },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
-  });
-
-  const toggleStrategyMutation = useMutation({
-    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
-      await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled });
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/strategies"] }),
   });
 
   const priceMap = new Map(paperPrices.map(p => [p.id, p]));
@@ -137,69 +118,21 @@ export default function Dashboard() {
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1400px]">
-      {/* Top bar: Engine + Stats in one row */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        {/* Engine Control — compact */}
-        <Card className={`flex-1 p-4 flex items-center gap-4 ${running ? "border-emerald-500/30 bg-emerald-950/10" : "border-border/40"}`}>
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${running ? "bg-emerald-500/15" : "bg-muted/20"}`}>
-            {running ? <Activity className="w-5 h-5 text-emerald-400 animate-pulse" /> : <CircleDot className="w-5 h-5 text-muted-foreground" />}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <p className="text-sm font-bold">{running ? "Engine Running" : "Engine Stopped"}</p>
-              {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
-            </div>
-            <p className="text-[11px] text-muted-foreground truncate">
-              {running
-                ? `${paperStatus?.coinsScanned || 0} coins scanned · every 3min`
-                : "Start to begin scanning for signals"
-              }
-            </p>
-          </div>
-          {running ? (
-            <button
-              onClick={() => paperStopMutation.mutate()}
-              disabled={paperStopMutation.isPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 font-semibold transition-colors shrink-0"
-            >
-              {paperStopMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />} Stop
-            </button>
-          ) : (
-            <button
-              onClick={() => paperStartMutation.mutate()}
-              disabled={paperStartMutation.isPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 font-semibold transition-colors shrink-0"
-            >
-              {paperStartMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} Start
-            </button>
-          )}
-        </Card>
-      </div>
-
-      {/* Strategy Toggles — separate horizontal strip */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[11px] text-muted-foreground font-medium mr-1">Strategies:</span>
-        {strategies.map(s => {
-          const c = getStratColor(s.id);
-          const counts = paperStatus?.strategyCounts?.[s.id];
-          return (
-            <button
-              key={s.id}
-              onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !s.enabled })}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all border ${
-                s.enabled
-                  ? `${c.bg} ${c.border} ${c.text}`
-                  : "bg-card/30 border-border/20 text-muted-foreground/50 line-through"
-              }`}
-            >
-              {s.enabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-              {s.name}
-              {counts && counts.total > 0 && (
-                <span className="text-[10px] opacity-70 ml-0.5">{counts.open}/{counts.total}</span>
-              )}
-            </button>
-          );
-        })}
+      {/* Hero: Page header + engine summary (non-interactive) */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-lg font-bold tracking-tight">Dashboard</h1>
+          <p className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-1.5">
+            {running ? (
+              <><Activity className="w-3 h-3 text-emerald-400 animate-pulse" /><span className="text-emerald-400">Paper engine running</span> · {paperStatus?.coinsScanned || 0} coins scanned</>
+            ) : (
+              <><CircleDot className="w-3 h-3 text-muted-foreground/60" /><span className="text-muted-foreground/60">Paper engine stopped</span></>
+            )}
+          </p>
+        </div>
+        <Link href="/paper" className="text-[11px] text-muted-foreground hover:text-purple-400 transition-colors flex items-center gap-1">
+          {running ? "Manage engine" : "Start engine"} <ChevronRight className="w-3 h-3" />
+        </Link>
       </div>
 
       {/* Key Metrics Strip */}

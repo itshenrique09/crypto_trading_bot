@@ -36,7 +36,9 @@ export interface StrategyInfo {
   name: string;
   description: string;
   interval: string;
-  enabled: boolean;
+  enabled: boolean;       // legacy alias = paperEnabled
+  paperEnabled?: boolean;
+  liveEnabled?: boolean;
 }
 
 export interface CoinData {
