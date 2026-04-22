@@ -3,7 +3,8 @@ import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, Eye, Flame, Zap, TrendingUp, TrendingDown } from "lucide-react";
+import { Search, Eye, Flame, Zap, TrendingUp, TrendingDown, ChevronRight } from "lucide-react";
+import { useLocation } from "wouter";
 import { formatPrice, formatCompact, formatPercent, getChangeColor } from "@/lib/utils";
 import { useState } from "react";
 import MiniSparkline from "@/components/MiniSparkline";
@@ -11,6 +12,7 @@ import type { CoinData } from "@/lib/types";
 
 export default function ScannerPage() {
   const [search, setSearch] = useState("");
+  const [, setLocation] = useLocation();
 
   const { data: coins, isLoading } = useQuery<CoinData[]>({
     queryKey: ["/api/market"],
@@ -103,7 +105,11 @@ export default function ScannerPage() {
                   </thead>
                   <tbody className="text-sm">
                     {topVolume.map((coin, i) => (
-                      <tr key={coin.symbol} className="border-b border-border/8 hover:bg-card/20 transition-colors group">
+                      <tr
+                        key={coin.symbol}
+                        onClick={() => setLocation(`/market/${coin.symbol}`)}
+                        className="border-b border-border/8 hover:bg-card/20 transition-colors group cursor-pointer"
+                      >
                         <td className="py-2.5 px-4 md:px-5 text-[11px] text-muted-foreground/40 font-mono">{i + 1}</td>
                         <td className="py-2.5 px-2">
                           <div className="flex items-center gap-2">
@@ -137,9 +143,7 @@ export default function ScannerPage() {
                           </div>
                         </td>
                         <td className="py-2.5 px-3 md:px-5 text-right">
-                          <Link href={`/market/${coin.symbol}`} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] font-medium bg-purple-500/8 text-purple-400/80 hover:bg-purple-500/20 hover:text-purple-400 transition-colors opacity-60 group-hover:opacity-100">
-                            <Eye className="w-3 h-3" /> Analyze
-                          </Link>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground/30 group-hover:text-purple-400 transition-colors inline-block" />
                         </td>
                       </tr>
                     ))}

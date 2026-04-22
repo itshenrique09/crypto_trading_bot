@@ -20,6 +20,11 @@ interface StrategyStats {
   winRate: number | null;
   totalPnl: number;
   avgPnl: number | null;
+  profitFactor: number | null;
+  avgWin: number | null;
+  avgLoss: number | null;
+  bestTrade: number | null;
+  worstTrade: number | null;
 }
 
 export default function ComparePage() {
@@ -166,6 +171,42 @@ export default function ComparePage() {
                     colorFn={(s) => (s.avgPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}
                     stats={activeStats}
                   />
+                  <CompareRow
+                    label="Profit Factor"
+                    values={activeStats.map(s => s.profitFactor != null ? s.profitFactor.toFixed(2) : "--")}
+                    bestIdx={findBestIdx(activeStats.map(s => s.profitFactor ?? -999))}
+                    colorFn={(s) => (s.profitFactor ?? 0) >= 1 ? "text-emerald-400" : "text-red-400"}
+                    stats={activeStats}
+                    hint="gross profit / gross loss · >1 = profitable"
+                  />
+                  <CompareRow
+                    label="Avg Win"
+                    values={activeStats.map(s => s.avgWin != null ? `+${s.avgWin.toFixed(2)}%` : "--")}
+                    bestIdx={findBestIdx(activeStats.map(s => s.avgWin ?? -999))}
+                    colorFn={() => "text-emerald-400/80"}
+                    stats={activeStats}
+                  />
+                  <CompareRow
+                    label="Avg Loss"
+                    values={activeStats.map(s => s.avgLoss != null ? `${s.avgLoss.toFixed(2)}%` : "--")}
+                    bestIdx={findBestIdx(activeStats.map(s => s.avgLoss ?? -999))}
+                    colorFn={() => "text-red-400/80"}
+                    stats={activeStats}
+                  />
+                  <CompareRow
+                    label="Best Trade"
+                    values={activeStats.map(s => s.bestTrade != null ? `+${s.bestTrade.toFixed(2)}%` : "--")}
+                    bestIdx={findBestIdx(activeStats.map(s => s.bestTrade ?? -999))}
+                    colorFn={() => "text-emerald-400/80"}
+                    stats={activeStats}
+                  />
+                  <CompareRow
+                    label="Worst Trade"
+                    values={activeStats.map(s => s.worstTrade != null ? `${s.worstTrade.toFixed(2)}%` : "--")}
+                    bestIdx={findBestIdx(activeStats.map(s => s.worstTrade ?? -999))}
+                    colorFn={() => "text-red-400/80"}
+                    stats={activeStats}
+                  />
                 </tbody>
               </table>
             </div>
@@ -307,16 +348,22 @@ function LeaderCard({ label, strategy, value, icon }: {
   );
 }
 
-function CompareRow({ label, values, bestIdx, colorFn, stats }: {
+function CompareRow({ label, values, bestIdx, colorFn, stats, hint }: {
   label: string;
   values: string[];
   bestIdx?: number;
   colorFn?: (s: StrategyStats) => string;
   stats?: StrategyStats[];
+  hint?: string;
 }) {
   return (
     <tr className="border-b border-border/8">
-      <td className="py-2.5 px-4 md:px-5 text-xs text-muted-foreground font-medium">{label}</td>
+      <td className="py-2.5 px-4 md:px-5 text-xs text-muted-foreground font-medium">
+        <div className="flex flex-col">
+          <span>{label}</span>
+          {hint && <span className="text-[9px] text-muted-foreground/40 font-normal">{hint}</span>}
+        </div>
+      </td>
       {values.map((v, i) => {
         const isBest = bestIdx === i;
         const color = colorFn && stats ? colorFn(stats[i]) : "";
