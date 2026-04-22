@@ -480,8 +480,14 @@ export default function AnalysisPage() {
 
                     <div className="border-t border-border/15 pt-2">
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Take Profit Levels</p>
-                      <RiskRow label="TP1 (trail trigger)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400/70" icon={<Target className="w-3 h-3" />} />
-                      <RiskRow label="TP2 (main target)" value={`$${formatPrice(signal.takeProfit2)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
+                      {signal.takeProfit2 != null && signal.takeProfit2 !== signal.takeProfit1 ? (
+                        <>
+                          <RiskRow label="TP1 (trail trigger)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400/70" icon={<Target className="w-3 h-3" />} />
+                          <RiskRow label="TP2 (main target)" value={`$${formatPrice(signal.takeProfit2)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
+                        </>
+                      ) : (
+                        <RiskRow label="Target (single)" value={`$${formatPrice(signal.takeProfit1)}`} color="text-emerald-400" icon={<Target className="w-3 h-3" />} />
+                      )}
                     </div>
                     <div className="border-t border-border/15 pt-2 space-y-1.5">
                       <div className="flex justify-between">

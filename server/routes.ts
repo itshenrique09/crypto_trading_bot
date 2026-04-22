@@ -1434,19 +1434,23 @@ export async function registerRoutes(server: Server, app: Express) {
     const validIds = all.map(s => s.id);
     const key = mode === "paper" ? "paper_enabled_strategies" : "live_enabled_strategies";
     const json = await getSetting(key);
-    if (json) {
-      const parsed: string[] = JSON.parse(json);
-      if (parsed.some(id => validIds.includes(id))) return parsed.filter(id => validIds.includes(id));
+    // Key exists (even if "[]") → user intent, honor it. Don't fall back to
+    // legacy when the user deliberately disabled everything in this mode.
+    if (json != null) {
+      try {
+        const parsed: string[] = JSON.parse(json);
+        return parsed.filter(id => validIds.includes(id));
+      } catch { /* corrupted — fall through to legacy/default */ }
     }
-    // Legacy fallback: read old global list
+    // Legacy fallback: read old global list (one-time migration)
     const legacy = await getSetting("enabled_strategies");
     if (legacy) {
-      const parsed: string[] = JSON.parse(legacy);
-      if (parsed.some(id => validIds.includes(id))) {
+      try {
+        const parsed: string[] = JSON.parse(legacy);
         const filtered = parsed.filter(id => validIds.includes(id));
         await setSetting(key, JSON.stringify(filtered));
         return filtered;
-      }
+      } catch { /* corrupted — fall through to default */ }
     }
     // Default: everything enabled
     await setSetting(key, JSON.stringify(validIds));

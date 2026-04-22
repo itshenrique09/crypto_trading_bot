@@ -52,7 +52,7 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
             <span className="font-mono">Entry ${formatPrice(entry.entry_price)}</span>
             <span className="font-mono text-red-400/70">SL ${formatPrice(entry.stop_loss)}</span>
             <span className="font-mono text-emerald-400/70">TP1 ${formatPrice(entry.take_profit1)}</span>
-            {entry.take_profit2 != null && (
+            {entry.take_profit2 != null && entry.take_profit2 !== entry.take_profit1 && (
               <span className="font-mono text-emerald-300/60">TP2 ${formatPrice(entry.take_profit2)}</span>
             )}
             {entry.confluence_score != null && <span>Score {entry.confluence_score}</span>}
@@ -96,7 +96,9 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
       {isOpen && price && (() => {
         const isLong = entry.direction === "LONG";
         const tp1 = entry.take_profit1;
-        const tp2 = entry.take_profit2 ?? null;
+        // tp2 === tp1 means single-target trade (no structural level beyond TP1) —
+        // treat as "no TP2" for display so we don't render a redundant overlapping marker.
+        const tp2 = entry.take_profit2 != null && entry.take_profit2 !== tp1 ? entry.take_profit2 : null;
         // Right edge of the bar = the farther TP (TP2 if set, else TP1)
         const farTp = tp2 ?? tp1;
         const tp1Reach   = Math.abs(tp1   - entry.entry_price);

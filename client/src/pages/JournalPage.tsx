@@ -555,7 +555,7 @@ export default function JournalPage() {
                 <span className="text-muted-foreground block">TP1</span>
                 <span className="font-mono text-emerald-400">${formatPrice(entry.take_profit1)}</span>
               </div>
-              {entry.take_profit2 && (
+              {entry.take_profit2 != null && entry.take_profit2 !== entry.take_profit1 && (
                 <div>
                   <span className="text-muted-foreground block">TP2</span>
                   <span className="font-mono text-emerald-400">${formatPrice(entry.take_profit2)}</span>

@@ -111,7 +111,7 @@ export default function TradeChartModal({ entry, onClose }: TradeChartModalProps
           axisLabelVisible: true,
           title: `TP1 ${formatPrice(entry.take_profit1)}`,
         });
-        if (entry.take_profit2) {
+        if (entry.take_profit2 != null && entry.take_profit2 !== entry.take_profit1) {
           candleSeries.createPriceLine({
             price:    entry.take_profit2,
             color:    "#6ee7b7",
@@ -246,7 +246,7 @@ export default function TradeChartModal({ entry, onClose }: TradeChartModalProps
           <span className="text-purple-400">Entry <span className="font-mono">${formatPrice(entry.entry_price)}</span></span>
           <span className="text-red-400">SL <span className="font-mono">${formatPrice(entry.stop_loss)}</span></span>
           <span className="text-emerald-400">TP1 <span className="font-mono">${formatPrice(entry.take_profit1)}</span></span>
-          {entry.take_profit2 && (
+          {entry.take_profit2 != null && entry.take_profit2 !== entry.take_profit1 && (
             <span className="text-emerald-300">TP2 <span className="font-mono">${formatPrice(entry.take_profit2)}</span></span>
           )}
           {entry.exit_price && entry.outcome !== "open" && (
