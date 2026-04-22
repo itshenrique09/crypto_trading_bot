@@ -259,107 +259,60 @@ export default function JournalPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
-        {/* Mode Description */}
-        <Card className={`border-border/50 bg-card/50 p-3 ${currentMode === "paper" ? "border-orange-500/30" : ""}`}>
-          {currentMode === "signal" && (
-            <div className="flex items-start gap-3">
-              <Radio className="w-5 h-5 text-blue-400 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-xs font-semibold text-blue-400">Signal Mode</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  O bot analisa e da calls. Cada signal aparece no journal como "Pending" — clicas "Segui" ou "Ignorei" para registar.
-                </p>
-              </div>
-            </div>
-          )}
-          {currentMode === "auto" && (
-            <div className="flex items-start gap-3">
-              <Zap className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-xs font-semibold text-emerald-400">Auto Mode</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Execucao automatica de trades na exchange.
-                </p>
-                <div className="flex items-center gap-1.5 mt-1.5 text-[10px] text-amber-400">
-                  <AlertTriangle className="w-3 h-3" />
-                  <span>Requer API Key de exchange (Binance/MEXC) — configurar em Settings</span>
-                </div>
-              </div>
-            </div>
-          )}
-          {currentMode === "paper" && (
-            <div className="flex items-start gap-3">
-              <FlaskConical className="w-5 h-5 text-orange-400 mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-semibold text-orange-400">Paper Trading</p>
-                  {paperRunning ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-[9px] text-muted-foreground">
-                        {paperStatusData?.coinsScanned || 0} coins
-                        {paperStatusData?.lastScan && ` · scan ${new Date(paperStatusData.lastScan).toLocaleTimeString()}`}
-                      </span>
-                      <button
-                        onClick={() => paperStopMutation.mutate()}
-                        disabled={paperStopMutation.isPending}
-                        className="flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 font-medium"
-                      >
-                        {paperStopMutation.isPending ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Square className="w-2.5 h-2.5" />} Stop
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => paperStartMutation.mutate()}
-                      disabled={paperStartMutation.isPending}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded text-[10px] bg-orange-500/20 border border-orange-500/40 text-orange-300 hover:bg-orange-500/30 font-medium"
-                    >
-                      {paperStartMutation.isPending ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Play className="w-2.5 h-2.5" />} Start Paper Trading
-                    </button>
-                  )}
-                </div>
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Multi-estrategia — cada estrategia activa corre em paralelo nas top {paperStatusData?.coinsScanned || 30} coins por volume.
-                  Check a cada 30s, scan a cada 3 min.
-                </p>
-
-                {/* Strategy toggles */}
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {strategies.map(s => {
-                    const c = getStratColor(s.id);
-                    const counts = paperStatusData?.strategyCounts?.[s.id];
-                    return (
-                      <button
-                        key={s.id}
-                        onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !s.enabled })}
-                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-medium transition-all border ${
-                          s.enabled
-                            ? `${c.bg} ${c.border} ${c.text}`
-                            : "bg-card/30 border-border/20 text-muted-foreground opacity-50"
-                        }`}
-                      >
-                        {s.enabled ? <ToggleRight className="w-3 h-3" /> : <ToggleLeft className="w-3 h-3" />}
-                        {s.name}
-                        {counts && counts.total > 0 && (
-                          <span className="text-[9px] opacity-70">({counts.open}/{counts.total})</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {paperRunning && (
-                  <div className="flex items-center gap-1.5 mt-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-orange-400 animate-pulse" />
-                    <span className="text-[10px] text-orange-400 font-medium">
-                      Engine activo — {paperStatusData?.openTrades || 0} trades abertas
-                      {strategies.filter(s => s.enabled).length > 0 && ` · ${strategies.filter(s => s.enabled).length} estrategias`}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+        {/* Mode banner — compact (full engine controls live on Dashboard + Trades pages) */}
+        <Card className={`border-border/40 px-3 py-2 flex items-center gap-3 ${
+          currentMode === "paper"  ? "border-orange-500/30 bg-orange-500/[0.03]" :
+          currentMode === "signal" ? "border-blue-500/30 bg-blue-500/[0.03]" :
+          "border-emerald-500/30 bg-emerald-500/[0.03]"
+        }`}>
+          {currentMode === "signal" ? <Radio className="w-4 h-4 text-blue-400 shrink-0" /> :
+           currentMode === "paper"  ? <FlaskConical className="w-4 h-4 text-orange-400 shrink-0" /> :
+                                      <Zap className="w-4 h-4 text-emerald-400 shrink-0" />}
+          <div className="flex-1 min-w-0">
+            <p className={`text-xs font-semibold ${
+              currentMode === "paper"  ? "text-orange-400" :
+              currentMode === "signal" ? "text-blue-400" :
+              "text-emerald-400"
+            }`}>
+              {currentMode === "signal" ? "Signal Mode" : currentMode === "paper" ? "Paper Trading" : "Auto (Live)"}
+              {currentMode === "paper" && paperRunning && (
+                <span className="ml-2 inline-flex items-center gap-1 text-[9px] text-orange-400/80 font-normal">
+                  <span className="w-1 h-1 rounded-full bg-orange-400 animate-pulse" /> running · {paperStatusData?.openTrades || 0} open
+                </span>
+              )}
+            </p>
+            <p className="text-[10px] text-muted-foreground truncate">
+              {currentMode === "signal" && "Signals recorded as \u201CPending\u201D \u2014 you confirm Followed / Ignored manually."}
+              {currentMode === "paper"  && `Multi-strategy simulation on top ${paperStatusData?.coinsScanned || 30} coins. Scan every 3 min.`}
+              {currentMode === "auto"   && "Automatic execution on MEXC \u2014 configure keys on the Trades page."}
+            </p>
+          </div>
         </Card>
+
+        {/* Strategy toggles — compact row */}
+        {currentMode === "paper" && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground mr-1">Strategies:</span>
+            {strategies.map(s => {
+              const c = getStratColor(s.id);
+              const counts = paperStatusData?.strategyCounts?.[s.id];
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !s.enabled })}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium transition-all border ${
+                    s.enabled
+                      ? `${c.bg} ${c.border} ${c.text}`
+                      : "bg-card/30 border-border/20 text-muted-foreground/60 line-through"
+                  }`}
+                >
+                  {s.name}
+                  {counts && counts.total > 0 && <span className="text-[9px] opacity-70">{counts.open}/{counts.total}</span>}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Stats Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">

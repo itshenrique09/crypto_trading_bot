@@ -2650,7 +2650,7 @@ export async function registerRoutes(server: Server, app: Express) {
               const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
               const mexcSym  = toMexcSymbol(sym);
-              const leverage = 5;
+              const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
               const vol      = await client.calcContractVol(mexcSym, posSize, signal.entry);
               const side     = signal.direction === "LONG" ? 1 : 2;
 
@@ -2747,13 +2747,29 @@ export async function registerRoutes(server: Server, app: Express) {
   // Configure MEXC API keys + optional live risk settings
   app.post("/api/live/config", async (req, res) => {
     try {
-      const { apiKey, apiSecret, riskPct } = req.body;
-      if (!apiKey || !apiSecret) return res.status(400).json({ error: "apiKey and apiSecret are required" });
-      await setSetting("mexc_api_key",    encryptValue(apiKey));
-      await setSetting("mexc_api_secret", encryptValue(apiSecret));
+      const { apiKey, apiSecret, riskPct, leverage } = req.body;
+      // Sentinel "__keep__" (or empty) means: don't overwrite stored key. Allows
+      // updating risk/leverage without re-entering credentials.
+      const hasNewKey    = apiKey    && apiKey    !== "__keep__";
+      const hasNewSecret = apiSecret && apiSecret !== "__keep__";
+      const existingKey    = await getSetting("mexc_api_key");
+      const existingSecret = await getSetting("mexc_api_secret");
+
+      if (hasNewKey)    await setSetting("mexc_api_key",    encryptValue(apiKey));
+      if (hasNewSecret) await setSetting("mexc_api_secret", encryptValue(apiSecret));
+
+      if (!hasNewKey && !existingKey)       return res.status(400).json({ error: "apiKey is required" });
+      if (!hasNewSecret && !existingSecret) return res.status(400).json({ error: "apiSecret is required" });
+
       if (riskPct && riskPct > 0 && riskPct <= 3) await setSetting("live_risk_pct", String(riskPct));
-      // Immediately test the connection
-      const client = getMexcClient(apiKey, apiSecret);
+      if (leverage && Number.isFinite(leverage) && leverage >= 1 && leverage <= 20) {
+        await setSetting("live_leverage", String(Math.round(leverage)));
+      }
+
+      // Test the connection using whatever keys are now in storage
+      const effectiveKey    = hasNewKey    ? apiKey    : decryptValue(existingKey!);
+      const effectiveSecret = hasNewSecret ? apiSecret : decryptValue(existingSecret!);
+      const client = getMexcClient(effectiveKey, effectiveSecret);
       const test   = await client.testConnection();
       res.json({ ok: test.ok, balance: test.balance, error: test.error });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -2785,6 +2801,7 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const hasKeys   = !!(await getSetting("mexc_api_key")) && !!(await getSetting("mexc_api_secret"));
       const riskPct   = parseFloat(await getSetting("live_risk_pct") || "1");
+      const leverage  = parseInt(await getSetting("live_leverage") || "5", 10) || 5;
       const journal   = await getJournal();
       const liveTrades = journal.filter(e => e.mode === "live");
       const closed     = liveTrades.filter(e => e.outcome !== "open");
@@ -2798,6 +2815,7 @@ export async function registerRoutes(server: Server, app: Express) {
         ...liveEngineStatus,
         hasKeys,
         riskPct,
+        leverage,
         openTrades:      liveTrades.filter(e => e.outcome === "open").length,
         totalLiveTrades: liveTrades.length,
         totalPnlUsd:     Math.round(totalPnl * 100) / 100,
