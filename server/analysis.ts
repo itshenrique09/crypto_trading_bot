@@ -176,17 +176,13 @@ function findTechnicalTPs(
 ): { tp1: number; tp2: number } {
   const risk = Math.abs(entry - stopLoss);
 
-  // Minimum TP distance: the greater of 2R or 1% of entry price.
-  // The 1% floor prevents micro-priced coins (PEPE, SHIB) from producing
-  // TPs that are indistinguishable from entry when risk ≈ 0 due to tiny ATR.
-  const minDistR   = risk * 2.0;
-  const minDistPct = entry * 0.01;    // 1% of entry price
-  const minDist    = Math.max(minDistR, minDistPct);
+  // Quality floor: a trade must offer ≥2R reward to be worth taking. The 1%
+  // floor protects micro-priced coins (PEPE, SHIB) where ATR can be so small
+  // that 2R is indistinguishable from entry. Not an invented target — the
+  // minimum bar a trade must clear to be considered.
+  const minDist = Math.max(risk * 2.0, entry * 0.01);
 
-  const swingWindow = 3;               // bars on each side to confirm swing
-
-  // Scan last ~200 bars; exclude last 2 (not yet confirmed as swing points)
-  // Wider window gives more candidate levels for TP2, reducing fallback to % targets
+  const swingWindow = 3;
   const end   = Math.max(0, candles.length - 2);
   const start = Math.max(0, end - 200);
 
@@ -205,29 +201,27 @@ function findTechnicalTPs(
     }
   }
 
-  // Nearest level first
   if (isLong) levels.sort((a, b) => a - b);
   else        levels.sort((a, b) => b - a);
 
-  // Cap at 5R or 8% — prevents unreachable TPs on very wide swings
-  const maxTp  = isLong ? entry + Math.max(risk * 5, entry * 0.08) : entry - Math.max(risk * 5, entry * 0.08);
-  const capFn  = isLong ? (v: number) => Math.min(v, maxTp) : (v: number) => Math.max(v, maxTp);
-  const capped = levels.map(capFn).filter(v => isLong ? v > entry + minDist * 0.75 : v < entry - minDist * 0.75);
+  // Discard unreachably-far swings (>5R or >8% of entry). Real structure but
+  // unlikely to fill within the strategy's hold window — would freeze capital.
+  const maxDist = Math.max(risk * 5, entry * 0.08);
+  const reachable = levels.filter(v => Math.abs(v - entry) <= maxDist);
 
-  // TP2 must be meaningfully further than TP1 — at least 1% of entry price apart.
-  // Prevents clustered swing highs from producing two nearly-identical targets.
-  const minSep = entry * 0.01;
-  let tp1 = capped[0];
-  let tp2 = capped.find(v => isLong ? v > (tp1 ?? 0) + minSep : v < (tp1 ?? Infinity) - minSep);
+  // TP1: nearest reachable structural swing. If none, the 2R quality floor —
+  // this is the minimum R:R a trade must offer, not an invented target.
+  const tp1Floor = isLong ? entry + minDist : entry - minDist;
+  const tp1 = reachable[0] ?? tp1Floor;
 
-  // Fallback: R:R multiples (TP1=2.5R, TP2=4R — trailing stop handles the rest)
-  const tp1Fallback = isLong ? entry + Math.max(risk * 2.5, entry * 0.025) : entry - Math.max(risk * 2.5, entry * 0.025);
-  const tp2Fallback = isLong ? entry + Math.max(risk * 4.0, entry * 0.04)  : entry - Math.max(risk * 4.0, entry * 0.04);
+  // TP2: next structural swing beyond TP1. If the chart only offers one level
+  // ahead, run a single-target trade — TP2 = TP1 collapses to a clean exit at
+  // TP1 in both engines (paper closes on next tick, live's MEXC TP order sits
+  // at TP1). A pro trader doesn't invent a second target out of thin air.
+  const tp2Structural = reachable.find(v => isLong ? v > tp1 : v < tp1);
+  const tp2 = tp2Structural ?? tp1;
 
-  return {
-    tp1: tp1 ?? tp1Fallback,
-    tp2: tp2 ?? tp2Fallback,
-  };
+  return { tp1, tp2 };
 }
 
 // ─── Stochastic RSI — FIXED: proper D-line via SMA(3) ────────────
@@ -1903,13 +1897,16 @@ export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetest
       const risk = price - sl;
       if (risk <= 0) continue;
 
-      // TP1: next resistance above entry, or 2.5R fallback
+      // TP1: next tested resistance (2+ touches) above entry. If no strong
+      // level ahead, fall back to the nearest swing high via findTechnicalTPs
+      // — fully structural, no fixed multipliers. Quality gate rr<2 below
+      // skips the whole signal if even structure doesn't offer ≥2R.
       const nextRes = strongLevels.find(l => l.price > price + risk && l.touches >= 2);
-      const tpDefault = price + risk * 2.5;
-      const tp = (nextRes && nextRes.price > price + risk) ? nextRes.price : tpDefault;
+      const tp = nextRes ? nextRes.price : findTechnicalTPs(candles, price, sl, true).tp1;
       const rr = (tp - price) / risk;
       if (rr < 2.0) continue;
-      // TP2: next resistance beyond TP1, or technical swing level, or 4R fallback
+      // TP2: next tested resistance beyond TP1, else structural next swing
+      // (which returns tp1 if none — single-target trade, trailing runs post-TP1).
       const nextRes2 = strongLevels.find(l => l.price > tp + atr * 0.5 && l.touches >= 2);
       const tp2 = nextRes2 ? nextRes2.price : findTechnicalTPs(candles, price, sl, true).tp2;
 
@@ -1941,13 +1938,15 @@ export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetest
       const risk = sl - price;
       if (risk <= 0) continue;
 
-      // TP1: next support below entry, or 2.5R fallback
+      // TP1: next tested support (2+ touches) below entry. If no strong level
+      // ahead, fall back to nearest swing low via findTechnicalTPs — fully
+      // structural. Quality gate rr<2 below skips the signal if no ≥2R target.
       const nextSup = [...strongLevels].reverse().find(l => l.price < price - risk && l.touches >= 2);
-      const tpDefault = price - risk * 2.5;
-      const tp = (nextSup && nextSup.price < price - risk) ? nextSup.price : tpDefault;
+      const tp = nextSup ? nextSup.price : findTechnicalTPs(candles, price, sl, false).tp1;
       const rr = (price - tp) / risk;
       if (rr < 2.0) continue;
-      // TP2: next support beyond TP1, or technical swing level, or 4R fallback
+      // TP2: next tested support beyond TP1, else structural next swing
+      // (returns tp1 if none — single-target, trailing runs post-TP1).
       const nextSup2 = [...strongLevels].reverse().find(l => l.price < tp - atr * 0.5 && l.touches >= 2);
       const tp2Short = nextSup2 ? nextSup2.price : findTechnicalTPs(candles, price, sl, false).tp2;
 
