@@ -2042,6 +2042,7 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
         const sl   = priceLow1 * 0.995;
         const risk = price - sl;
         if (risk <= 0 || risk / price > 0.05) break;
+        // Confidence tiered by depth of oversold: deeper = stronger reversal signal
         const conf = rsiLow1 < 30 ? 80 : 72;
         const tTPs = findTechnicalTPs(candles, price, sl, true);
         return {
@@ -2224,12 +2225,16 @@ export function liquiditySweepSignal(candles: OHLCV[]): {
   // ── 4b. FVG confirmation: require a supporting FVG near price ──
   // Bullish sweep: a bullish FVG below price (unfilled imbalance = demand)
   // Bearish sweep: a bearish FVG above price (unfilled imbalance = supply)
+  // EXCEPTION: equal-level sweeps (EQL/EQH) with vol ≥ 2× and strong wick ≥ 1.2× body
+  //   already carry institutional-grade conviction; skip the FVG requirement to
+  //   capture more high-quality sweeps (backtest-validated expansion)
   const fvgs = findFairValueGaps(candles);
   const fvgTol = 0.03; // within 3%
   const hasFVG = best.direction === "bullish"
     ? fvgs.some(f => f.type === "bullish" && f.high < price && (price - f.high) / price < fvgTol)
     : fvgs.some(f => f.type === "bearish" && f.low > price  && (f.low - price)  / price < fvgTol);
-  if (!hasFVG) return none;
+  const highQualityEQ = best.pool.isEqual && best.volRatio >= 2.0 && best.wickRatio >= 1.2;
+  if (!hasFVG && !highQualityEQ) return none;
 
   // ── 5. Entry / Stop / TP ──
   const sc = best.candle;
