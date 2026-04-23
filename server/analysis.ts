@@ -173,7 +173,7 @@ function findTechnicalTPs(
   entry: number,
   stopLoss: number,
   isLong: boolean
-): { tp1: number; tp2: number } {
+): { tp1: number; tp2: number; tp3?: number } {
   const risk = Math.abs(entry - stopLoss);
 
   // Quality floor: a trade must offer ≥2R reward to be worth taking. The 1%
@@ -233,7 +233,14 @@ function findTechnicalTPs(
   const tp2Structural = reachable.find(v => isLong ? v > tp1 : v < tp1);
   const tp2 = tp2Structural ?? tp1;
 
-  return { tp1, tp2 };
+  // TP3 ("runner" / stretch target): next structural level beyond TP2.
+  // Display-only on the analysis chart. Returned as undefined when no
+  // further structure exists — no fabricated multiple-R target.
+  const tp3 = tp2Structural
+    ? reachable.find(v => isLong ? v > tp2 : v < tp2)
+    : undefined;
+
+  return { tp1, tp2, tp3 };
 }
 
 // ─── Stochastic RSI — FIXED: proper D-line via SMA(3) ────────────
@@ -1078,11 +1085,13 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
     }
 
     const risk = Math.abs(currentPrice - stopLoss);
-    // Technical TPs: nearest swing high/low beyond entry (fallback to R:R multiples)
+    // Technical TPs: fully structural (nearest swing high/low beyond entry).
+    // TP3 returns undefined when no third level exists on the chart — no
+    // invented stretch target.
     const tTPs = findTechnicalTPs(candles, currentPrice, stopLoss, isBuy);
-    tp1 = tTPs.tp1;  // nearest structural level (≥1.5R) or 2.0R fallback
-    tp2 = tTPs.tp2;  // next structural level or 4R fallback
-    tp3 = isBuy ? currentPrice + risk * 5 : currentPrice - risk * 5;  // 5:1 extended target
+    tp1 = tTPs.tp1;  // nearest structural level (or 2R quality floor if none)
+    tp2 = tTPs.tp2;  // next structural level (or collapses to tp1)
+    tp3 = tTPs.tp3;  // structural runner target if one exists, else undefined
 
     riskRewardRatio = Math.round((Math.abs(tp2 - currentPrice) / risk) * 10) / 10;
 
