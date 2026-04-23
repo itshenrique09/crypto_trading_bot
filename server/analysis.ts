@@ -207,7 +207,19 @@ function findTechnicalTPs(
   // Discard unreachably-far swings (>5R or >8% of entry). Real structure but
   // unlikely to fill within the strategy's hold window — would freeze capital.
   const maxDist = Math.max(risk * 5, entry * 0.08);
-  const reachable = levels.filter(v => Math.abs(v - entry) <= maxDist);
+  const withinReach = levels.filter(v => Math.abs(v - entry) <= maxDist);
+
+  // Merge swings within the same zone — a cluster of pivots within 0.5R is
+  // one level on the chart, not two. This is how a trader draws horizontals:
+  // a single line through a cluster of nearby highs/lows. Without this, two
+  // swings 0.1R apart pollute TP2 with a target that's functionally TP1.
+  const zoneWidth = risk * 0.5;
+  const reachable: number[] = [];
+  for (const v of withinReach) {
+    if (reachable.length === 0 || Math.abs(v - reachable[reachable.length - 1]) > zoneWidth) {
+      reachable.push(v);
+    }
+  }
 
   // TP1: nearest reachable structural swing. If none, the 2R quality floor —
   // this is the minimum R:R a trade must offer, not an invented target.
