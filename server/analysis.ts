@@ -1038,9 +1038,44 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
   if (type !== "HOLD") {
     const isBuy = type === "BUY" || type === "STRONG_BUY";
 
-    // ATR-based stop — tighter for strong signals (proven v2 approach)
-    const slMultiplier = Math.abs(score) >= 6 ? 1.5 : 2;
-    stopLoss = isBuy ? currentPrice - slMultiplier * atr : currentPrice + slMultiplier * atr;
+    // Structural SL — thinks like a pro trader: place the stop where the
+    // thesis is invalidated (last meaningful swing), not at an arbitrary
+    // ATR distance. We pick the most recent swing below entry (LONG) or
+    // above entry (SHORT) within 30 bars and add a 0.3 ATR buffer to sit
+    // just past the structure (stop-hunt protection). If no usable swing
+    // exists, fall back to a mechanical ATR stop so the signal can still
+    // fire in rare structural gaps.
+    const swingData = findSwingPoints(candles, 2);
+    const nLast     = candles.length - 1;
+    let structuralSL: number | null = null;
+
+    if (isBuy) {
+      for (let i = swingData.lowIndices.length - 1; i >= 0; i--) {
+        const idx = swingData.lowIndices[i];
+        const lv  = swingData.lows[i];
+        if (nLast - idx > 30) continue;           // too old — structure stale
+        if (lv >= currentPrice) continue;         // must sit below entry
+        structuralSL = lv - atr * 0.3;
+        break;
+      }
+    } else {
+      for (let i = swingData.highIndices.length - 1; i >= 0; i--) {
+        const idx = swingData.highIndices[i];
+        const hv  = swingData.highs[i];
+        if (nLast - idx > 30) continue;
+        if (hv <= currentPrice) continue;
+        structuralSL = hv + atr * 0.3;
+        break;
+      }
+    }
+
+    if (structuralSL != null) {
+      stopLoss = structuralSL;
+    } else {
+      // Fallback: mechanical ATR stop (structural anchor unavailable)
+      const slMultiplier = Math.abs(score) >= 6 ? 1.5 : 2;
+      stopLoss = isBuy ? currentPrice - slMultiplier * atr : currentPrice + slMultiplier * atr;
+    }
 
     const risk = Math.abs(currentPrice - stopLoss);
     // Technical TPs: nearest swing high/low beyond entry (fallback to R:R multiples)
@@ -1532,7 +1567,9 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
 
       if (!hasRejection && !prevRejected) continue;
 
-      const sl   = ob.low - atr * 0.3;
+      // SL just below the order block. Buffer 0.5 ATR — OB wicks get
+      // swept routinely, so a small cushion past structure is required.
+      const sl = ob.low - atr * 0.5;
       const risk = price - sl;
       if (risk <= 0) continue;
 
@@ -1572,7 +1609,8 @@ export function smcSignal(candles: OHLCV[]): SMCSignal {
 
       if (!hasRejection && !prevRejected) continue;
 
-      const sl   = ob.high + atr * 0.3;
+      // Symmetric to bullish OB: 0.5 ATR buffer past the supply zone.
+      const sl = ob.high + atr * 0.5;
       const risk = sl - price;
       if (risk <= 0) continue;
 
@@ -1905,6 +1943,8 @@ export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetest
     // TP: next major S/R level, or 2.5x risk minimum
 
     if (breakDirection === "up") {
+      // 1 ATR below the tested level — the broken-turned-support is the
+      // invalidation; ATR buffer accounts for retest overshoot.
       const sl  = lvlPrice - atr * 1.0;
       const risk = price - sl;
       if (risk <= 0) continue;
@@ -2031,6 +2071,7 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
   const highs   = candles.map(c => c.high);
   const rsiVals = calcRSI(closes, 14);
   const ema200v = ema(closes, 200);
+  const atr     = calcATR(candles);
 
   const n      = candles.length - 1;
   const price  = closes[n];
@@ -2050,8 +2091,10 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
 
       // Bullish divergence: price lower low + RSI higher low (RSI in oversold zone)
       if (priceLow1 < priceLow2 * 0.998 && rsiLow1 > rsiLow2 + 2 && rsiLow1 < 40) {
-        const sl   = priceLow1 * 0.995;
-        const risk = price - sl;
+        // Structural SL: below the divergence swing low + 0.5 ATR buffer.
+        // That swing low IS the invalidation — if broken, divergence failed.
+        const sl = priceLow1 - atr * 0.5;
+        const risk   = price - sl;
         if (risk <= 0 || risk / price > 0.05) break;
         // Confidence tiered by depth of oversold: deeper = stronger reversal signal
         const conf = rsiLow1 < 30 ? 80 : 72;
@@ -2080,8 +2123,10 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
 
       // Bearish divergence: price higher high + RSI lower high (RSI in overbought zone)
       if (priceHigh1 > priceHigh2 * 1.002 && rsiHigh1 < rsiHigh2 - 2 && rsiHigh1 > 60) {
-        const sl   = priceHigh1 * 1.005;
-        const risk = sl - price;
+        // Structural SL: above the divergence swing high + 0.5 ATR buffer.
+        // That swing high IS the invalidation — if broken, divergence failed.
+        const sl = priceHigh1 + atr * 0.5;
+        const risk   = sl - price;
         if (risk <= 0 || risk / price > 0.05) break;
         const conf = rsiHigh1 > 70 ? 80 : 72;
         const tTPs = findTechnicalTPs(candles, price, sl, false);
@@ -2251,20 +2296,24 @@ export function liquiditySweepSignal(candles: OHLCV[]): {
   const sc = best.candle;
   let entry: number, stopLoss: number, takeProfit: number, takeProfit2: number;
 
+  // SL beyond the swept wick with 0.5 ATR buffer. The swept wick IS the
+  // invalidation (price reclaimed the level = sweep thesis; breaking back
+  // through = thesis failed). 0.5 ATR cushion because sweeps occasionally
+  // produce follow-up wicks before the real reversal.
   if (best.direction === "bullish") {
     entry    = sc.close;
-    stopLoss = sc.low - atr * 0.15;
+    stopLoss = sc.low - atr * 0.5;
   } else {
     entry    = sc.close;
-    stopLoss = sc.high + atr * 0.15;
-  }
-  // Ensure SL is at least 0.5 ATR away (minimum meaningful stop)
-  if (Math.abs(entry - stopLoss) < atr * 0.5) {
-    stopLoss = best.direction === "bullish" ? entry - atr * 0.5 : entry + atr * 0.5;
+    stopLoss = sc.high + atr * 0.5;
   }
 
-  const risk   = Math.abs(entry - stopLoss);
+  const risk = Math.abs(entry - stopLoss);
   if (risk <= 0) return none;
+  // Signal-to-noise filter: if SL sits inside sub-ATR range, the sweep
+  // was too small to be statistically meaningful — reject rather than
+  // artificially widen (widening only enlarges losses on false signals).
+  if (risk < atr * 0.75) return none;
 
   // TPs: nearest structural swing level beyond entry (technically derived)
   const tTPs = findTechnicalTPs(candles, entry, stopLoss, best.direction === "bullish");
