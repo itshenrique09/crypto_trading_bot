@@ -30,7 +30,14 @@ export const liquiditySweepStrategy: Strategy = {
   //   UNI(+97) ICP(+65) AAVE(+65) PEPE(+63) INJ(+58) BCH(+56) FIL(+51) LTC(+51)
   //   ATOM(+51) AVAX(+48) XRP(+40) DOGE(+39) SOL(+32) ETC(+31) NEAR(+28) DOT(+24)
   //   SAND(+22) LINK(+15). Strategy is the MOST robust of the suite out-of-sample.
-  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK"],
+  // ── MEXC discovery Apr 2026 (top-100 liquid USDT perps, prod gate conf≥68):
+  //   🏆 LUNC T=49 WR=42.9% PF=2.99 net=+83%  (2025:+47  2026:+36) — confirmed
+  //   🏆 APT  T=57 WR=43.9% PF=2.04 net=+74%  (2025:+33  2026:+41) — confirmed
+  //   🏆 HBAR T=53 WR=43.4% PF=2.01 net=+60%  (2025:+31  2026:+29) — confirmed
+  //   ⚠️  ENA PF 3.06 T=39 (just below T≥40 threshold — re-test when more data)
+  //   ⚠️  WLD PF 2.76 T=34 (low trade count — re-test when more data)
+  //   ❌ SHIB/SPK/PAXG drop below PF 2 under conf≥68 production gate
+  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {
