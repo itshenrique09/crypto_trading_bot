@@ -57,6 +57,45 @@ function stdDev(data: number[], period: number, smaValues: number[]): number[] {
   return result;
 }
 
+// ─── Timeframe Resampling ────────────────────────────────────────
+// Aggregates lower-TF candles into higher-TF candles, aligned to UTC
+// boundaries. ratio=4 → 1H to 4H; ratio=24 → 1H to 1D. Partial trailing
+// bars are DROPPED (we only emit completed HTF candles) so the resulting
+// series is usable for EMA/trend filters without look-ahead bias from
+// an in-progress bar. Input must be sorted ascending by time.
+export function resampleCandles(candles: OHLCV[], ratio: number): OHLCV[] {
+  if (candles.length === 0 || ratio <= 1) return candles.slice();
+  if (candles.length < 2) return [];
+
+  const stepSec = (candles[1].time - candles[0].time) * ratio;
+  if (stepSec <= 0) return [];
+
+  const out: OHLCV[] = [];
+  let bucketStart = Math.floor(candles[0].time / stepSec) * stepSec;
+  let cur: OHLCV | null = null;
+  let count = 0;
+
+  for (const c of candles) {
+    const bs = Math.floor(c.time / stepSec) * stepSec;
+    if (bs !== bucketStart || cur === null) {
+      // flush previous completed bucket only if it had full `ratio` inputs
+      if (cur && count === ratio) out.push(cur);
+      bucketStart = bs;
+      cur = { time: bs, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume };
+      count = 1;
+    } else {
+      cur.high   = Math.max(cur.high, c.high);
+      cur.low    = Math.min(cur.low,  c.low);
+      cur.close  = c.close;
+      cur.volume += c.volume;
+      count++;
+    }
+  }
+  // drop the last bucket if partial (avoids look-ahead)
+  if (cur && count === ratio) out.push(cur);
+  return out;
+}
+
 // ─── Interfaces ──────────────────────────────────────────────────
 
 export interface IndicatorResult {
@@ -2088,6 +2127,12 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
 
   // Note: ADX filter tested empirically — RSI divergences naturally fire in
   // low-ADX environments, making an explicit ADX gate redundant here.
+  //
+  // NOTE: a 4H EMA50 HTF trend filter was A/B tested on the full 3.7y
+  // window (scripts/backtests/ab-rsi-div-htf.ts). Net result was NEGATIVE
+  // (netR +705 → +457, –35%). Divergences are reversal signals by design;
+  // requiring HTF trend-agreement turns them into continuation trades,
+  // which they're not built for. The 1H EMA200 filter alone is correct.
 
   // ── BULLISH DIVERGENCE → LONG (only in bull market) ──
   if (inBull) {
