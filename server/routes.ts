@@ -1877,6 +1877,31 @@ export async function registerRoutes(server: Server, app: Express) {
         strategyKellyPct.set(strat.id, kellyClamped);
       }
 
+      // ── PER-STRATEGY DRAWDOWN KILL-SWITCH ─────────────────────────
+      // Complements portfolio-level -4R daily / -8R monthly checks.
+      // Pauses an individual strategy in regime shift even when the
+      // overall portfolio is net positive (other strategies carrying).
+      // Trigger: ≥6 closed trades in last 7d AND netR < -3R.
+      // The ≥6 floor filters out random variance; low-freq strategies
+      // (B&R, SMC) rarely hit it and are less regime-sensitive anyway.
+      // Self-healing: re-evaluated each scan — auto-resumes as losses
+      // age past the 7d window or new wins rebalance the netR.
+      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const pausedStrategies = new Set<string>();
+      for (const strat of strategies) {
+        const recent = closedTrades.filter(e =>
+          e.strategy === strat.id &&
+          e.closed_at &&
+          new Date(e.closed_at).getTime() >= weekAgo
+        );
+        if (recent.length < 6) continue;
+        const netR = recent.reduce((s, e) => {
+          if (!e.pnl_usd || !e.risk_usd || e.risk_usd <= 0) return s;
+          return s + e.pnl_usd / e.risk_usd;
+        }, 0);
+        if (netR < -3) pausedStrategies.add(strat.id);
+      }
+
       // Track open trades per (symbol, strategy) to avoid duplicates
       const openPairs = new Set(
         paperTrades
@@ -1971,6 +1996,12 @@ export async function registerRoutes(server: Server, app: Express) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
                 continue;
               }
+            }
+
+            // ── Per-strategy drawdown kill-switch ──
+            if (pausedStrategies.has(strat.id)) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy paused: 7d netR < -3R (per-strategy drawdown kill-switch)` });
+              continue;
             }
 
             // Cooldown check — matches backtest COOLDOWN parameter
@@ -2546,6 +2577,25 @@ export async function registerRoutes(server: Server, app: Express) {
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       if (monthPnl < -8 * daily1R) return;  // Monthly DD limit: -8R
 
+      // ── PER-STRATEGY DRAWDOWN KILL-SWITCH (live) ───────────────────
+      // Same rule as paper: ≥6 closed trades in last 7d AND netR < -3R
+      // → pause that strategy until the rolling window recovers.
+      const weekAgoLive = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const pausedStrategiesLive = new Set<string>();
+      for (const strat of strategies) {
+        const recent = closedLive.filter(e =>
+          e.strategy === strat.id &&
+          e.closed_at &&
+          new Date(e.closed_at).getTime() >= weekAgoLive
+        );
+        if (recent.length < 6) continue;
+        const netR = recent.reduce((s, e) => {
+          if (!e.pnl_usd || !e.risk_usd || e.risk_usd <= 0) return s;
+          return s + e.pnl_usd / e.risk_usd;
+        }, 0);
+        if (netR < -3) pausedStrategiesLive.add(strat.id);
+      }
+
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
       const lastClosedAt = new Map<string, number>();
       for (const e of liveTrades) {
@@ -2613,6 +2663,12 @@ export async function registerRoutes(server: Server, app: Express) {
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
             if (strat.preferredSymbols?.length && !strat.preferredSymbols.includes(sym)) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
+              continue;
+            }
+
+            // ── Per-strategy drawdown kill-switch ──
+            if (pausedStrategiesLive.has(strat.id)) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy paused: 7d netR < -3R (per-strategy drawdown kill-switch)` });
               continue;
             }
 
