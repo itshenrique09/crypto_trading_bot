@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
@@ -7,7 +7,8 @@ import {
   Activity, TrendingUp, TrendingDown,
   BarChart3, Target, Clock, Zap,
   ArrowUpRight, ArrowDownRight,
-  CircleDot, Trophy, Percent, ChevronRight, LineChart
+  CircleDot, Trophy, Percent, ChevronRight, LineChart,
+  Play, Square, Loader2, Wallet, Settings2
 } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
@@ -36,6 +37,8 @@ interface StrategyStats {
 }
 
 export default function Dashboard() {
+  const queryClient = useQueryClient();
+
   const { data: paperStatus } = useQuery({
     queryKey: ["/api/paper/status"],
     queryFn: async () => (await apiRequest("GET", "/api/paper/status")).json(),
@@ -64,6 +67,21 @@ export default function Dashboard() {
     queryFn: async () => (await apiRequest("GET", "/api/paper/prices")).json(),
     refetchInterval: 10000,
     enabled: paperStatus?.running,
+  });
+
+  const { data: liveStatus } = useQuery({
+    queryKey: ["/api/live/status"],
+    queryFn: async () => (await apiRequest("GET", "/api/live/status")).json(),
+    refetchInterval: 10000,
+  });
+
+  const paperStartMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/paper/start", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
+  });
+  const paperStopMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/paper/stop", {})).json(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
   });
 
   const priceMap = new Map(paperPrices.map(p => [p.id, p]));
@@ -116,24 +134,91 @@ export default function Dashboard() {
     ? Math.min(...equityData.map(d => d.drawdown))
     : 0;
 
+  const cap = paperStatus?.capital;
+
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1400px]">
-      {/* Hero: Page header + engine summary (non-interactive) */}
+      {/* Hero: Title */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-lg font-bold tracking-tight">Dashboard</h1>
-          <p className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-1.5">
-            {running ? (
-              <><Activity className="w-3 h-3 text-emerald-400 animate-pulse" /><span className="text-emerald-400">Paper engine running</span> · {paperStatus?.coinsScanned || 0} coins scanned</>
-            ) : (
-              <><CircleDot className="w-3 h-3 text-muted-foreground/60" /><span className="text-muted-foreground/60">Paper engine stopped</span></>
-            )}
-          </p>
-        </div>
+        <h1 className="text-lg font-bold tracking-tight">Dashboard</h1>
         <Link href="/paper" className="text-[11px] text-muted-foreground hover:text-purple-400 transition-colors flex items-center gap-1">
-          {running ? "Manage engine" : "Start engine"} <ChevronRight className="w-3 h-3" />
+          <Settings2 className="w-3 h-3" /> Settings &amp; history
         </Link>
       </div>
+
+      {/* Engine Control Strip — actionable */}
+      <Card className={`border-border/30 overflow-hidden ${running ? "bg-emerald-500/[0.03] border-emerald-500/30" : ""}`}>
+        <div className="px-4 py-3 flex items-center gap-4 flex-wrap">
+          {/* Paper engine: status + action */}
+          <div className="flex items-center gap-3 min-w-[220px]">
+            <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${
+              running ? "bg-emerald-500/15 text-emerald-400" : "bg-card/60 text-muted-foreground"
+            }`}>
+              {running ? <Activity className="w-4 h-4 animate-pulse" /> : <CircleDot className="w-4 h-4" />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold leading-tight">Paper Engine</p>
+              <p className="text-[10px] text-muted-foreground/70 truncate">
+                {running ? `Scanning · ${paperStatus?.coinsScanned ?? 0} coins / cycle` : "Stopped"}
+              </p>
+            </div>
+            {running ? (
+              <button
+                onClick={() => paperStopMutation.mutate()}
+                disabled={paperStopMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 transition-colors font-semibold disabled:opacity-50"
+              >
+                {paperStopMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />} Stop
+              </button>
+            ) : (
+              <button
+                onClick={() => paperStartMutation.mutate()}
+                disabled={paperStartMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 transition-colors font-semibold disabled:opacity-50"
+              >
+                {paperStartMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Start
+              </button>
+            )}
+          </div>
+
+          <span className="text-border/40 hidden md:inline">│</span>
+
+          {/* Capital summary + Live pill — wraps cleanly on mobile */}
+          <div className="flex items-center gap-3 flex-wrap flex-1 md:justify-end">
+            {cap && (
+              <>
+                <div className="flex items-center gap-1.5 whitespace-nowrap">
+                  <Wallet className="w-3 h-3 text-emerald-400/60" />
+                  <span className="text-[10px] text-muted-foreground/60">Balance</span>
+                  <span className={`text-xs font-bold font-mono ${cap.balance >= cap.initial ? "text-emerald-400" : "text-red-400"}`}>
+                    €{cap.balance.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 whitespace-nowrap">
+                  <span className="text-[10px] text-muted-foreground/60">1R</span>
+                  <span className="text-xs font-bold font-mono text-amber-400">€{cap.oneR.toFixed(2)}</span>
+                </div>
+                <div className="flex items-center gap-1.5 whitespace-nowrap">
+                  <span className="text-[10px] text-muted-foreground/60">Today</span>
+                  <span className={`text-xs font-bold font-mono ${cap.todayR >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {cap.todayR >= 0 ? "+" : ""}{cap.todayR.toFixed(1)}R
+                  </span>
+                </div>
+              </>
+            )}
+            <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded-full border whitespace-nowrap ${
+              liveStatus?.running
+                ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                : liveStatus?.hasKeys
+                ? "bg-card/40 border-border/30 text-muted-foreground"
+                : "bg-card/30 border-border/20 text-muted-foreground/50"
+            }`}>
+              <Zap className="w-2.5 h-2.5" />
+              Live: {liveStatus?.running ? "active" : liveStatus?.hasKeys ? "ready" : "not set"}
+            </span>
+          </div>
+        </div>
+      </Card>
 
       {/* Key Metrics Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
