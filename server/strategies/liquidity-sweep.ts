@@ -10,6 +10,16 @@ export const liquiditySweepStrategy: Strategy = {
     "EMA200 macro filter (LONG in bull only). 2.5×/4× R:R. Best on FIL, PEPE, SAND, INJ, SUI, SOL.",
   interval: "1h",
   minCandles: 220,  // EMA200 seed (200) + signal window (80) buffer
+  // ── Apr 2026 — CONFIRMATION-BAR RULE added (pro stop-hunt discipline) ──
+  // A/B across all 21 preferredSymbols (3.7y, 1H, conf≥68):
+  //   netR +18.4% (3920 → 4640), trade count –16% (4963 → 4154)
+  //   ALL 21 coins improved PF, ZERO regressions. Biggest lifts:
+  //   PEPE 1.91→2.55  SOL 1.68→2.21  AVAX 1.93→2.40  UNI 1.80→2.24
+  //   ICP  1.44→1.87  SAND 1.37→1.77  ETC 1.42→1.77  DOT 2.10→2.45
+  //   Mechanism: "wait for the close" — sweeps at current bar need premium
+  //   quality (EQL/EQH + vol≥2× + wick≥1.5× body); sweeps at bar-1/-2 need
+  //   every subsequent close on the reversal side of the pool. Filters out
+  //   wick-noise where the sweep candle was followed by continuation.
   // ── 16000-candle 1H backtest (22 months, COOLDOWN=12h, technical TPs) ──
   //   With FVG confirmation filter (avg PF +0.18 across all preferred coins):
   //   ✅ SUI   PF=1.82 T=192 WR=43%  (was 1.25 baseline — largest improvement)
