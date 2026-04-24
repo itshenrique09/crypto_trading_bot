@@ -807,6 +807,14 @@ export function analyzeIndicators(candles: OHLCV[]): IndicatorResult {
 //   BUY/SELL:        ±3
 //   HOLD:            -2.9 to +2.9
 
+// NOTE: A/B tested Apr 2026 — required OBV trend agreement as a HARD post-filter
+// (obvTrend==="rising" for BUY, "falling" for SELL). Aggregate across 12 coins
+// improved +13R (−19 → −6) BUT on the 6 walk-forward-selected prod coins
+// (DOGE/AVAX/XRP/ICP/ETH/BNB) net change was −1.4R — DOGE/BNB hurt, XRP/ICP
+// helped, AVAX/ETH neutral. Lift driven by non-prod coins. Since the prod
+// universe was walk-forward-selected WITHOUT this gate, imposing it disturbs
+// the per-coin calibration. Current score≥4 threshold with volume as ±1 of
+// the scoring is correctly tuned for the selected universe.
 export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): TradeSignal {
   const currentPrice = candles[candles.length - 1].close;
   let score = 0;
@@ -1465,6 +1473,16 @@ export interface SMCSignal {
 }
 
 export function smcSignal(candles: OHLCV[]): SMCSignal {
+  // NOTE: "unmitigated OB" and "not-invalidated OB" freshness filters were
+  // both A/B tested across 12 coins (3 prod + 9 previously-dropped).
+  // Both degraded performance significantly:
+  //   baseline      T=427 netR=+423
+  //   not-invalid   T=182 netR=+83   (-80% netR)
+  //   untouched     T=20  netR=+47   (-95% trades)
+  // DOGE (top producer) fell from PF 1.71 → 0.39 under not-invalidated.
+  // The existing BOS + rejection + RR filters already select valid retests;
+  // adding OB-freshness over-filters and removes the winning setups.
+
   const none: SMCSignal = {
     type: "NONE", entry: 0, stopLoss: 0, takeProfit: 0, takeProfit2: 0,
     confidence: 0, reason: "", structure: "none",
@@ -1730,6 +1748,18 @@ export interface BreakRetestSignal {
 }
 
 export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetestSignal {
+  // NOTE: A/B tested Apr 2026 — two pro-trader variants rejected:
+  //   1. requireQuietRetest (hard filter on retestVol<breakVol): -7.5% netR
+  //      across 11 coins. The filter rarely triggers (volume ratio already
+  //      captured via confidence bonus); as a hard gate it removes few trades
+  //      but some were winners. Keep it as the +8 confidence bonus only.
+  //   2. maxRetestBars=12 (tighten from 18): +16% aggregate netR but driven
+  //      entirely by BTC (non-preferred). On the 3 production coins
+  //      (SOL/SAND/BNB) net change is -0.5R — neutral. Per-coin split was
+  //      6 better / 5 worse, not uniform. Not worth the ~33% trade-count loss.
+  //   Conclusion: 3-18 bar retest window and soft quiet-retest scoring are
+  //   correctly tuned. Existing volume/body/trend filters already select
+  //   clean retests on this strategy's natural universe.
   // ── PROFESSIONAL BREAK & RETEST ─────────────────────────────────
   //
   // Rules (as a discretionary trader would apply):
@@ -2129,10 +2159,17 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
   // low-ADX environments, making an explicit ADX gate redundant here.
   //
   // NOTE: a 4H EMA50 HTF trend filter was A/B tested on the full 3.7y
-  // window (scripts/backtests/ab-rsi-div-htf.ts). Net result was NEGATIVE
-  // (netR +705 → +457, –35%). Divergences are reversal signals by design;
-  // requiring HTF trend-agreement turns them into continuation trades,
-  // which they're not built for. The 1H EMA200 filter alone is correct.
+  // window. Net result was NEGATIVE (netR +705 → +457, –35%). Divergences
+  // are reversal signals by design; requiring HTF trend-agreement turns
+  // them into continuation trades, which they're not built for. The 1H
+  // EMA200 filter alone is correct.
+  //
+  // NOTE: tighter magnitude (priceGap ≥ 0.5%, rsiGap ≥ 4pts) and a
+  // "recovery started" filter (current close above divergence low) were
+  // both tested. Recovery filter = neutral (argmin of last 6 bars is rarely
+  // the current bar at signal time anyway). Tighter magnitude = -25% netR
+  // across the 9 preferredSymbols — removes genuine marginal divergences
+  // that WERE profitable. Current thresholds (0.2% / 2pts) are well tuned.
 
   // ── BULLISH DIVERGENCE → LONG (only in bull market) ──
   if (inBull) {
