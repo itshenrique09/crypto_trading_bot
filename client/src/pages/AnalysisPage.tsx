@@ -39,7 +39,6 @@ export default function AnalysisPage() {
   const [, analyzeParams] = useRoute("/analyze/:symbol");
   const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
   const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest" | "rsi-divergence">("confluence-swing");
-  const [backtestRequested, setBacktestRequested] = useState(false);
   const [signalLogged, setSignalLogged] = useState(false);
 
   const logSignalMutation = useMutation({
@@ -89,7 +88,6 @@ export default function AnalysisPage() {
       const res = await apiRequest("GET", backtestEndpoints[backtestTab]);
       return res.json();
     },
-    enabled: backtestRequested,
   });
 
   if (error) {
@@ -614,39 +612,28 @@ export default function AnalysisPage() {
                 <FlaskConical className="w-4 h-4 text-purple-400" />
                 <span className="text-xs font-bold">Backtesting</span>
               </div>
-              <div className="flex items-center gap-2">
-                {/* Strategy tabs for backtest */}
-                <div className="flex items-center bg-card/40 border border-border/20 rounded-lg p-0.5">
-                  {[
-                    { id: "confluence-swing" as const, label: "Confluence Swing" },
-                    { id: "smc" as const, label: "SMC" },
-                    { id: "break-retest" as const, label: "Break & Retest" },
-                    { id: "rsi-divergence" as const, label: "RSI Divergence" },
-                  ].map(tab => {
-                    const sc = getStratColor(tab.id);
-                    return (
-                      <button
-                        key={tab.id}
-                        onClick={() => { setBacktestTab(tab.id); setBacktestRequested(true); }}
-                        className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${
-                          backtestTab === tab.id && backtestRequested
-                            ? `${sc.bg} ${sc.text}`
-                            : "text-muted-foreground/50 hover:text-foreground"
-                        }`}
-                      >
-                        {tab.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                {!backtestRequested && (
-                  <button
-                    onClick={() => setBacktestRequested(true)}
-                    className="text-xs px-3 py-1.5 rounded-md bg-purple-500/20 border border-purple-500/40 text-purple-300 hover:bg-purple-500/30 transition-colors font-medium"
-                  >
-                    Run
-                  </button>
-                )}
+              <div className="flex items-center bg-card/40 border border-border/20 rounded-lg p-0.5">
+                {[
+                  { id: "confluence-swing" as const, label: "Confluence Swing" },
+                  { id: "smc" as const, label: "SMC" },
+                  { id: "break-retest" as const, label: "Break & Retest" },
+                  { id: "rsi-divergence" as const, label: "RSI Divergence" },
+                ].map(tab => {
+                  const sc = getStratColor(tab.id);
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setBacktestTab(tab.id)}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${
+                        backtestTab === tab.id
+                          ? `${sc.bg} ${sc.text}`
+                          : "text-muted-foreground/50 hover:text-foreground"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -727,11 +714,6 @@ export default function AnalysisPage() {
               </>
             )}
 
-            {!backtestRequested && (
-              <p className="text-[10px] text-muted-foreground">
-                Select a strategy and click Run to backtest {symbol.toUpperCase()} with that strategy's signal logic.
-              </p>
-            )}
           </Card>
         </div>
       </main>
