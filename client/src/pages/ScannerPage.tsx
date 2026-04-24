@@ -3,12 +3,13 @@ import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, Eye, Flame, Zap, TrendingUp, TrendingDown, ChevronRight } from "lucide-react";
+import { Search, Eye, Zap, Activity, ArrowUpRight, ArrowDownRight, ChevronRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { formatPrice, formatCompact, formatPercent, getChangeColor } from "@/lib/utils";
 import { useState } from "react";
 import MiniSparkline from "@/components/MiniSparkline";
-import type { CoinData } from "@/lib/types";
+import type { CoinData, JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
+import { getStratColor } from "@/lib/types";
 
 export default function ScannerPage() {
   const [search, setSearch] = useState("");
@@ -20,13 +21,41 @@ export default function ScannerPage() {
     refetchInterval: 60000,
   });
 
-  const topVolume = coins ? coins.slice(0, 25) : [];
-  const topMovers = coins
-    ? [...coins].sort((a, b) => Math.abs(b.change24h || 0) - Math.abs(a.change24h || 0)).slice(0, 8)
-    : [];
+  // Active signals = open paper positions (the bot's live bets)
+  const { data: journal } = useQuery<JournalEntry[]>({
+    queryKey: ["/api/journal"],
+    queryFn: async () => (await apiRequest("GET", "/api/journal")).json(),
+    refetchInterval: 30000,
+  });
+
+  const { data: livePrices } = useQuery<PaperPrice[]>({
+    queryKey: ["/api/paper/prices"],
+    queryFn: async () => (await apiRequest("GET", "/api/paper/prices")).json(),
+    refetchInterval: 10000,
+  });
+
+  const { data: strategies } = useQuery<StrategyInfo[]>({
+    queryKey: ["/api/strategies"],
+    queryFn: async () => (await apiRequest("GET", "/api/strategies")).json(),
+    staleTime: 5 * 60_000,
+  });
+
+  const stratName = (id: string) =>
+    strategies?.find(s => s.id === id)?.name ?? id;
+
+  const openPaper = (journal ?? []).filter(e => e.mode === "paper" && e.outcome === "open");
+  const priceById = new Map((livePrices ?? []).map(p => [p.id, p]));
+
+  // Sort: biggest absolute PnL first → draws eye to what's moving
+  const activeSignals = openPaper
+    .map(t => ({ trade: t, live: priceById.get(t.id) }))
+    .sort((a, b) => Math.abs(b.live?.unrealizedPnl ?? 0) - Math.abs(a.live?.unrealizedPnl ?? 0));
+
   const hotCoins = coins
     ? [...coins].filter(c => Math.abs(c.change1h || 0) > 1).sort((a, b) => Math.abs(b.change1h || 0) - Math.abs(a.change1h || 0)).slice(0, 6)
     : [];
+
+  const topVolume = coins ? coins.slice(0, 25) : [];
 
   const filtered = search
     ? coins?.filter(c =>
@@ -75,6 +104,79 @@ export default function ScannerPage() {
           ))}
         </Card>
       )}
+
+      {/* ── ACTIVE SIGNALS — leads the page: what the bot is trading NOW ── */}
+      <Card className="border-border/30 overflow-hidden">
+        <div className="px-4 md:px-5 py-3 border-b border-border/20 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-purple-400" />
+            <h2 className="text-sm font-bold">Active Signals</h2>
+            <span className="text-[10px] text-muted-foreground/50 ml-1">
+              {activeSignals.length === 0 ? "no open positions" : `${activeSignals.length} open`}
+            </span>
+          </div>
+          <Link href="/paper" className="text-[11px] text-purple-400/80 hover:text-purple-300 transition-colors flex items-center gap-1">
+            Paper <ChevronRight className="w-3 h-3" />
+          </Link>
+        </div>
+        {activeSignals.length === 0 ? (
+          <div className="px-4 md:px-5 py-8 text-center">
+            <p className="text-[12px] text-muted-foreground/60">
+              Bot is scanning. No strategy has fired yet — signals appear here when trades open.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-px bg-border/10">
+            {activeSignals.map(({ trade, live }) => {
+              const color = getStratColor(trade.strategy);
+              const isLong = trade.direction === "LONG";
+              const pnl = live?.unrealizedPnl ?? 0;
+              const progress = live?.progressPct ?? 0;
+              const slProgress = live?.slProgress ?? 0;
+              return (
+                <button
+                  key={trade.id}
+                  onClick={() => setLocation(`/market/${trade.symbol}`)}
+                  className="group text-left bg-card/40 hover:bg-card/70 transition-colors p-3 flex flex-col gap-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[13px] font-bold tracking-tight">{trade.symbol}</span>
+                    <span className={`flex items-center gap-0.5 text-[10px] font-bold ${isLong ? "text-emerald-400" : "text-red-400"}`}>
+                      {isLong ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                      {trade.direction}
+                    </span>
+                  </div>
+                  <div className={`inline-flex self-start px-1.5 py-0.5 rounded text-[9px] font-semibold ${color.bg} ${color.text} border ${color.border}`}>
+                    {stratName(trade.strategy)}
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[11px] text-muted-foreground/60 font-mono">
+                      ${formatPrice(live?.currentPrice ?? trade.entry_price)}
+                    </span>
+                    <span className={`text-[12px] font-mono font-bold ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%
+                    </span>
+                  </div>
+                  {/* Progress bar — green toward TP, red toward SL */}
+                  <div className="h-1 bg-border/20 rounded-full overflow-hidden relative">
+                    {progress > 0 ? (
+                      <div
+                        className="h-full bg-emerald-400/70 transition-all"
+                        style={{ width: `${Math.min(100, progress)}%` }}
+                      />
+                    ) : slProgress > 0 ? (
+                      <div
+                        className="h-full bg-red-400/70 transition-all"
+                        style={{ width: `${Math.min(100, slProgress)}%` }}
+                      />
+                    ) : null}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Card>
 
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-5">
         {/* Main Table — 3 cols */}
@@ -154,9 +256,9 @@ export default function ScannerPage() {
           </Card>
         </div>
 
-        {/* Sidebar */}
+        {/* Sidebar — compacted: Quick Analyze + Moving Now only */}
         <div className="space-y-5">
-          {/* Quick Analyze */}
+          {/* Quick Analyze — kept because it's fast navigation, not decorative */}
           <Card className="border-border/20 p-4">
             <div className="flex items-center gap-2 mb-3">
               <Eye className="w-4 h-4 text-purple-400" />
@@ -171,37 +273,7 @@ export default function ScannerPage() {
             </div>
           </Card>
 
-          {/* 24h Movers */}
-          <Card className="border-border/20 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Flame className="w-4 h-4 text-orange-400" />
-              <span className="text-sm font-bold">24h Movers</span>
-            </div>
-            {isLoading ? (
-              <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-10" />)}</div>
-            ) : (
-              <div className="space-y-0.5">
-                {topMovers.map(coin => (
-                  <Link key={coin.symbol} href={`/market/${coin.symbol}`} className="flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-card/40 transition-colors group">
-                    <div className="flex items-center gap-2">
-                      {(coin.change24h || 0) > 0
-                        ? <TrendingUp className="w-3 h-3 text-emerald-400/60" />
-                        : <TrendingDown className="w-3 h-3 text-red-400/60" />
-                      }
-                      <span className="text-xs font-bold group-hover:text-purple-400 transition-colors">{coin.symbol}</span>
-                    </div>
-                    <span className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded ${
-                      (coin.change24h || 0) > 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"
-                    }`}>
-                      {formatPercent(coin.change24h)}
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          {/* Moving Now */}
+          {/* Moving Now — volatility often precedes signals, keep it */}
           <Card className="border-border/20 p-4">
             <div className="flex items-center gap-2 mb-3">
               <Zap className="w-4 h-4 text-yellow-400" />
@@ -211,7 +283,7 @@ export default function ScannerPage() {
             {isLoading ? (
               <div className="space-y-2">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-10" />)}</div>
             ) : hotCoins.length === 0 ? (
-              <p className="text-[11px] text-muted-foreground/40 py-4 text-center">No coins moving &gt;1% right now</p>
+              <p className="text-[11px] text-muted-foreground/40 py-4 text-center">Calm market — no 1h moves &gt;1%</p>
             ) : (
               <div className="space-y-0.5">
                 {hotCoins.map(coin => (
