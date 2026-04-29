@@ -10,7 +10,18 @@ import {
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, calcATRPercentile, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
-import { getMexcClient, toMexcSymbol } from "./mexc-client";
+import { defaultEnabledStrategyIds } from "./strategy-settings";
+import { dropOpenCandle } from "./candles";
+import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, type MexcContractTicker } from "./mexc-market";
+import { getRuntimeInfo } from "./runtime-info";
+import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
+import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
+import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
+import { directionToPositionType, planLiveReconciliation } from "./live-reconciliation";
+import { buildLiveTp1JournalUpdate } from "./live-protection";
+import { validateLiveStartConnection } from "./live-start";
+import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting } from "./trade-accounting";
+import { simulateManagedExit } from "./trade-exits";
 import crypto from "crypto";
 
 // Derive a 32-byte key from APP_PASSWORD (or a fixed fallback for dev)
@@ -36,6 +47,15 @@ function decryptValue(ciphertext: string): string {
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
 const MEXC_BASE = "https://api.mexc.com/api/v3";
+const MEXC_CONTRACT_BASE = "https://contract.mexc.com";
+const TP1_PARTIAL_CLOSE_PCT = 0.6;
+const TAKER_FEE_PCT = 0.0002;
+const SLIPPAGE_PCT = 0.0005;
+const TRADE_COSTS = { takerFeePct: TAKER_FEE_PCT, slippagePct: SLIPPAGE_PCT };
+
+function normalizeDirection(direction: string): "LONG" | "SHORT" {
+  return direction === "SHORT" ? "SHORT" : "LONG";
+}
 
 // Default strategy ID — used as fallback when strategy field is missing (legacy entries)
 const DEFAULT_STRATEGY = "confluence-swing";
@@ -127,9 +147,10 @@ async function cgFetch(url: string) {
 // Binance public market data — no API key, generous rate limits
 async function fetchBinanceKlines(symbol: string, interval: string, limit: number): Promise<OHLCV[]> {
   const pair = getBinanceSymbol(symbol);
-  const url = `${BINANCE_BASE}/klines?symbol=${pair}&interval=${interval}&limit=${limit}`;
+  const fetchLimit = Math.min(limit + 1, 1000);
+  const url = `${BINANCE_BASE}/klines?symbol=${pair}&interval=${interval}&limit=${fetchLimit}`;
   const data: any[][] = await fetchJSON(url);
-  return data.map(k => ({
+  const candles = data.map(k => ({
     time:   k[0] / 1000,
     open:   parseFloat(k[1]),
     high:   parseFloat(k[2]),
@@ -137,6 +158,7 @@ async function fetchBinanceKlines(symbol: string, interval: string, limit: numbe
     close:  parseFloat(k[4]),
     volume: parseFloat(k[5]),
   }));
+  return dropOpenCandle(candles, interval).slice(-limit);
 }
 
 // Paginated fetch — retrieves multiple batches to get large historical datasets
@@ -146,7 +168,8 @@ async function fetchBinanceKlinesPaginated(symbol: string, interval: string, tot
   const candles: OHLCV[] = [];
   let endTime: number | undefined;
   const batchSize = 1000;
-  const batches = Math.ceil(total / batchSize);
+  const target = total + 1;
+  const batches = Math.ceil(target / batchSize);
 
   for (let b = 0; b < batches; b++) {
     const qs = `symbol=${pair}&interval=${interval}&limit=${batchSize}` +
@@ -165,7 +188,82 @@ async function fetchBinanceKlinesPaginated(symbol: string, interval: string, tot
     if (data.length < batchSize) break;
     endTime = data[0][0] - 1;  // fetch older batch next iteration
   }
-  return candles;
+  return dropOpenCandle(candles, interval).slice(-total);
+}
+
+type MexcKlineResponse = {
+  success?: boolean;
+  code?: number;
+  message?: string;
+  data?: unknown;
+};
+
+async function fetchMexcFuturesKlinesBatch(symbol: string, interval: string, end?: number): Promise<OHLCV[]> {
+  const mexcInterval = toMexcContractInterval(interval);
+  if (!mexcInterval) throw new Error(`Unsupported MEXC contract interval: ${interval}`);
+
+  const qs = new URLSearchParams({ interval: mexcInterval });
+  if (end) qs.set("end", String(end));
+  const url = `${MEXC_CONTRACT_BASE}/api/v1/contract/kline/${toMexcSymbol(symbol)}?${qs.toString()}`;
+  const res = await fetchJSON(url) as MexcKlineResponse;
+  if (res.success === false || !res.data) {
+    throw new Error(`MEXC kline error ${res.code ?? ""}: ${res.message ?? "missing data"}`);
+  }
+  return parseMexcKlineData(res.data as Parameters<typeof parseMexcKlineData>[0]);
+}
+
+async function fetchMexcFuturesKlines(symbol: string, interval: string, limit: number): Promise<OHLCV[]> {
+  const candles = await fetchMexcFuturesKlinesBatch(symbol, interval);
+  return dropOpenCandle(candles, interval).slice(-limit);
+}
+
+async function fetchMexcFuturesKlinesPaginated(symbol: string, interval: string, total: number): Promise<OHLCV[]> {
+  const candles: OHLCV[] = [];
+  let end: number | undefined;
+  const target = total + 1;
+  const maxBatches = Math.ceil(target / 2000) + 1;
+
+  for (let b = 0; b < maxBatches && candles.length < target; b++) {
+    const batch = await fetchMexcFuturesKlinesBatch(symbol, interval, end);
+    if (batch.length === 0) break;
+    candles.unshift(...batch);
+    if (batch.length < 2000) break;
+    end = batch[0].time - 1;
+  }
+
+  return dropOpenCandle(candles, interval).slice(-total);
+}
+
+async function fetchStrategyKlines(symbol: string, interval: string, limit: number): Promise<OHLCV[]> {
+  try {
+    return await fetchMexcFuturesKlines(symbol, interval, limit);
+  } catch (err: any) {
+    console.error(`[market-data] MEXC futures klines failed for ${symbol}/${interval}; falling back to Binance:`, err?.message ?? err);
+    return fetchBinanceKlines(symbol, interval, limit);
+  }
+}
+
+async function fetchStrategyKlinesPaginated(symbol: string, interval: string, total: number): Promise<OHLCV[]> {
+  try {
+    return await fetchMexcFuturesKlinesPaginated(symbol, interval, total);
+  } catch (err: any) {
+    console.error(`[market-data] MEXC futures historical klines failed for ${symbol}/${interval}; falling back to Binance:`, err?.message ?? err);
+    return fetchBinanceKlinesPaginated(symbol, interval, total);
+  }
+}
+
+async function fetchMexcContractTickerMaps() {
+  const res = await fetchJSON(`${MEXC_CONTRACT_BASE}/api/v1/contract/ticker`) as {
+    success?: boolean;
+    code?: number;
+    message?: string;
+    data?: MexcContractTicker[] | MexcContractTicker;
+  };
+  if (res.success === false || !res.data) {
+    throw new Error(`MEXC contract ticker error ${res.code ?? ""}: ${res.message ?? "missing data"}`);
+  }
+  const tickers = Array.isArray(res.data) ? res.data : [res.data];
+  return buildMexcContractTickerMaps(tickers);
 }
 
 const insertWatchlistSchema = z.object({
@@ -187,6 +285,8 @@ const insertJournalSchema = z.object({
   followed:      z.enum(["pending", "yes", "no"]).optional(),
   notes:         z.string().max(2000).optional(),
   position_size_usd: z.number().positive().optional(),
+  remaining_position_size_usd: z.number().nonnegative().optional(),
+  realized_pnl_usd: z.number().optional(),
   risk_usd:      z.number().positive().optional(),
 }).refine(d => {
   if (d.direction === "LONG")  return d.stop_loss < d.entry_price && d.take_profit1 > d.entry_price;
@@ -207,6 +307,10 @@ export async function registerRoutes(server: Server, app: Express) {
     if (s.length < 2 || s.length > 20) return null;
     return s;
   }
+
+  app.get("/api/runtime", (_req, res) => {
+    res.json(getRuntimeInfo());
+  });
 
 
   // ── Market Scanner (MEXC data) ───────────────────────────────────
@@ -327,7 +431,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
       const [info, candles] = await Promise.all([
         cgFetch(`${COINGECKO_BASE}/coins/${id}?localization=false&tickers=false&community_data=false&developer_data=false`),
-        fetchBinanceKlines(symbol, "1d", Math.min(days + 5, 200)),
+        fetchStrategyKlines(symbol, "1d", Math.min(days + 5, 200)),
       ]);
 
       res.json({
@@ -370,10 +474,10 @@ export async function registerRoutes(server: Server, app: Express) {
       // 1H: Swing signal generation (needs 250+ for EMA200 seed)
       // 4H: chart display + B&R/SMC context (needs ≥150 for EMA200)
       const [candles1h, candles4h, candles1d, candles15m] = await Promise.all([
-        fetchBinanceKlines(symbol, "1h",  260),   // primary Swing signal (1H — matches live strategy)
-        fetchBinanceKlines(symbol, "4h",  300),   // chart display + EMA200 context
-        fetchBinanceKlines(symbol, "1d",  100),   // trend filter
-        fetchBinanceKlines(symbol, "15m", 200),   // entry refinement
+        fetchStrategyKlines(symbol, "1h",  260),  // primary Swing signal (1H — matches live strategy)
+        fetchStrategyKlines(symbol, "4h",  300),  // chart display + EMA200 context
+        fetchStrategyKlines(symbol, "1d",  100),  // trend filter
+        fetchStrategyKlines(symbol, "15m", 200),  // entry refinement
       ]);
 
       const swingCandles = candles1h.length >= 250 ? candles1h : candles4h;
@@ -478,8 +582,8 @@ export async function registerRoutes(server: Server, app: Express) {
       const symbol = validateSymbol(req.params.symbol);
       if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
       const [candles1h, candles4h] = await Promise.all([
-        fetchBinanceKlines(symbol, "1h", 260),   // 260 → EMA200 reliable, covers DIV_RANGE
-        fetchBinanceKlines(symbol, "4h", 400),   // 400 → EMA200 seed ~2% (reliable)
+        fetchStrategyKlines(symbol, "1h", 260),  // 260 → EMA200 reliable, covers DIV_RANGE
+        fetchStrategyKlines(symbol, "4h", 400),  // 400 → EMA200 seed ~2% (reliable)
       ]);
       if (candles4h.length < 150) {
         return res.status(400).json({ error: "Not enough data" });
@@ -573,7 +677,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const COOLDOWN = 20;   // 20h cooldown — matches live cooldownHours=20
 
       // 8000 1H candles ≈ 333 days (≈1 year) — fast web response, statistically useful
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
+      const allCandles = await fetchStrategyKlinesPaginated(symbol, "1h", 8000);
 
       if (allCandles.length < WINDOW + FORWARD + 10) {
         return res.status(400).json({ error: "Not enough historical data for backtest" });
@@ -594,54 +698,27 @@ export async function registerRoutes(server: Server, app: Express) {
 
         // Only STRONG signals (score ≥ ±6) — matches live strategy in v2-swing.ts
         // Macro filter is now built into generateSignal() — no separate check needed
-        if (signal.type !== "STRONG_BUY" && signal.type !== "STRONG_SELL") continue;
-        if (!signal.entry || !signal.stopLoss || !signal.takeProfit1 || !signal.takeProfit2) continue;
+        if (!isConfluenceBacktestEligible(signal) || !signal.takeProfit2) continue;
+        const entry = signal.entry!;
+        const stopLoss = signal.stopLoss!;
+        const takeProfit1 = signal.takeProfit1!;
+        const takeProfit2 = signal.takeProfit2;
 
         lastTradeIdx = i;
-        const isBuy  = signal.type === "STRONG_BUY";
+        const isBuy  = confluenceBacktestDirection(signal) === "LONG";
         const future = allCandles.slice(i + 1, i + 1 + FORWARD);
 
-        let outcome: "tp1" | "tp2" | "loss" | "pending" = "pending";
-        let barsToOutcome = FORWARD;
-        let hitTp1 = false;
+        const exit = simulateManagedExit({
+          direction: isBuy ? "LONG" : "SHORT",
+          entry,
+          stopLoss,
+          takeProfit1,
+          takeProfit2,
+        }, future);
 
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isBuy) {
-            if (c.low <= signal.stopLoss)     { outcome = hitTp1 ? "tp1" : "loss"; barsToOutcome = j + 1; break; }
-            if (!hitTp1 && c.high >= signal.takeProfit1) hitTp1 = true;
-            if (c.high >= signal.takeProfit2) { outcome = "tp2"; barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= signal.stopLoss)    { outcome = hitTp1 ? "tp1" : "loss"; barsToOutcome = j + 1; break; }
-            if (!hitTp1 && c.low <= signal.takeProfit1) hitTp1 = true;
-            if (c.low <= signal.takeProfit2)  { outcome = "tp2"; barsToOutcome = j + 1; break; }
-          }
-        }
-
-        if (outcome === "pending" && hitTp1) outcome = "tp1";
-
-        const risk      = Math.abs(signal.entry - signal.stopLoss);
-        const tp1Reward = Math.abs(signal.takeProfit1 - signal.entry);
-        const tp2Reward = Math.abs(signal.takeProfit2 - signal.entry);
-
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss" | "pending";
-        if (outcome === "tp2") {
-          pnlPct = (tp2Reward / signal.entry) * 100;
-          outcomeLabel = "win";
-        } else if (outcome === "tp1") {
-          pnlPct = (tp1Reward / signal.entry) * 100;
-          outcomeLabel = "win";
-        } else if (outcome === "loss") {
-          pnlPct = -(risk / signal.entry) * 100;
-          outcomeLabel = "loss";
-        } else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : signal.entry;
-          pnlPct = isBuy
-            ? ((exitPrice - signal.entry) / signal.entry) * 100
-            : ((signal.entry - exitPrice) / signal.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
+        const pnlPct = exit.netPnlPct;
+        const outcomeLabel: "win" | "loss" = pnlPct >= 0 ? "win" : "loss";
+        const barsToOutcome = exit.barsHeld || FORWARD;
 
         // Compound return
         const posRisk = signal.positionSizePct / 100;
@@ -652,7 +729,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
         // Duration label (1H bars → hours)
         const durationLabel = barsToOutcome === 1 ? "1h" : `${barsToOutcome}h`;
-        const hitLevel = outcome;
+        const hitLevel = exit.outcome;
 
         trades.push({
           time:             allCandles[i].time,
@@ -666,6 +743,9 @@ export async function registerRoutes(server: Server, app: Express) {
           durationLabel,
           confluenceScore:  signal.confluenceScore,
           hitLevel,
+          grossPnlPct:      Math.round(exit.grossPnlPct * 100) / 100,
+          costPct:          Math.round(exit.costPct * 100) / 100,
+          rMultiple:        Math.round(exit.netR * 100) / 100,
         });
       }
 
@@ -740,7 +820,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const ZONE_PCT       = 0.008; // 0.8% price zone grouping for cooldown key
 
       // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone script
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
+      const allCandles = await fetchStrategyKlinesPaginated(symbol, "4h", 8000);
 
       if (allCandles.length < WINDOW + TIME_STOP + 10) {
         return res.status(400).json({ error: "Not enough 4H data for SMC backtest" });
@@ -773,38 +853,17 @@ export async function registerRoutes(server: Server, app: Express) {
         const isLong = sig.type === "LONG";
         const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
 
-        let outcome: "tp" | "sl" | "timeout" = "timeout";
-        let barsToOutcome = TIME_STOP;
+        const exit = simulateManagedExit({
+          direction: isLong ? "LONG" : "SHORT",
+          entry: sig.entry,
+          stopLoss: sig.stopLoss,
+          takeProfit1: sig.takeProfit,
+          takeProfit2: sig.takeProfit,
+        }, future, { tp1ClosePct: 1 });
 
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isLong) {
-            if (c.low <= sig.stopLoss)     { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit)  { outcome = "tp"; barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= sig.stopLoss)    { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.low <= sig.takeProfit)   { outcome = "tp"; barsToOutcome = j + 1; break; }
-          }
-        }
-
-        const risk = Math.abs(sig.entry - sig.stopLoss);
-        const reward = Math.abs(sig.takeProfit - sig.entry);
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss";
-
-        if (outcome === "tp") {
-          pnlPct = (reward / sig.entry) * 100;
-          outcomeLabel = "win";
-        } else if (outcome === "sl") {
-          pnlPct = -(risk / sig.entry) * 100;
-          outcomeLabel = "loss";
-        } else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
-          pnlPct = isLong
-            ? ((exitPrice - sig.entry) / sig.entry) * 100
-            : ((sig.entry - exitPrice) / sig.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
+        const barsToOutcome = exit.barsHeld || TIME_STOP;
+        const pnlPct = exit.netPnlPct;
+        const outcomeLabel: "win" | "loss" = pnlPct >= 0 ? "win" : "loss";
 
         const posRisk = 0.01;
         const equityPnl = equity * (pnlPct / 100) * posRisk * 100;
@@ -827,7 +886,10 @@ export async function registerRoutes(server: Server, app: Express) {
           barsToOutcome,
           durationLabel,
           confluenceScore: Math.round(sig.confidence / 10),
-          hitLevel:        outcome,
+          hitLevel:        exit.outcome,
+          grossPnlPct:     Math.round(exit.grossPnlPct * 100) / 100,
+          costPct:         Math.round(exit.costPct * 100) / 100,
+          rMultiple:       Math.round(exit.netR * 100) / 100,
           structure:       sig.structure,
         });
       }
@@ -902,7 +964,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const ZONE_PCT       = 0.008; // 0.8% price zone grouping for cooldown
 
       // 8000 4H candles ≈ 1333 days (3.7 years) — same as standalone script
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "4h", 8000);
+      const allCandles = await fetchStrategyKlinesPaginated(symbol, "4h", 8000);
 
       if (allCandles.length < WINDOW + TIME_STOP + 10) {
         return res.status(400).json({ error: "Not enough 4H data for break & retest backtest" });
@@ -937,38 +999,17 @@ export async function registerRoutes(server: Server, app: Express) {
         const isLong = sig.type === "LONG";
         const future = allCandles.slice(i + 1, i + 1 + TIME_STOP);
 
-        let outcome: "tp" | "sl" | "timeout" = "timeout";
-        let barsToOutcome = TIME_STOP;
+        const exit = simulateManagedExit({
+          direction: isLong ? "LONG" : "SHORT",
+          entry: sig.entry,
+          stopLoss: sig.stopLoss,
+          takeProfit1: sig.takeProfit,
+          takeProfit2: sig.takeProfit,
+        }, future, { tp1ClosePct: 1 });
 
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isLong) {
-            if (c.low <= sig.stopLoss)     { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit)  { outcome = "tp"; barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= sig.stopLoss)    { outcome = "sl"; barsToOutcome = j + 1; break; }
-            if (c.low <= sig.takeProfit)   { outcome = "tp"; barsToOutcome = j + 1; break; }
-          }
-        }
-
-        const risk = Math.abs(sig.entry - sig.stopLoss);
-        const reward = Math.abs(sig.takeProfit - sig.entry);
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss";
-
-        if (outcome === "tp") {
-          pnlPct = (reward / sig.entry) * 100;
-          outcomeLabel = "win";
-        } else if (outcome === "sl") {
-          pnlPct = -(risk / sig.entry) * 100;
-          outcomeLabel = "loss";
-        } else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
-          pnlPct = isLong
-            ? ((exitPrice - sig.entry) / sig.entry) * 100
-            : ((sig.entry - exitPrice) / sig.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
+        const barsToOutcome = exit.barsHeld || TIME_STOP;
+        const pnlPct = exit.netPnlPct;
+        const outcomeLabel: "win" | "loss" = pnlPct >= 0 ? "win" : "loss";
 
         const posRisk = 0.01;
         const equityPnl = equity * (pnlPct / 100) * posRisk * 100;
@@ -991,7 +1032,10 @@ export async function registerRoutes(server: Server, app: Express) {
           barsToOutcome,
           durationLabel,
           confluenceScore: Math.round(sig.confidence / 10),
-          hitLevel:        outcome,
+          hitLevel:        exit.outcome,
+          grossPnlPct:     Math.round(exit.grossPnlPct * 100) / 100,
+          costPct:         Math.round(exit.costPct * 100) / 100,
+          rMultiple:       Math.round(exit.netR * 100) / 100,
           level:           sig.level,
         });
       }
@@ -1062,7 +1106,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const MAX_BARS = 200;  // 200h max hold
       const COOLDOWN = 20;   // 20h between signals
 
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
+      const allCandles = await fetchStrategyKlinesPaginated(symbol, "1h", 8000);
       if (allCandles.length < WINDOW + MAX_BARS + 10) {
         return res.status(400).json({ error: "Not enough 1H data for RSI Divergence backtest" });
       }
@@ -1082,36 +1126,17 @@ export async function registerRoutes(server: Server, app: Express) {
         const isLong = sig.type === "LONG";
         const future = allCandles.slice(i + 1, i + 1 + MAX_BARS);
 
-        let outcome: "tp1" | "tp2" | "loss" | "timeout" = "timeout";
-        let barsToOutcome = MAX_BARS;
+        const exit = simulateManagedExit({
+          direction: isLong ? "LONG" : "SHORT",
+          entry: sig.entry,
+          stopLoss: sig.stopLoss,
+          takeProfit1: sig.takeProfit,
+          takeProfit2: sig.takeProfit2,
+        }, future);
 
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isLong) {
-            if (c.low  <= sig.stopLoss)   { outcome = "loss";  barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit2){ outcome = "tp2";   barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit) { outcome = "tp1";   barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= sig.stopLoss)   { outcome = "loss";  barsToOutcome = j + 1; break; }
-            if (c.low  <= sig.takeProfit2){ outcome = "tp2";   barsToOutcome = j + 1; break; }
-            if (c.low  <= sig.takeProfit) { outcome = "tp1";   barsToOutcome = j + 1; break; }
-          }
-        }
-
-        const risk   = Math.abs(sig.entry - sig.stopLoss);
-        const tp1Rew = Math.abs(sig.takeProfit  - sig.entry);
-        const tp2Rew = Math.abs(sig.takeProfit2 - sig.entry);
-
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss";
-        if      (outcome === "tp2")  { pnlPct =  (tp2Rew / sig.entry) * 100; outcomeLabel = "win"; }
-        else if (outcome === "tp1")  { pnlPct =  (tp1Rew / sig.entry) * 100; outcomeLabel = "win"; }
-        else if (outcome === "loss") { pnlPct = -(risk    / sig.entry) * 100; outcomeLabel = "loss"; }
-        else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
-          pnlPct = isLong ? ((exitPrice - sig.entry) / sig.entry) * 100 : ((sig.entry - exitPrice) / sig.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
+        const barsToOutcome = exit.barsHeld || MAX_BARS;
+        const pnlPct = exit.netPnlPct;
+        const outcomeLabel: "win" | "loss" = pnlPct >= 0 ? "win" : "loss";
 
         const posRisk = 0.01;
         equity += equity * (pnlPct / 100) * posRisk * 100;
@@ -1124,7 +1149,11 @@ export async function registerRoutes(server: Server, app: Express) {
           entry: sig.entry, stopLoss: sig.stopLoss, takeProfit1: sig.takeProfit,
           outcome: outcomeLabel, pnlPct: Math.round(pnlPct * 100) / 100,
           barsToOutcome, durationLabel, confluenceScore: Math.round(sig.confidence / 10),
-          hitLevel: outcome, rsiDir: sig.type,
+          hitLevel: exit.outcome,
+          grossPnlPct: Math.round(exit.grossPnlPct * 100) / 100,
+          costPct: Math.round(exit.costPct * 100) / 100,
+          rMultiple: Math.round(exit.netR * 100) / 100,
+          rsiDir: sig.type,
         });
       }
 
@@ -1185,7 +1214,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const MAX_BARS = 200;  // 200h max hold (~8 days)
       const COOLDOWN = 12;   // 12h between signals on same coin
 
-      const allCandles = await fetchBinanceKlinesPaginated(symbol, "1h", 8000);
+      const allCandles = await fetchStrategyKlinesPaginated(symbol, "1h", 8000);
       if (allCandles.length < WINDOW + MAX_BARS + 10) {
         return res.status(400).json({ error: "Not enough 1H data for Liquidity Sweep backtest" });
       }
@@ -1205,38 +1234,17 @@ export async function registerRoutes(server: Server, app: Express) {
         const isLong  = sig.type === "LONG";
         const future  = allCandles.slice(i + 1, i + 1 + MAX_BARS);
 
-        let outcome: "tp1" | "tp2" | "loss" | "timeout" = "timeout";
-        let barsToOutcome = MAX_BARS;
+        const exit = simulateManagedExit({
+          direction: isLong ? "LONG" : "SHORT",
+          entry: sig.entry,
+          stopLoss: sig.stopLoss,
+          takeProfit1: sig.takeProfit,
+          takeProfit2: sig.takeProfit2,
+        }, future);
 
-        for (let j = 0; j < future.length; j++) {
-          const c = future[j];
-          if (isLong) {
-            if (c.low  <= sig.stopLoss)    { outcome = "loss"; barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit2) { outcome = "tp2";  barsToOutcome = j + 1; break; }
-            if (c.high >= sig.takeProfit)  { outcome = "tp1";  barsToOutcome = j + 1; break; }
-          } else {
-            if (c.high >= sig.stopLoss)    { outcome = "loss"; barsToOutcome = j + 1; break; }
-            if (c.low  <= sig.takeProfit2) { outcome = "tp2";  barsToOutcome = j + 1; break; }
-            if (c.low  <= sig.takeProfit)  { outcome = "tp1";  barsToOutcome = j + 1; break; }
-          }
-        }
-
-        const risk    = Math.abs(sig.entry - sig.stopLoss);
-        const tp1Rew  = Math.abs(sig.takeProfit  - sig.entry);
-        const tp2Rew  = Math.abs(sig.takeProfit2 - sig.entry);
-
-        let pnlPct: number;
-        let outcomeLabel: "win" | "loss";
-        if      (outcome === "tp2")  { pnlPct =  (tp2Rew / sig.entry) * 100; outcomeLabel = "win"; }
-        else if (outcome === "tp1")  { pnlPct =  (tp1Rew / sig.entry) * 100; outcomeLabel = "win"; }
-        else if (outcome === "loss") { pnlPct = -(risk    / sig.entry) * 100; outcomeLabel = "loss"; }
-        else {
-          const exitPrice = future.length > 0 ? future[future.length - 1].close : sig.entry;
-          pnlPct = isLong
-            ? ((exitPrice - sig.entry) / sig.entry) * 100
-            : ((sig.entry - exitPrice) / sig.entry) * 100;
-          outcomeLabel = pnlPct >= 0 ? "win" : "loss";
-        }
+        const barsToOutcome = exit.barsHeld || MAX_BARS;
+        const pnlPct = exit.netPnlPct;
+        const outcomeLabel: "win" | "loss" = pnlPct >= 0 ? "win" : "loss";
 
         const posRisk = 0.01;
         equity += equity * (pnlPct / 100) * posRisk * 100;
@@ -1249,7 +1257,11 @@ export async function registerRoutes(server: Server, app: Express) {
           entry: sig.entry, stopLoss: sig.stopLoss, takeProfit1: sig.takeProfit,
           outcome: outcomeLabel, pnlPct: Math.round(pnlPct * 100) / 100,
           barsToOutcome, durationLabel, confluenceScore: sig.confidence,
-          hitLevel: outcome, confidence: sig.confidence,
+          hitLevel: exit.outcome,
+          grossPnlPct: Math.round(exit.grossPnlPct * 100) / 100,
+          costPct: Math.round(exit.costPct * 100) / 100,
+          rMultiple: Math.round(exit.netR * 100) / 100,
+          confidence: sig.confidence,
         });
       }
 
@@ -1452,9 +1464,10 @@ export async function registerRoutes(server: Server, app: Express) {
         return filtered;
       } catch { /* corrupted — fall through to default */ }
     }
-    // Default: everything enabled
-    await setSetting(key, JSON.stringify(validIds));
-    return validIds;
+    // Default: paper is enabled for discovery; live starts disabled until explicitly selected.
+    const defaults = defaultEnabledStrategyIds(mode, validIds);
+    await setSetting(key, JSON.stringify(defaults));
+    return defaults;
   }
 
   app.get("/api/strategies", async (_req, res) => {
@@ -1484,7 +1497,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
   // Per-strategy stats
   app.get("/api/journal/stats", async (_req, res) => {
-    const journal = await getJournal();
+    const journal = await getJournal(10_000);
     const strategies = getAllStrategies();
     const stats = strategies.map(s => {
       const trades = journal.filter(e => e.strategy === s.id);
@@ -1537,6 +1550,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
   // ── Minimum 24h volume (USDT) to trade — avoids illiquid / manipulated markets ──
   const MIN_VOLUME_USDT = 30_000_000; // $30M
+  const MAX_SPREAD_PCT = 0.002;       // 0.20% max bid/ask spread for entries
 
   // ── Volume cache (5 min) — populated from MEXC ticker ──
   let cachedVolumes: { map: Record<string, number>; fetchedAt: number } | null = null;
@@ -1546,13 +1560,7 @@ export async function registerRoutes(server: Server, app: Express) {
       return cachedVolumes.map;
     }
     try {
-      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
-      const map: Record<string, number> = {};
-      for (const t of tickers) {
-        if (t.symbol.endsWith("USDT")) {
-          map[t.symbol.replace("USDT", "")] = parseFloat(t.quoteVolume) || 0;
-        }
-      }
+      const { amount24BySymbol: map } = await fetchMexcContractTickerMaps();
       cachedVolumes = { map, fetchedAt: Date.now() };
       return map;
     } catch (err) {
@@ -1613,10 +1621,9 @@ export async function registerRoutes(server: Server, app: Express) {
       return cachedTopCoins.coins;
     }
     try {
-      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
-      const coins = tickers
-        .filter(t => t.symbol.endsWith("USDT"))
-        .map(t => ({ symbol: t.symbol.replace("USDT", ""), vol: parseFloat(t.quoteVolume) || 0 }))
+      const { amount24BySymbol } = await fetchMexcContractTickerMaps();
+      const coins = Object.entries(amount24BySymbol)
+        .map(([symbol, vol]) => ({ symbol, vol }))
         .filter(t => t.symbol.length >= 2 && t.symbol.length <= 8 && !STABLECOINS.has(t.symbol))
         .sort((a, b) => b.vol - a.vol)
         .slice(0, count)
@@ -1642,14 +1649,12 @@ export async function registerRoutes(server: Server, app: Express) {
 
   async function paperCheck() {
     try {
-      const journal = await getJournal();
+      const journal = await getJournal(10_000);
       const openPaper = journal.filter(e => e.mode === "paper" && e.outcome === "open");
       if (openPaper.length === 0) return;
 
-      // Fetch all MEXC tickers in one call
-      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
-      const priceMap: Record<string, number> = {};
-      for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
+      // Fetch all MEXC futures tickers in one call.
+      const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
       for (const trade of openPaper) {
         const pair = `${trade.symbol}USDT`;
@@ -1658,10 +1663,17 @@ export async function registerRoutes(server: Server, app: Express) {
 
         const isLong    = trade.direction === "LONG";
         const peak      = trade.peak_price ?? trade.entry_price;
-        const tp1Hit    = trade.tp1_hit === 1;
+        let tp1Hit      = trade.tp1_hit === 1;
         const sl        = trade.stop_loss;
         const tp1       = trade.take_profit1;
         const tp2       = trade.take_profit2;
+        const accountingState = {
+          direction: isLong ? "LONG" as const : "SHORT" as const,
+          entryPrice: trade.entry_price,
+          positionSizeUsd: trade.position_size_usd,
+          remainingPositionSizeUsd: trade.remaining_position_size_usd,
+          realizedPnlUsd: trade.realized_pnl_usd,
+        };
 
         // Update peak price (best price in favour of trade)
         const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
@@ -1694,12 +1706,18 @@ export async function registerRoutes(server: Server, app: Express) {
             closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
           } else if (!tp1Hit && tp1 && price >= tp1) {
             // TP1 reached: move SL to entry (break-even), start trailing
+            const partial = applyPartialClose(accountingState, tp1, TP1_PARTIAL_CLOSE_PCT, TRADE_COSTS);
             await updateJournalEntry(trade.id, {
               tp1_hit: 1,
               stop_loss: trade.entry_price,  // SL → break-even
               peak_price: newPeak,
+              remaining_position_size_usd: partial.remainingPositionSizeUsd,
+              realized_pnl_usd: partial.realizedPnlUsd,
             });
-            closeReason = "TP1 — trailing active, SL moved to entry";
+            accountingState.remainingPositionSizeUsd = partial.remainingPositionSizeUsd;
+            accountingState.realizedPnlUsd = partial.realizedPnlUsd;
+            tp1Hit = true;
+            closeReason = `TP1 ${Math.round(TP1_PARTIAL_CLOSE_PCT * 100)}% partial — trailing active, SL moved to entry`;
           } else if (tp2 && price >= tp2) {
             outcome = "win";
             exitPrice = tp2;
@@ -1715,12 +1733,18 @@ export async function registerRoutes(server: Server, app: Express) {
             exitPrice = sl;
             closeReason = tp1Hit ? "Trailing SL (break-even)" : "SL";
           } else if (!tp1Hit && tp1 && price <= tp1) {
+            const partial = applyPartialClose(accountingState, tp1, TP1_PARTIAL_CLOSE_PCT, TRADE_COSTS);
             await updateJournalEntry(trade.id, {
               tp1_hit: 1,
               stop_loss: trade.entry_price,
               peak_price: newPeak,
+              remaining_position_size_usd: partial.remainingPositionSizeUsd,
+              realized_pnl_usd: partial.realizedPnlUsd,
             });
-            closeReason = "TP1 — trailing active, SL moved to entry";
+            accountingState.remainingPositionSizeUsd = partial.remainingPositionSizeUsd;
+            accountingState.realizedPnlUsd = partial.realizedPnlUsd;
+            tp1Hit = true;
+            closeReason = `TP1 ${Math.round(TP1_PARTIAL_CLOSE_PCT * 100)}% partial — trailing active, SL moved to entry`;
           } else if (tp2 && price <= tp2) {
             outcome = "win";
             exitPrice = tp2;
@@ -1729,20 +1753,14 @@ export async function registerRoutes(server: Server, app: Express) {
         }
 
         if (outcome) {
-          const pnlPct = isLong
-            ? ((exitPrice - trade.entry_price) / trade.entry_price) * 100
-            : ((trade.entry_price - exitPrice) / trade.entry_price) * 100;
-
-          // P&L in USD (requires position_size_usd stored at open time)
-          const pnlUsd = trade.position_size_usd
-            ? trade.position_size_usd * (pnlPct / 100)
-            : null;
+          const finalAccounting = finalizeTradeAccounting(accountingState, exitPrice, TRADE_COSTS);
 
           await updateJournalEntry(trade.id, {
-            outcome,
+            outcome:     finalAccounting.outcome,
             exit_price:  Math.round(exitPrice * 10000) / 10000,
-            pnl_pct:     Math.round(pnlPct * 100) / 100,
-            pnl_usd:     pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+            pnl_pct:     Math.round(finalAccounting.pnlPct * 100) / 100,
+            pnl_usd:     finalAccounting.pnlUsd !== null ? Math.round(finalAccounting.pnlUsd * 100) / 100 : undefined,
+            remaining_position_size_usd: 0,
             closed_at:   new Date().toISOString(),
             notes:       (trade.notes || "") + ` | ${closeReason}`,
           });
@@ -1755,7 +1773,7 @@ export async function registerRoutes(server: Server, app: Express) {
   // Helper: determine daily trend for a coin using 1D EMA50
   async function getDailyTrend(symbol: string): Promise<"up" | "down" | "neutral"> {
     try {
-      const dailyCandles = await fetchBinanceKlines(symbol, "1d", 55);
+      const dailyCandles = await fetchStrategyKlines(symbol, "1d", 55);
       if (dailyCandles.length < 52) return "neutral";
       const closes = dailyCandles.map(c => c.close);
       // EMA50
@@ -1779,7 +1797,7 @@ export async function registerRoutes(server: Server, app: Express) {
     const cached = weeklyTrendCache.get(symbol);
     if (cached && Date.now() - cached.fetchedAt < 60 * 60 * 1000) return cached.trend; // 1h cache
     try {
-      const weeklyCandles = await fetchBinanceKlines(symbol, "1w", 26);
+      const weeklyCandles = await fetchStrategyKlines(symbol, "1w", 26);
       if (weeklyCandles.length < 20) return "neutral";
       const closes = weeklyCandles.map(c => c.close);
       const k = 2 / 21;
@@ -1810,7 +1828,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const coins = Array.from(preferredSet);
       paperStatus.coinsScanned = coins.length;
 
-      const journal = await getJournal();
+      const journal = await getJournal(10_000);
       const paperTrades = journal.filter(e => e.mode === "paper");
 
       // ── CAPITAL MANAGEMENT ────────────────────────────────────────
@@ -1923,11 +1941,19 @@ export async function registerRoutes(server: Server, app: Express) {
 
       // Limit: max 6 concurrent open trades (6 × 2% = 12% total exposure)
       const openTradesList = paperTrades.filter(e => e.outcome === "open");
+      const openSymbolExposures = openTradesList.map(e => ({
+        symbol: e.symbol,
+        strategy: e.strategy,
+        outcome: e.outcome,
+      }));
       const totalOpen = openTradesList.length;
       if (totalOpen >= 6) return;
 
-      // ── VOLUME + FUNDING MAPS — fetch once per scan ──
-      const [volumeMap, fundingMap] = await Promise.all([getVolumeMap(), getFundingMap()]);
+      // ── FUTURES LIQUIDITY + FUNDING MAPS — fetch once per scan ──
+      const [marketMaps, fundingMap] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap()]);
+      const volumeMap = marketMaps.amount24BySymbol;
+      const spreadMap = marketMaps.spreadPctBySymbol;
+      const tradableSymbols = marketMaps.availableSymbols;
 
       // ── CORRELATION — count open trades per group ──
       const openByGroup: Record<string, number> = {};
@@ -1951,6 +1977,23 @@ export async function registerRoutes(server: Server, app: Express) {
       for (const sym of coins) {
         if (totalOpen + newOpens >= 6) break;
 
+        const existingExposure = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
+        if (existingExposure.skip) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: existingExposure.reason ?? "Open exposure already exists for this symbol" });
+          }
+          continue;
+        }
+
+        if (!tradableSymbols.has(sym)) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: "No active MEXC futures contract/ticker for this symbol" });
+          }
+          continue;
+        }
+
         // ── VOLUME FILTER — skip illiquid coins ──
         // Backtested preferred symbols are exempt — their liquidity was validated during research.
         // Volume filter only guards against unknown dynamic coins with no proven edge.
@@ -1960,6 +2003,15 @@ export async function registerRoutes(server: Server, app: Express) {
           for (const strat of strategies) {
             if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
+          }
+          continue;
+        }
+
+        const spreadPct = spreadMap[sym];
+        if (spreadPct != null && spreadPct > MAX_SPREAD_PCT) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Wide futures spread ${(spreadPct * 100).toFixed(2)}% > ${(MAX_SPREAD_PCT * 100).toFixed(2)}%` });
           }
           continue;
         }
@@ -1988,6 +2040,12 @@ export async function registerRoutes(server: Server, app: Express) {
           let atrPercentile: number | null = null; // computed once per (sym, interval)
 
           for (const strat of strats) {
+            const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
+            if (exposureDecision.skip) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: exposureDecision.reason ?? "Open exposure already exists for this symbol" });
+              continue;
+            }
+
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
 
             // Skip strategy/coin combos with no proven edge (preferredSymbols filter)
@@ -2022,7 +2080,7 @@ export async function registerRoutes(server: Server, app: Express) {
               // Lazy-fetch candles for this interval
               if (!candles) {
                 const limit = Math.max(...strats.map(s => s.minCandles)) + 10;
-                candles = await fetchBinanceKlines(sym, interval, limit);
+                candles = await fetchStrategyKlines(sym, interval, limit);
               }
               if (candles.length < strat.minCandles) continue;
 
@@ -2130,6 +2188,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} kelly=${kellyPct.toFixed(2)}%(${kellySource})`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
+              openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
               newOpens++;
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
@@ -2174,7 +2233,7 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   app.get("/api/paper/status", async (_req, res) => {
-    const journal = await getJournal();
+    const journal = await getJournal(10_000);
     const paperTrades = journal.filter(e => e.mode === "paper");
     const openPaper   = paperTrades.filter(e => e.outcome === "open");
     const closed      = paperTrades.filter(e => e.outcome !== "open");
@@ -2235,25 +2294,17 @@ export async function registerRoutes(server: Server, app: Express) {
   // Live prices for open paper trades (polled by frontend every 10s)
   app.get("/api/paper/prices", async (_req, res) => {
     try {
-      const journal = await getJournal();
+      const journal = await getJournal(10_000);
       const openPaper = journal.filter(e => e.mode === "paper" && e.outcome === "open");
       if (openPaper.length === 0) return res.json([]);
 
-      // Single MEXC call for all prices
-      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
-      const priceMap: Record<string, number> = {};
-      for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
+      // Single MEXC futures call for all prices.
+      const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
       const result = openPaper.map(trade => {
         const pair = `${trade.symbol}USDT`;
         const currentPrice = priceMap[pair] || 0;
         const isLong = trade.direction === "LONG";
-        const unrealizedPnl = currentPrice > 0
-          ? (isLong
-            ? ((currentPrice - trade.entry_price) / trade.entry_price) * 100
-            : ((trade.entry_price - currentPrice) / trade.entry_price) * 100)
-          : 0;
-
         // Progress: 0% = at entry, 100% = at TP, negative = toward SL
         const tpDist = Math.abs(trade.take_profit1 - trade.entry_price);
         const slDist = Math.abs(trade.entry_price - trade.stop_loss);
@@ -2262,19 +2313,25 @@ export async function registerRoutes(server: Server, app: Express) {
         // SL progress: how close to SL (0% = at entry, 100% = at SL)
         const slProgress = slDist > 0 ? Math.max(0, (-fromEntry / slDist) * 100) : 0;
 
-        const unrealizedUsd = trade.position_size_usd
-          ? trade.position_size_usd * (unrealizedPnl / 100)
-          : null;
+        const accounting = estimateOpenTradePnl({
+          direction: isLong ? "LONG" : "SHORT",
+          entryPrice: trade.entry_price,
+          positionSizeUsd: trade.position_size_usd,
+          remainingPositionSizeUsd: trade.remaining_position_size_usd,
+          realizedPnlUsd: trade.realized_pnl_usd,
+        }, currentPrice);
 
         return {
           id: trade.id,
           symbol: trade.symbol,
           strategy: trade.strategy || DEFAULT_STRATEGY,
           currentPrice:   Math.round(currentPrice * 10000) / 10000,
-          unrealizedPnl:  Math.round(unrealizedPnl * 100) / 100,
-          unrealizedUsd:  unrealizedUsd !== null ? Math.round(unrealizedUsd * 100) / 100 : null,
+          unrealizedPnl:  Math.round(accounting.totalOpenPnlPct * 100) / 100,
+          unrealizedUsd:  accounting.totalOpenPnlUsd !== null ? Math.round(accounting.totalOpenPnlUsd * 100) / 100 : null,
           riskUsd:        trade.risk_usd ?? null,
           positionSizeUsd: trade.position_size_usd ?? null,
+          remainingPositionSizeUsd: trade.remaining_position_size_usd ?? trade.position_size_usd ?? null,
+          realizedPnlUsd: trade.realized_pnl_usd ?? 0,
           tp1Hit:         trade.tp1_hit === 1,
           peakPrice:      trade.peak_price ?? null,
           progressPct:    Math.round(progressPct * 10) / 10,
@@ -2391,6 +2448,7 @@ export async function registerRoutes(server: Server, app: Express) {
     lastScan:      null as string | null,
     balance:       null as number | null,
     openPositions: 0,
+    unmanagedPositions: 0,
     error:         null as string | null,
   };
 
@@ -2410,32 +2468,47 @@ export async function registerRoutes(server: Server, app: Express) {
       liveEngineStatus.openPositions = mexcPositions.length;
       liveEngineStatus.balance = (await client.getBalance()).availableBalance;
 
-      const journal = await getJournal();
+      const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live" && e.outcome === "open");
+      const reconciliation = planLiveReconciliation(liveTrades.map(t => ({
+        id: t.id,
+        symbol: t.symbol,
+        direction: normalizeDirection(t.direction),
+      })), mexcPositions);
+      liveEngineStatus.unmanagedPositions = reconciliation.unmanagedExchangePositions.length;
+      const unmanagedError = reconciliation.unmanagedExchangePositions.length > 0
+        ? `Unmanaged MEXC position detected: ${reconciliation.unmanagedExchangePositions.map(p => `${p.symbol}:${p.positionType}`).join(", ")}. Live scan paused until journal/exchange are reconciled.`
+        : null;
 
-      // Fetch all prices once
-      const tickers: Array<{ symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string }> = await fetchJSON(`${MEXC_BASE}/ticker/24hr`);
-      const priceMap: Record<string, number> = {};
-      for (const t of tickers) priceMap[t.symbol] = parseFloat(t.lastPrice);
+      // Fetch all MEXC futures prices once.
+      const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
       for (const trade of liveTrades) {
         const mexcSym = toMexcSymbol(trade.symbol);
-        const pos = mexcPositions.find(p => p.symbol === mexcSym);
+        const pos = mexcPositions.find(p =>
+          p.symbol === mexcSym &&
+          p.positionType === directionToPositionType(normalizeDirection(trade.direction)) &&
+          p.holdVol > 0
+        );
 
         if (!pos) {
           // Position no longer open on MEXC — it was closed (SL/TP hit or manual)
           const lastPrice = priceMap[`${trade.symbol}USDT`] || trade.entry_price;
           const isLong = trade.direction === "LONG";
-          const pnlPct = isLong
-            ? ((lastPrice - trade.entry_price) / trade.entry_price) * 100
-            : ((trade.entry_price - lastPrice) / trade.entry_price) * 100;
-          const pnlUsd = trade.position_size_usd ? trade.position_size_usd * (pnlPct / 100) : null;
+          const accounting = finalizeTradeAccounting({
+            direction: isLong ? "LONG" : "SHORT",
+            entryPrice: trade.entry_price,
+            positionSizeUsd: trade.position_size_usd,
+            remainingPositionSizeUsd: trade.remaining_position_size_usd,
+            realizedPnlUsd: trade.realized_pnl_usd,
+          }, lastPrice, TRADE_COSTS);
 
           await updateJournalEntry(trade.id, {
-            outcome:   pnlPct >= 0 ? "win" : "loss",
+            outcome:   accounting.outcome,
             exit_price: Math.round(lastPrice * 10000) / 10000,
-            pnl_pct:   Math.round(pnlPct * 100) / 100,
-            pnl_usd:   pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+            pnl_pct:   Math.round(accounting.pnlPct * 100) / 100,
+            pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
+            remaining_position_size_usd: 0,
             closed_at: new Date().toISOString(),
             notes:     (trade.notes || "") + " | Closed on MEXC",
           });
@@ -2457,20 +2530,59 @@ export async function registerRoutes(server: Server, app: Express) {
         if (!trade.tp1_hit && trade.take_profit1) {
           const tp1Hit = isLong ? price >= trade.take_profit1 : price <= trade.take_profit1;
           if (tp1Hit) {
-            await updateJournalEntry(trade.id, { tp1_hit: 1, stop_loss: trade.entry_price });
+            const posType = isLong ? 1 : 2;
+            let closedVol = 0;
+            try {
+              const partialOrder = await client.closePartialPosition(mexcSym, posType, pos.holdVol, TP1_PARTIAL_CLOSE_PCT);
+              closedVol = partialOrder.vol;
+            } catch (closeErr: any) {
+              console.error(`[Live] Failed to partial close TP1 on MEXC for ${trade.symbol}: ${closeErr.message}`);
+              continue;
+            }
 
-            // Update SL on MEXC exchange — move to break-even
-            // Find positionId from the MEXC position list (matched by symbol)
-            if (pos) {
-              try {
-                // Use the existing TP (TP2 or TP1) when updating risk levels
+            const actualClosePct = pos.holdVol > 0 ? closedVol / pos.holdVol : TP1_PARTIAL_CLOSE_PCT;
+            const partial = applyPartialClose({
+              direction: isLong ? "LONG" : "SHORT",
+              entryPrice: trade.entry_price,
+              positionSizeUsd: trade.position_size_usd,
+              remainingPositionSizeUsd: trade.remaining_position_size_usd,
+              realizedPnlUsd: trade.realized_pnl_usd,
+            }, trade.take_profit1, actualClosePct, TRADE_COSTS);
+            const closedFullPosition = closedVol >= pos.holdVol;
+
+            let exchangeProtectionUpdated = false;
+            let exchangeProtectionError: string | undefined;
+            try {
+              if (!closedFullPosition) {
                 const currentTp = trade.take_profit2 ?? trade.take_profit1;
                 await client.setTpSl(mexcSym, String(pos.positionId), trade.entry_price, currentTp);
-              } catch (slErr: any) {
-                // Log but don't break — SL update is best-effort
-                console.error(`[Live] Failed to update SL on MEXC for ${trade.symbol}: ${slErr.message}`);
+                exchangeProtectionUpdated = true;
               }
+            } catch (slErr: any) {
+              exchangeProtectionError = slErr.message;
+              console.error(`[Live] Failed to update SL on MEXC for ${trade.symbol}: ${slErr.message}`);
             }
+
+            const journalUpdate = buildLiveTp1JournalUpdate({
+              entryPrice: trade.entry_price,
+              takeProfit1: trade.take_profit1,
+              closedFullPosition,
+              closedVol,
+              holdVol: pos.holdVol,
+              remainingPositionSizeUsd: partial.remainingPositionSizeUsd,
+              realizedPnlUsd: partial.realizedPnlUsd,
+              realizedPnlPct: partial.realizedPnlPct,
+              exchangeProtectionUpdated,
+              exchangeProtectionError,
+            });
+
+            const { notesSuffix, ...journalFields } = journalUpdate;
+            await updateJournalEntry(trade.id, {
+              ...journalFields,
+              notes: (trade.notes || "") + ` | ${notesSuffix}`,
+            });
+
+            if (closedFullPosition) continue;
           }
         }
 
@@ -2485,16 +2597,20 @@ export async function registerRoutes(server: Server, app: Express) {
               const posType = isLong ? 1 : 2;
               await client.closePosition(mexcSym, posType, pos.holdVol);
               
-              const pnlPct = isLong
-                ? ((price - trade.entry_price) / trade.entry_price) * 100
-                : ((trade.entry_price - price) / trade.entry_price) * 100;
-              const pnlUsd = trade.position_size_usd ? trade.position_size_usd * (pnlPct / 100) : null;
+              const accounting = finalizeTradeAccounting({
+                direction: isLong ? "LONG" : "SHORT",
+                entryPrice: trade.entry_price,
+                positionSizeUsd: trade.position_size_usd,
+                remainingPositionSizeUsd: trade.remaining_position_size_usd,
+                realizedPnlUsd: trade.realized_pnl_usd,
+              }, price, TRADE_COSTS);
 
               await updateJournalEntry(trade.id, {
-                outcome:   pnlPct >= 0 ? "win" : "loss",
+                outcome:   accounting.outcome,
                 exit_price: Math.round(price * 10000) / 10000,
-                pnl_pct:   Math.round(pnlPct * 100) / 100,
-                pnl_usd:   pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : undefined,
+                pnl_pct:   Math.round(accounting.pnlPct * 100) / 100,
+                pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
+                remaining_position_size_usd: 0,
                 closed_at: new Date().toISOString(),
                 notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`,
               });
@@ -2504,7 +2620,7 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       liveEngineStatus.lastCheck = new Date().toISOString();
-      liveEngineStatus.error = null;
+      liveEngineStatus.error = unmanagedError;
     } catch (e: any) {
       liveEngineStatus.error = e.message;
     }
@@ -2513,6 +2629,10 @@ export async function registerRoutes(server: Server, app: Express) {
   async function liveScan() {
     try {
       if (!liveEngineStatus.running) return;
+      if (liveEngineStatus.unmanagedPositions > 0) {
+        liveEngineStatus.lastScan = new Date().toISOString();
+        return;
+      }
 
       const client = await getLiveClient();
       const strategies = await getEnabledStrategies("live");
@@ -2525,12 +2645,32 @@ export async function registerRoutes(server: Server, app: Express) {
       }
       const coins = Array.from(preferredSet);
 
-      const journal = await getJournal();
+      const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live");
       const openLive   = liveTrades.filter(e => e.outcome === "open");
+      const mexcPositions = await client.getPositions();
+      const reconciliation = planLiveReconciliation(openLive.map(t => ({
+        id: t.id,
+        symbol: t.symbol,
+        direction: normalizeDirection(t.direction),
+      })), mexcPositions);
+
+      liveEngineStatus.openPositions = mexcPositions.filter(p => p.holdVol > 0).length;
+      liveEngineStatus.unmanagedPositions = reconciliation.unmanagedExchangePositions.length;
+      if (reconciliation.unmanagedExchangePositions.length > 0) {
+        liveEngineStatus.error = `Unmanaged MEXC position detected before live scan: ${reconciliation.unmanagedExchangePositions.map(p => `${p.symbol}:${p.positionType}`).join(", ")}. New entries paused.`;
+        liveEngineStatus.lastScan = new Date().toISOString();
+        return;
+      }
+      if (reconciliation.missingExchangeTrades.length > 0) {
+        liveEngineStatus.error = `Journal has live trades missing on MEXC before scan; running live reconciliation before new entries.`;
+        await liveCheck();
+        liveEngineStatus.lastScan = new Date().toISOString();
+        return;
+      }
 
       // Cap at 6 concurrent live positions
-      if (openLive.length >= 6) return;
+      if (openLive.length >= 6 || liveEngineStatus.openPositions >= 6) return;
 
       // Capital from actual MEXC balance (use equity, not just available balance which excludes margin)
       const balance = await client.getBalance();
@@ -2597,6 +2737,11 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
+      const openSymbolExposures = openLive.map(e => ({
+        symbol: e.symbol,
+        strategy: e.strategy,
+        outcome: e.outcome,
+      }));
       const lastClosedAt = new Map<string, number>();
       for (const e of liveTrades) {
         if (e.outcome !== "open" && e.closed_at) {
@@ -2606,10 +2751,13 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
 
-      // ── VOLUME + FUNDING MAPS — fetch once per scan ──
-      const [volumeMap, fundingMap] = await Promise.all([getVolumeMap(), getFundingMap()]);
+      // ── FUTURES LIQUIDITY + FUNDING MAPS — fetch once per scan ──
+      const [marketMaps, fundingMap] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap()]);
+      const volumeMap = marketMaps.amount24BySymbol;
+      const spreadMap = marketMaps.spreadPctBySymbol;
 
       // ── CORRELATION — count open live trades per group ──
+      const tradableSymbols = marketMaps.availableSymbols;
       const openByGroup: Record<string, number> = {};
       for (const t of openLive) {
         const g = COIN_GROUP[t.symbol];
@@ -2628,6 +2776,23 @@ export async function registerRoutes(server: Server, app: Express) {
       for (const sym of coins) {
         if (openLive.length + newOpens >= 6) break;
 
+        const existingExposure = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
+        if (existingExposure.skip) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: existingExposure.reason ?? "Open exposure already exists for this symbol" });
+          }
+          continue;
+        }
+
+        if (!tradableSymbols.has(sym)) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: "No active MEXC futures contract/ticker for this symbol" });
+          }
+          continue;
+        }
+
         // ── VOLUME FILTER — skip illiquid coins ──
         // Preferred symbols are exempt — validated via backtest, volume checked separately.
         const vol24h = volumeMap[sym] ?? 0;
@@ -2636,6 +2801,15 @@ export async function registerRoutes(server: Server, app: Express) {
           for (const strat of strategies) {
             if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
+          }
+          continue;
+        }
+
+        const spreadPct = spreadMap[sym];
+        if (spreadPct != null && spreadPct > MAX_SPREAD_PCT) {
+          for (const strat of strategies) {
+            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Wide futures spread ${(spreadPct * 100).toFixed(2)}% > ${(MAX_SPREAD_PCT * 100).toFixed(2)}%` });
           }
           continue;
         }
@@ -2660,6 +2834,12 @@ export async function registerRoutes(server: Server, app: Express) {
           let atrPercentile: number | null = null;
 
           for (const strat of strats) {
+            const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
+            if (exposureDecision.skip) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: exposureDecision.reason ?? "Open exposure already exists for this symbol" });
+              continue;
+            }
+
             if (openPairs.has(`${sym}:${strat.id}`)) continue;
             if (strat.preferredSymbols?.length && !strat.preferredSymbols.includes(sym)) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
@@ -2686,7 +2866,7 @@ export async function registerRoutes(server: Server, app: Express) {
             try {
               if (!candles) {
                 const limit = Math.max(...strats.map(s => s.minCandles)) + 10;
-                candles = await fetchBinanceKlines(sym, interval, limit);
+                candles = await fetchStrategyKlines(sym, interval, limit);
               }
               if (candles.length < strat.minCandles) continue;
 
@@ -2738,11 +2918,11 @@ export async function registerRoutes(server: Server, app: Express) {
               const mexcSym  = toMexcSymbol(sym);
               const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
               const vol      = await client.calcContractVol(mexcSym, posSize, signal.entry);
-              const side     = signal.direction === "LONG" ? 1 : 2;
+              const side     = getOpenOrderSide(signal.direction);
 
               const order = await client.placeOrder({
                 symbol:          mexcSym,
-                side:            side as 1 | 2,
+                side,
                 openType:        2,       // cross margin
                 type:            5,       // market
                 vol,
@@ -2763,7 +2943,7 @@ export async function registerRoutes(server: Server, app: Express) {
               for (let attempt = 0; attempt < 6; attempt++) {
                 await new Promise(r => setTimeout(r, 500));
                 try {
-                  const pos = await client.getPosition(mexcSym);
+                  const pos = await client.getPosition(mexcSym, directionToPositionType(signal.direction));
                   if (pos && pos.holdVol > 0 && pos.openAvgPrice > 0) {
                     actualEntry = pos.openAvgPrice;
                     actualVol   = pos.holdVol;
@@ -2779,7 +2959,9 @@ export async function registerRoutes(server: Server, app: Express) {
               }
 
               // Recompute position_size_usd at actual fill price
-              const actualPosSize = actualEntry * actualVol; // rough — adjusted by contractSize in calcContractVol
+              const actualPosSize = await client
+                .calcPositionNotional(mexcSym, actualVol, actualEntry)
+                .catch(() => posSize);
               const slipBps = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
 
               await addJournalEntry({
@@ -2800,6 +2982,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
+              openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
               newOpens++;
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
             } catch (err: any) {
@@ -2872,6 +3055,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.post("/api/live/start", async (_req, res) => {
     try {
+      const client = await getLiveClient();
+      validateLiveStartConnection(await client.testConnection());
       startLiveEngine();
       await setSetting("mode", "live");
       res.json({ running: true });
@@ -2888,7 +3073,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const hasKeys   = !!(await getSetting("mexc_api_key")) && !!(await getSetting("mexc_api_secret"));
       const riskPct   = parseFloat(await getSetting("live_risk_pct") || "1");
       const leverage  = parseInt(await getSetting("live_leverage") || "5", 10) || 5;
-      const journal   = await getJournal();
+      const journal   = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live");
       const closed     = liveTrades.filter(e => e.outcome !== "open");
       const totalPnl   = closed.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);

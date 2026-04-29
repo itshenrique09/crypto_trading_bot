@@ -16,6 +16,8 @@ export interface JournalEntry {
   pnl_usd: number | null;
   risk_usd: number | null;
   position_size_usd: number | null;
+  remaining_position_size_usd: number | null;
+  realized_pnl_usd: number | null;
   notes: string;
   created_at: string;
   closed_at: string | null;
@@ -27,6 +29,13 @@ export interface PaperPrice {
   strategy: string;
   currentPrice: number;
   unrealizedPnl: number;
+  unrealizedUsd: number | null;
+  riskUsd: number | null;
+  positionSizeUsd: number | null;
+  remainingPositionSizeUsd: number | null;
+  realizedPnlUsd: number;
+  tp1Hit: boolean;
+  peakPrice: number | null;
   progressPct: number;
   slProgress: number;
 }

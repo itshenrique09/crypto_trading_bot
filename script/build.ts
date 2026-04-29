@@ -1,8 +1,9 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, copyFile, mkdir } from "fs/promises";
+import { rm, readFile, copyFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
+import { execFileSync } from "child_process";
 
 const allowlist = [
   "express",
@@ -13,6 +14,14 @@ const allowlist = [
   "zod-validation-error",
   "sql.js",
 ];
+
+function readGit(args: string[], fallback: string) {
+  try {
+    return execFileSync("git", args, { encoding: "utf8" }).trim();
+  } catch {
+    return fallback;
+  }
+}
 
 async function buildAll() {
   await rm("dist", { recursive: true, force: true });
@@ -27,6 +36,9 @@ async function buildAll() {
     ...Object.keys(pkg.devDependencies || {}),
   ];
   const externals = allDeps.filter((dep) => !allowlist.includes(dep));
+  const buildCommit = readGit(["rev-parse", "--short", "HEAD"], "unknown");
+  const buildDirty = readGit(["status", "--porcelain"], "").length > 0;
+  const buildTime = new Date().toISOString();
 
   await esbuild({
     entryPoints: ["server/index.ts"],
@@ -36,6 +48,10 @@ async function buildAll() {
     outfile: "dist/index.cjs",
     define: {
       "process.env.NODE_ENV": '"production"',
+      "process.env.APP_VERSION": JSON.stringify(pkg.version ?? "unknown"),
+      "process.env.BUILD_COMMIT": JSON.stringify(buildCommit),
+      "process.env.BUILD_DIRTY": JSON.stringify(String(buildDirty)),
+      "process.env.BUILD_TIME": JSON.stringify(buildTime),
     },
     minify: true,
     external: externals,

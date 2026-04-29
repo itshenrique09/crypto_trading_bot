@@ -75,6 +75,8 @@ export async function getDb(): Promise<Database> {
   const migrations = [
     "ALTER TABLE journal ADD COLUMN strategy TEXT NOT NULL DEFAULT 'v2-swing'",
     "ALTER TABLE journal ADD COLUMN position_size_usd REAL",   // USD size of the position
+    "ALTER TABLE journal ADD COLUMN remaining_position_size_usd REAL", // USD size still open after partial exits
+    "ALTER TABLE journal ADD COLUMN realized_pnl_usd REAL DEFAULT 0",  // USD P&L already locked by partial exits
     "ALTER TABLE journal ADD COLUMN risk_usd REAL",            // USD risked (1R)
     "ALTER TABLE journal ADD COLUMN pnl_usd REAL",             // closed P&L in USD
     "ALTER TABLE journal ADD COLUMN peak_price REAL",          // trailing stop tracking

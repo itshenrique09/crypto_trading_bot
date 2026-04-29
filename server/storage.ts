@@ -128,6 +128,8 @@ export interface JournalEntry {
   pnl_pct: number | null;
   // Capital management fields
   position_size_usd: number | null;  // USD position size
+  remaining_position_size_usd: number | null; // USD size still open after partial exits
+  realized_pnl_usd: number | null;   // USD P&L already locked by partial exits
   risk_usd: number | null;           // USD risked (1R)
   pnl_usd: number | null;            // actual P&L in USD
   peak_price: number | null;         // best price since entry (for trailing stop)
@@ -150,26 +152,30 @@ export interface InsertJournal {
   followed?: string;
   notes?: string;
   position_size_usd?: number;
+  remaining_position_size_usd?: number;
+  realized_pnl_usd?: number;
   risk_usd?: number;
 }
 
-export async function getJournal(): Promise<JournalEntry[]> {
+export async function getJournal(limit = 200): Promise<JournalEntry[]> {
   const db = await getDb();
-  return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY created_at DESC LIMIT 200");
+  return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY created_at DESC LIMIT ?", [limit]);
 }
 
 export async function addJournalEntry(entry: InsertJournal): Promise<JournalEntry> {
   const db = await getDb();
   const followed = entry.mode === "auto" || entry.mode === "paper" ? "yes" : (entry.followed || "pending");
   const strategy = entry.strategy || "v2-swing";
+  const remainingPositionSize = entry.remaining_position_size_usd ?? entry.position_size_usd ?? null;
+  const realizedPnl = entry.realized_pnl_usd ?? 0;
   db.run(
-    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, strategy, followed, outcome, notes, position_size_usd, risk_usd, peak_price, tp1_hit, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 0, ?)`,
+    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, strategy, followed, outcome, notes, position_size_usd, remaining_position_size_usd, realized_pnl_usd, risk_usd, peak_price, tp1_hit, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0, ?)`,
     [
       entry.symbol, entry.direction, entry.entry_price, entry.stop_loss,
       entry.take_profit1, entry.take_profit2 || null, entry.confluence_score || null,
       entry.mode, strategy, followed, entry.notes || "",
-      entry.position_size_usd || null, entry.risk_usd || null,
+      entry.position_size_usd || null, remainingPositionSize, realizedPnl, entry.risk_usd || null,
       entry.entry_price,  // peak_price starts at entry
       new Date().toISOString(),
     ]
@@ -183,7 +189,8 @@ export async function updateJournalEntry(
   updates: {
     followed?: string; outcome?: string; exit_price?: number; pnl_pct?: number;
     notes?: string; closed_at?: string; pnl_usd?: number; peak_price?: number;
-    tp1_hit?: number; stop_loss?: number;
+    tp1_hit?: number; stop_loss?: number; remaining_position_size_usd?: number;
+    realized_pnl_usd?: number;
   }
 ): Promise<void> {
   const db = await getDb();
@@ -196,6 +203,8 @@ export async function updateJournalEntry(
   if (updates.notes !== undefined)      { sets.push("notes = ?");       vals.push(updates.notes); }
   if (updates.closed_at !== undefined)  { sets.push("closed_at = ?");   vals.push(updates.closed_at); }
   if (updates.pnl_usd !== undefined)    { sets.push("pnl_usd = ?");     vals.push(updates.pnl_usd); }
+  if (updates.remaining_position_size_usd !== undefined) { sets.push("remaining_position_size_usd = ?"); vals.push(updates.remaining_position_size_usd); }
+  if (updates.realized_pnl_usd !== undefined) { sets.push("realized_pnl_usd = ?"); vals.push(updates.realized_pnl_usd); }
   if (updates.peak_price !== undefined) { sets.push("peak_price = ?");  vals.push(updates.peak_price); }
   if (updates.tp1_hit !== undefined)    { sets.push("tp1_hit = ?");     vals.push(updates.tp1_hit); }
   if (updates.stop_loss !== undefined)  { sets.push("stop_loss = ?");   vals.push(updates.stop_loss); }

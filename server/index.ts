@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { getRequiredAuthPassword } from "./auth-config";
 
 const app = express();
 const httpServer = createServer(app);
@@ -23,7 +24,7 @@ app.use(
 app.use(express.urlencoded({ extended: false }));
 
 // Simple password protection
-const AUTH_PASSWORD = process.env.APP_PASSWORD ?? "";
+const AUTH_PASSWORD = getRequiredAuthPassword(process.env.NODE_ENV, process.env.APP_PASSWORD);
 if (!AUTH_PASSWORD && process.env.NODE_ENV === "production") {
   console.warn("[security] APP_PASSWORD env var not set — server is unprotected!");
 }
@@ -32,8 +33,6 @@ const AUTH_TOKEN = Buffer.from(`admin:${AUTH_PASSWORD}`).toString("base64");
 app.use((req, res, next) => {
   // Skip auth in development
   if (process.env.NODE_ENV === "development") return next();
-  // Skip auth for API routes called by the app itself
-  if (req.path.startsWith("/api")) return next();
 
   const auth = req.headers["authorization"];
   if (auth && auth === `Basic ${AUTH_TOKEN}`) return next();
