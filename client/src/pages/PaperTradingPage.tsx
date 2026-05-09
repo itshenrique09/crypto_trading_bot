@@ -21,6 +21,49 @@ interface StrategyStats {
   avgPnl: number | null;
 }
 
+// Reusable boolean-flag toggle row used by the Engine Filters card.
+// Kept local: this component is only meaningful in the context of the
+// feature-flag panel (its layout, copy density, and recommendation field
+// are tuned to that section).
+function FlagToggle(props: {
+  title: string;
+  description: string;
+  recommendation?: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  pending?: boolean;
+}) {
+  const { title, description, recommendation, checked, onChange, pending } = props;
+  return (
+    <div className={`rounded-md border p-3 transition-colors ${checked ? "border-emerald-500/30 bg-emerald-500/[0.03]" : "border-border/30"}`}>
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-bold flex items-center gap-2">
+            {title}
+            {checked && <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">ON</span>}
+          </p>
+          <p className="text-[10px] text-muted-foreground/80 mt-1 leading-relaxed">{description}</p>
+          {recommendation && (
+            <p className="text-[10px] text-amber-400/70 mt-1 italic">{recommendation}</p>
+          )}
+        </div>
+        <button
+          onClick={() => onChange(!checked)}
+          disabled={pending}
+          className={`shrink-0 w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
+            checked
+              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+              : "bg-card/40 border-border/30 text-muted-foreground/60 hover:text-foreground"
+          } ${pending ? "opacity-50" : ""}`}
+        >
+          {checked ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+          {checked ? "ON" : "OFF"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function PaperTradingPage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<"open" | "closed">("open");
@@ -119,6 +162,25 @@ export default function PaperTradingPage() {
       await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled, mode });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/strategies"] }),
+  });
+
+  // ── Engine feature flags ────────────────────────────────────────
+  const [showFlags, setShowFlags] = useState(false);
+  const { data: featureFlags } = useQuery<{
+    regime_filter_enabled: boolean;
+    short_macro_filter_enabled: boolean;
+    btc_regime_gate_enabled: boolean;
+    trailing_mode: "fixed_pct" | "r_multiple";
+    trailing_r_multiple: number;
+  }>({
+    queryKey: ["/api/settings/feature-flags"],
+    queryFn: async () => (await apiRequest("GET", "/api/settings/feature-flags")).json(),
+  });
+  const updateFlagsMutation = useMutation({
+    mutationFn: async (patch: Record<string, unknown>) => {
+      await apiRequest("PUT", "/api/settings/feature-flags", patch);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/settings/feature-flags"] }),
   });
 
   const { data: liveStatus } = useQuery({
@@ -776,6 +838,107 @@ export default function PaperTradingPage() {
             Paper is for backtesting the strategy mix. Live is real capital — only enable here after paper validates.
           </p>
         </div>
+      </Card>
+
+
+      {/* ═══ Engine Filters (experimental) ═══ */}
+      <Card className="border-border/30">
+        <button
+          onClick={() => setShowFlags(!showFlags)}
+          className="w-full px-4 py-3 flex items-center justify-between border-b border-border/20 hover:bg-card/30 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-sky-400" />
+            <span className="text-xs font-bold">Engine Filters</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/30">experimental</span>
+            <span className="text-[10px] text-muted-foreground/60">applies to paper + live</span>
+          </div>
+          {showFlags ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+        </button>
+
+        {showFlags && featureFlags && (
+          <div className="p-4 space-y-3">
+            <div className="rounded-md bg-amber-500/5 border border-amber-500/20 p-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400/80 mt-0.5 shrink-0" />
+              <p className="text-[11px] text-muted-foreground/80 leading-relaxed">
+                Experimental filters added to address bleed patterns observed in paper trading. All default OFF — engine
+                behaviour is unchanged until you flip them. Recommended: enable <span className="text-foreground font-semibold">one at a time</span>,
+                give it ≥1 week in paper, and check the scan logs for what each one is filtering.
+              </p>
+            </div>
+
+            <FlagToggle
+              title="Short Macro Filter"
+              description="Requires EMA50 < EMA200 (confirmed bear) before SMC, Break & Retest or Liquidity Sweep can take a SHORT. Targets the bleed pattern where shorts in non-bear regimes scored PF 0.41 / WR 20%."
+              recommendation="Highest leverage on observed data — start here."
+              checked={featureFlags.short_macro_filter_enabled}
+              onChange={v => updateFlagsMutation.mutate({ short_macro_filter_enabled: v })}
+              pending={updateFlagsMutation.isPending}
+            />
+
+            <FlagToggle
+              title="ADX Regime Filter"
+              description="Computes ADX(14) per scan. dead_chop (ADX<18) blocks Confluence Swing & Break & Retest (breakouts shred in chop). strong_trend (ADX>30) blocks RSI Divergence & Bollinger MR (don't fade trends). SMC and Liquidity Sweep stay on across regimes."
+              recommendation="Enable second, after observing short-macro-filter results."
+              checked={featureFlags.regime_filter_enabled}
+              onChange={v => updateFlagsMutation.mutate({ regime_filter_enabled: v })}
+              pending={updateFlagsMutation.isPending}
+            />
+
+            <FlagToggle
+              title="BTC Regime Gate"
+              description="Reduces concurrent-position cap based on BTC weekly+daily trend. up+up = 6 trades, down+down = 2 (risk-off). Altcoin/BTC correlation is high under stress; the cap blocks NEW entries only — existing positions stay open."
+              recommendation="Enable last, after the two filters above settle."
+              checked={featureFlags.btc_regime_gate_enabled}
+              onChange={v => updateFlagsMutation.mutate({ btc_regime_gate_enabled: v })}
+              pending={updateFlagsMutation.isPending}
+            />
+
+            <div className="rounded-md border border-border/30 p-3 space-y-2">
+              <p className="text-xs font-bold">Post-TP1 Trailing Mode</p>
+              <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                After TP1 hits and 60% closes, the remaining 40% trails. <span className="font-mono">fixed_pct</span> trails 2% from peak (legacy — too tight on crypto, runners often close near TP1 from normal noise). <span className="font-mono">r_multiple</span> trails N × original-risk from peak — adapts to each trade's natural volatility. Recommended <span className="font-mono">r_multiple</span> with 2.0 to start.
+              </p>
+              <div className="flex items-center gap-2 flex-wrap pt-1">
+                <button
+                  onClick={() => updateFlagsMutation.mutate({ trailing_mode: "fixed_pct" })}
+                  disabled={updateFlagsMutation.isPending}
+                  className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
+                    featureFlags.trailing_mode === "fixed_pct"
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
+                  }`}
+                >fixed_pct (2%)</button>
+                <button
+                  onClick={() => updateFlagsMutation.mutate({ trailing_mode: "r_multiple" })}
+                  disabled={updateFlagsMutation.isPending}
+                  className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
+                    featureFlags.trailing_mode === "r_multiple"
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
+                  }`}
+                >r_multiple</button>
+                {featureFlags.trailing_mode === "r_multiple" && (
+                  <div className="flex items-center gap-2 ml-2">
+                    <label className="text-[10px] text-muted-foreground/70">multiplier</label>
+                    <input
+                      type="number" min="0.5" max="5" step="0.25"
+                      defaultValue={featureFlags.trailing_r_multiple}
+                      onBlur={e => {
+                        const v = parseFloat(e.target.value);
+                        if (!isNaN(v) && v >= 0.5 && v <= 5 && v !== featureFlags.trailing_r_multiple) {
+                          updateFlagsMutation.mutate({ trailing_r_multiple: v });
+                        }
+                      }}
+                      className="w-16 px-2 py-1 text-xs rounded bg-background border border-border/40 focus:outline-none focus:border-emerald-500/60 font-mono"
+                    />
+                    <span className="text-[10px] text-muted-foreground/70">× R</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Strategy Mini Stats — only if there's data */}

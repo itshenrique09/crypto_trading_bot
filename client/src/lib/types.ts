@@ -74,6 +74,7 @@ export const STRATEGY_COLORS: Record<string, { bg: string; text: string; border:
   "break-retest":     { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
   "rsi-divergence":   { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
   "liquidity-sweep":  { bg: "bg-rose-500/10", text: "text-rose-400", border: "border-rose-500/30" },
+  "bollinger-mr":     { bg: "bg-sky-500/10", text: "text-sky-400", border: "border-sky-500/30" },
 };
 
 export function getStratColor(id: string) {
@@ -85,6 +86,7 @@ const LEGACY_NAMES: Record<string, string> = {
   "mean-reversion": "Mean Reversion",
   "breakout": "Breakout",
 };
+
 
 export function getStratName(id: string, strategies?: { id: string; name: string }[]): string {
   const found = strategies?.find(s => s.id === id);

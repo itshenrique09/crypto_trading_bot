@@ -153,7 +153,15 @@
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(s['id'], 'paperEnabled:', s.get\\('paperEnabled'\\), 'liveEnabled:', s.get\\('liveEnabled'\\)\\) for s in d]\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('scripts', {}\\), indent=2\\)\\)\")",
       "Bash(curl -s \"http://localhost:5000/api/journal\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" http://localhost:5000/api/journal)",
+      "Bash(curl -sk -w \"\\\\nHTTP %{http_code}\\\\n\" https://henritrader.duckdns.org/api/journal)",
+      "Bash(grep -n \"stopLoss\\\\|stop_loss\\\\|slMultiplier\\\\|\\\\\\\\* atr\\\\|atr \\\\\\\\*\" server/analysis.ts)",
+      "Bash(grep -n \"stopLoss\\\\|stop_loss\\\\|\\\\\\\\* atr\\\\|atr \\\\\\\\*\\\\|sl =\\\\|sl=\" server/analysis.ts)",
+      "Bash(curl -s \"https://contract.mexc.com/api/v1/contract/list\")",
+      "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://contract.mexc.com/api/v1/contract/detail\")",
+      "Bash(tee /tmp/discover-all.log)",
+      "Bash(tee /tmp/verify-winners.log)"
     ]
   }
 }

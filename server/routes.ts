@@ -15,6 +15,9 @@ import { dropOpenCandle } from "./candles";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
+import { detectRegime, isStrategyAllowedInRegime, shouldRequireMacroDownForShort, type RegimeContext } from "./regime-detector";
+import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
+import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
 import { directionToPositionType, planLiveReconciliation } from "./live-reconciliation";
@@ -1381,6 +1384,48 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Engine feature flags (apply to BOTH paper and live engines) ──
+  // These are the experimental filter switches: ADX regime gate, short
+  // macro filter, BTC regime gate, and trailing-stop mode. All default
+  // off (legacy behaviour). The UI lets the user flip them with proper
+  // descriptions instead of editing the SQLite directly.
+  app.get("/api/settings/feature-flags", async (_req, res) => {
+    try {
+      const [regime, shortMacro, btcGate, trailMode, trailR] = await Promise.all([
+        getSetting("regime_filter_enabled"),
+        getSetting("short_macro_filter_enabled"),
+        getSetting("btc_regime_gate_enabled"),
+        getSetting("trailing_mode"),
+        getSetting("trailing_r_multiple"),
+      ]);
+      res.json({
+        regime_filter_enabled:      regime     === "true",
+        short_macro_filter_enabled: shortMacro === "true",
+        btc_regime_gate_enabled:    btcGate    === "true",
+        trailing_mode:              trailMode === "r_multiple" ? "r_multiple" : "fixed_pct",
+        trailing_r_multiple:        parseFloat(trailR || "2.0"),
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.put("/api/settings/feature-flags", async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      const updates: Record<string, string> = {};
+      if (typeof body.regime_filter_enabled      === "boolean") updates.regime_filter_enabled      = String(body.regime_filter_enabled);
+      if (typeof body.short_macro_filter_enabled === "boolean") updates.short_macro_filter_enabled = String(body.short_macro_filter_enabled);
+      if (typeof body.btc_regime_gate_enabled    === "boolean") updates.btc_regime_gate_enabled    = String(body.btc_regime_gate_enabled);
+      if (body.trailing_mode === "fixed_pct" || body.trailing_mode === "r_multiple") {
+        updates.trailing_mode = body.trailing_mode;
+      }
+      if (typeof body.trailing_r_multiple === "number" && body.trailing_r_multiple >= 0.5 && body.trailing_r_multiple <= 5) {
+        updates.trailing_r_multiple = String(body.trailing_r_multiple);
+      }
+      for (const [k, v] of Object.entries(updates)) await setSetting(k, v);
+      res.json({ ok: true, applied: Object.keys(updates) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   // ── Journal (Trade Log) ─────────────────────────────────────────
 
   app.get("/api/journal", async (_req, res) => {
@@ -1656,6 +1701,15 @@ export async function registerRoutes(server: Server, app: Express) {
       // Fetch all MEXC futures tickers in one call.
       const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
+      // ── TRAILING STOP MODE — opt-in via setting (default fixed_pct/2%) ──
+      // "fixed_pct"  → legacy peak × (1 ± 2%)
+      // "r_multiple" → peak ± (N × original-risk), where N defaults to 2.0.
+      //   Adapts to each trade's natural noise so tight-SL momentum entries
+      //   don't get knocked out by ordinary 2% pullbacks post-TP1.
+      const trailingMode: TrailingMode =
+        (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
+      const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
+
       for (const trade of openPaper) {
         const pair = `${trade.symbol}USDT`;
         const price = priceMap[pair];
@@ -1682,11 +1736,24 @@ export async function registerRoutes(server: Server, app: Express) {
         }
 
         // ── TRAILING STOP (active after TP1 is hit) ──────────────
-        // Trail by 2% from peak — locks in profit as price moves in our favour
-        const TRAIL_PCT = 0.02;
-        const trailStop = isLong
-          ? newPeak * (1 - TRAIL_PCT)
-          : newPeak * (1 + TRAIL_PCT);
+        // Mode = "fixed_pct" (legacy 2%) or "r_multiple" (peak ± N×risk).
+        const originalRisk = deriveOriginalRiskFromJournal(
+          trade.risk_usd,
+          trade.position_size_usd,
+          trade.entry_price,
+        );
+        const trailStop = computeTrailStop({
+          direction: isLong ? "LONG" : "SHORT",
+          peak: newPeak,
+          entry: trade.entry_price,
+          originalRisk,
+          mode: trailingMode,
+          fixedPct: DEFAULT_TRAIL_PCT,
+          rMultiple: trailingRMultiple,
+        });
+        const trailDescription = trailingMode === "r_multiple"
+          ? `r_multiple ${trailingRMultiple}× (risk ${originalRisk.toFixed(6)})`
+          : `fixed ${(DEFAULT_TRAIL_PCT * 100).toFixed(0)}%`;
 
         let outcome: string | null = null;
         let exitPrice = price;
@@ -1699,7 +1766,7 @@ export async function registerRoutes(server: Server, app: Express) {
           if (tp1Hit && price <= trailStop) {
             outcome = "win";
             exitPrice = trailStop;
-            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, ${trailDescription})`;
           } else if (price <= sl) {
             outcome = tp1Hit ? "breakeven" : "loss";
             exitPrice = sl;
@@ -1727,7 +1794,7 @@ export async function registerRoutes(server: Server, app: Express) {
           if (tp1Hit && price >= trailStop) {
             outcome = "win";
             exitPrice = trailStop;
-            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`;
+            closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, ${trailDescription})`;
           } else if (price >= sl) {
             outcome = tp1Hit ? "breakeven" : "loss";
             exitPrice = sl;
@@ -1857,12 +1924,35 @@ export async function registerRoutes(server: Server, app: Express) {
       // ── BTC MACRO RISK FILTER ─────────────────────────────────────
       // Adjust risk % based on BTC daily trend
       let riskMultiplier = 1.0;
+      let btcDailyTrend: BtcTrend = "neutral";
       try {
-        const btcDaily = await getDailyTrend("BTC");
-        if      (btcDaily === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
-        else if (btcDaily === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
+        btcDailyTrend = await getDailyTrend("BTC") as BtcTrend;
+        if      (btcDailyTrend === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
+        else if (btcDailyTrend === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
       } catch (err) { console.error("[btc-filter] failed:", err); }
       const effectiveRiskPct = baseRiskPct * riskMultiplier;
+
+      // ── REGIME / SHORT MACRO / BTC GATE FILTERS (opt-in via settings) ─
+      // All three default OFF — flip them on once you've paper-traded ≥2 weeks
+      // with the kill-switch and observed the regime/short stats.
+      const regimeFilterEnabled     = (await getSetting("regime_filter_enabled"))      === "true";
+      const shortMacroFilterEnabled = (await getSetting("short_macro_filter_enabled")) === "true";
+      const btcRegimeGateEnabled    = (await getSetting("btc_regime_gate_enabled"))    === "true";
+
+      // ── BTC REGIME GATE — dynamic concurrent-position cap ─────────
+      // When enabled, derives maxOpen from BTC weekly+daily trend.
+      // When disabled, defaults to maxOpen=6 (prior fixed cap).
+      let btcContext: BtcRegimeContext = defaultBtcContext();
+      if (btcRegimeGateEnabled) {
+        try {
+          const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
+          btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
+          console.log(`[paper-scan] BTC regime: ${btcContext.reason}`);
+        } catch (err) {
+          console.error("[btc-regime-gate] failed:", err);
+        }
+      }
+      const effectiveMaxOpen = btcContext.maxOpen;
 
       // ── FRACTIONAL KELLY PER STRATEGY ────────────────────────────
       // Kelly% = WinRate - (LossRate / R:R)  — use half Kelly (more conservative)
@@ -1939,7 +2029,8 @@ export async function registerRoutes(server: Server, app: Express) {
         }
       }
 
-      // Limit: max 6 concurrent open trades (6 × 2% = 12% total exposure)
+      // Limit: max concurrent open trades — dynamic when BTC regime gate is on,
+      // otherwise the prior fixed cap of 6 (× 2% = 12% total exposure).
       const openTradesList = paperTrades.filter(e => e.outcome === "open");
       const openSymbolExposures = openTradesList.map(e => ({
         symbol: e.symbol,
@@ -1947,7 +2038,12 @@ export async function registerRoutes(server: Server, app: Express) {
         outcome: e.outcome,
       }));
       const totalOpen = openTradesList.length;
-      if (totalOpen >= 6) return;
+      if (totalOpen >= effectiveMaxOpen) {
+        if (btcRegimeGateEnabled && effectiveMaxOpen < 6) {
+          console.log(`[paper-scan] BTC regime cap reached: ${totalOpen}/${effectiveMaxOpen} (${btcContext.regime})`);
+        }
+        return;
+      }
 
       // ── FUTURES LIQUIDITY + FUNDING MAPS — fetch once per scan ──
       const [marketMaps, fundingMap] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap()]);
@@ -1975,7 +2071,7 @@ export async function registerRoutes(server: Server, app: Express) {
       let newOpens = 0;
 
       for (const sym of coins) {
-        if (totalOpen + newOpens >= 6) break;
+        if (totalOpen + newOpens >= effectiveMaxOpen) break;
 
         const existingExposure = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
         if (existingExposure.skip) {
@@ -2038,6 +2134,7 @@ export async function registerRoutes(server: Server, app: Express) {
           let candles: OHLCV[] | null = null;
 
           let atrPercentile: number | null = null; // computed once per (sym, interval)
+          let regimeCtx: RegimeContext | null = null; // computed once per (sym, interval)
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -2074,7 +2171,7 @@ export async function registerRoutes(server: Server, app: Express) {
               }
             }
 
-            if (totalOpen + newOpens >= 6) break;
+            if (totalOpen + newOpens >= effectiveMaxOpen) break;
 
             try {
               // Lazy-fetch candles for this interval
@@ -2091,6 +2188,19 @@ export async function registerRoutes(server: Server, app: Express) {
               if (atrPercentile > 85) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Volatility regime: ATR at ${atrPercentile}th percentile (>85) — explosive, skip entry` });
                 continue;
+              }
+
+              // ── ADX REGIME FILTER (opt-in: regime_filter_enabled) ─────
+              // Blocks strategies in regimes they're not designed for:
+              //   dead_chop (ADX<18)    → blocks Confluence Swing & B&R
+              //   strong_trend (ADX>30) → blocks RSI Divergence (don't fade trends)
+              // SMC and Liquidity Sweep stay on across all regimes.
+              if (regimeFilterEnabled) {
+                if (regimeCtx === null) regimeCtx = detectRegime(candles);
+                if (!isStrategyAllowedInRegime(strat.id, regimeCtx.regime)) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${regimeCtx.reason} — strategy not allowed in this regime` });
+                  continue;
+                }
               }
 
               const signal = strat.analyze(candles);
@@ -2134,6 +2244,23 @@ export async function registerRoutes(server: Server, app: Express) {
               if (signal.direction === "SHORT" && signal.confidence < 72) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT needs ≥72% confidence, got ${signal.confidence}%`, signal: "SHORT", confidence: signal.confidence });
                 continue;
+              }
+
+              // ── SHORT MACRO FILTER (opt-in: short_macro_filter_enabled) ──
+              // SMC, B&R and Liquidity Sweep historically allowed SHORTs based
+              // on micro-trend only — fine in mixed markets, painful in confirmed
+              // bulls (longs PF≈3.5 vs shorts PF≈0.4 in May 2026 paper data).
+              // This requires EMA50 < EMA200 * 0.99 (decisive bear macro) before
+              // any of those three strategies can short. Confluence Swing already
+              // enforces this internally; RSI Div uses inBull/inBear by design.
+              if (shortMacroFilterEnabled
+                  && signal.direction === "SHORT"
+                  && shouldRequireMacroDownForShort(strat.id)) {
+                if (regimeCtx === null) regimeCtx = detectRegime(candles);
+                if (!regimeCtx.macroDown) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT macro filter: EMA50/200 not in confirmed bear (macroDown=false) — blocked`, signal: "SHORT", confidence: signal.confidence });
+                  continue;
+                }
               }
 
               // ── FUNDING RATE FILTER ──
@@ -2468,6 +2595,12 @@ export async function registerRoutes(server: Server, app: Express) {
       liveEngineStatus.openPositions = mexcPositions.length;
       liveEngineStatus.balance = (await client.getBalance()).availableBalance;
 
+      // ── TRAILING STOP MODE — opt-in via setting (default fixed_pct/2%) ──
+      // Mirrors paperCheck. See computeTrailStop() in trailing-stop.ts.
+      const trailingMode: TrailingMode =
+        (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
+      const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
+
       const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live" && e.outcome === "open");
       const reconciliation = planLiveReconciliation(liveTrades.map(t => ({
@@ -2586,10 +2719,22 @@ export async function registerRoutes(server: Server, app: Express) {
           }
         }
 
-        // Trailing stop: 2% from peak (after TP1)
+        // Trailing stop after TP1 — fixed 2% (legacy) or N×R (chandelier-style)
         if (trade.tp1_hit) {
-          const TRAIL_PCT = 0.02;
-          const trailStop = isLong ? newPeak * (1 - TRAIL_PCT) : newPeak * (1 + TRAIL_PCT);
+          const originalRiskLive = deriveOriginalRiskFromJournal(
+            trade.risk_usd,
+            trade.position_size_usd,
+            trade.entry_price,
+          );
+          const trailStop = computeTrailStop({
+            direction: isLong ? "LONG" : "SHORT",
+            peak: newPeak,
+            entry: trade.entry_price,
+            originalRisk: originalRiskLive,
+            mode: trailingMode,
+            fixedPct: DEFAULT_TRAIL_PCT,
+            rMultiple: trailingRMultiple,
+          });
           const trailHit  = isLong ? price <= trailStop : price >= trailStop;
           if (trailHit) {
             // Close position at market
@@ -2612,7 +2757,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
                 remaining_position_size_usd: 0,
                 closed_at: new Date().toISOString(),
-                notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, trail ${TRAIL_PCT*100}%)`,
+                notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, mode=${trailingMode}${trailingMode === "r_multiple" ? ` ${trailingRMultiple}×` : ` ${(DEFAULT_TRAIL_PCT*100).toFixed(0)}%`})`,
               });
             } catch (err) { console.error("[live-trail] journal update failed (position may already be closed):", err); }
           }
@@ -2669,21 +2814,50 @@ export async function registerRoutes(server: Server, app: Express) {
         return;
       }
 
-      // Cap at 6 concurrent live positions
-      if (openLive.length >= 6 || liveEngineStatus.openPositions >= 6) return;
+      // ── REGIME / SHORT MACRO / BTC GATE FILTERS (opt-in via settings) ──
+      // Mirrors paper engine. All default OFF; flip on after paper validation.
+      // Loaded BEFORE the early concurrent-position cap so the dynamic maxOpen
+      // can apply to the cap check itself.
+      const regimeFilterEnabled     = (await getSetting("regime_filter_enabled"))      === "true";
+      const shortMacroFilterEnabled = (await getSetting("short_macro_filter_enabled")) === "true";
+      const btcRegimeGateEnabled    = (await getSetting("btc_regime_gate_enabled"))    === "true";
+
+      // BTC trends — daily fetched here so it's available for both the BTC gate
+      // (computed next) and the per-trade riskMultiplier (set later).
+      let btcDailyTrend: BtcTrend = "neutral";
+      try {
+        btcDailyTrend = await getDailyTrend("BTC") as BtcTrend;
+      } catch (err) { console.error("[btc-filter] failed:", err); }
+
+      let btcContext: BtcRegimeContext = defaultBtcContext();
+      if (btcRegimeGateEnabled) {
+        try {
+          const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
+          btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
+          console.log(`[live-scan] BTC regime: ${btcContext.reason}`);
+        } catch (err) {
+          console.error("[btc-regime-gate] failed:", err);
+        }
+      }
+      const effectiveMaxOpen = btcContext.maxOpen;
+
+      // Cap at effectiveMaxOpen concurrent live positions (dynamic when BTC regime gate is on, else 6)
+      if (openLive.length >= effectiveMaxOpen || liveEngineStatus.openPositions >= effectiveMaxOpen) {
+        if (btcRegimeGateEnabled && effectiveMaxOpen < 6) {
+          console.log(`[live-scan] BTC regime cap reached: open=${openLive.length} mexc=${liveEngineStatus.openPositions} cap=${effectiveMaxOpen} (${btcContext.regime})`);
+        }
+        return;
+      }
 
       // Capital from actual MEXC balance (use equity, not just available balance which excludes margin)
       const balance = await client.getBalance();
       const currentBalance = balance.equity;
       const baseRiskPct = parseFloat(await getSetting("live_risk_pct") || "1"); // conservative 1% default
 
-      // BTC macro filter
+      // BTC macro risk multiplier (per-trade sizing — distinct from the BTC regime cap above)
       let riskMultiplier = 1.0;
-      try {
-        const btcDaily = await getDailyTrend("BTC");
-        if      (btcDaily === "up")   riskMultiplier = 1.25;
-        else if (btcDaily === "down") riskMultiplier = 0.75;
-      } catch (err) { console.error("[btc-filter] failed:", err); }
+      if      (btcDailyTrend === "up")   riskMultiplier = 1.25;
+      else if (btcDailyTrend === "down") riskMultiplier = 0.75;
 
       // Drawdown protection (same as paper)
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
@@ -2774,7 +2948,7 @@ export async function registerRoutes(server: Server, app: Express) {
       let newOpens = 0;
 
       for (const sym of coins) {
-        if (openLive.length + newOpens >= 6) break;
+        if (openLive.length + newOpens >= effectiveMaxOpen) break;
 
         const existingExposure = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
         if (existingExposure.skip) {
@@ -2832,6 +3006,7 @@ export async function registerRoutes(server: Server, app: Express) {
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
           let atrPercentile: number | null = null;
+          let regimeCtx: RegimeContext | null = null;
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -2861,7 +3036,7 @@ export async function registerRoutes(server: Server, app: Express) {
               }
             }
 
-            if (openLive.length + newOpens >= 6) break;
+            if (openLive.length + newOpens >= effectiveMaxOpen) break;
 
             try {
               if (!candles) {
@@ -2873,6 +3048,15 @@ export async function registerRoutes(server: Server, app: Express) {
               // ── VOLATILITY REGIME FILTER ──
               if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
               if (atrPercentile > 85) continue;
+
+              // ── ADX REGIME FILTER (opt-in: regime_filter_enabled) ──
+              if (regimeFilterEnabled) {
+                if (regimeCtx === null) regimeCtx = detectRegime(candles);
+                if (!isStrategyAllowedInRegime(strat.id, regimeCtx.regime)) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${regimeCtx.reason} — strategy not allowed in this regime` });
+                  continue;
+                }
+              }
 
               const signal = strat.analyze(candles);
               if (!signal) continue;
@@ -2897,6 +3081,17 @@ export async function registerRoutes(server: Server, app: Express) {
 
               // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
               if (signal.direction === "SHORT" && signal.confidence < 72) continue;
+
+              // ── SHORT MACRO FILTER (opt-in: short_macro_filter_enabled) ──
+              if (shortMacroFilterEnabled
+                  && signal.direction === "SHORT"
+                  && shouldRequireMacroDownForShort(strat.id)) {
+                if (regimeCtx === null) regimeCtx = detectRegime(candles);
+                if (!regimeCtx.macroDown) {
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT macro filter: EMA50/200 not in confirmed bear (macroDown=false) — blocked`, signal: "SHORT", confidence: signal.confidence });
+                  continue;
+                }
+              }
 
               // ── FUNDING RATE FILTER ──
               if (funding != null) {
