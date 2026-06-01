@@ -13,3 +13,6 @@ vite.config.ts.*
 .mcp.json
 .playwright-mcp/
 .claude/scheduled_tasks.lock
+
+# Backtest harness candle cache
+script/.cache/

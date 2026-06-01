@@ -211,15 +211,24 @@ function findTechnicalTPs(
   candles: OHLCV[],
   entry: number,
   stopLoss: number,
-  isLong: boolean
+  isLong: boolean,
+  // Clear-air floor R-multiple: the target used when NO structural swing exists
+  // ahead (e.g. breakouts into all-time-high air). Backtest (3y, 1H/4H) showed
+  // raising this from 2R→3R for momentum/breakout strategies nearly doubled
+  // Swing total R (+167→+294R, PF 1.15→1.20) and lifted B&R (PF 1.93→2.14) —
+  // breakouts should be left to run, not capped at a token 2R. Mean-reversion
+  // strategies (LiqSweep/RSI) keep 2R: they revert into existing structure and
+  // almost never hit this floor anyway.
+  floorRR = 2.0,
 ): { tp1: number; tp2: number; tp3?: number } {
   const risk = Math.abs(entry - stopLoss);
 
-  // Quality floor: a trade must offer ≥2R reward to be worth taking. The 1%
-  // floor protects micro-priced coins (PEPE, SHIB) where ATR can be so small
-  // that 2R is indistinguishable from entry. Not an invented target — the
-  // minimum bar a trade must clear to be considered.
+  // Structural-qualification distance: a swing must sit ≥2R away to count as a
+  // TP (closer levels are noise / sub-quality). Kept at 2R so genuine structure
+  // between 2R and the floor is still preferred over the floor.
   const minDist = Math.max(risk * 2.0, entry * 0.01);
+  // Clear-air fallback distance (no structure ahead) — tunable per strategy.
+  const floorDist = Math.max(risk * floorRR, entry * 0.01);
 
   const swingWindow = 3;
   const end   = Math.max(0, candles.length - 2);
@@ -245,6 +254,8 @@ function findTechnicalTPs(
 
   // Discard unreachably-far swings (>5R or >8% of entry). Real structure but
   // unlikely to fill within the strategy's hold window — would freeze capital.
+  // (Tested 10R/15%: did NOT reduce 2R-floor reliance on Swing/B&R — those fire on
+  //  breakouts into clear air where no overhead swing exists — and slightly hurt PF.)
   const maxDist = Math.max(risk * 5, entry * 0.08);
   const withinReach = levels.filter(v => Math.abs(v - entry) <= maxDist);
 
@@ -260,9 +271,9 @@ function findTechnicalTPs(
     }
   }
 
-  // TP1: nearest reachable structural swing. If none, the 2R quality floor —
-  // this is the minimum R:R a trade must offer, not an invented target.
-  const tp1Floor = isLong ? entry + minDist : entry - minDist;
+  // TP1: nearest reachable structural swing. If none (clear air), use the
+  // floor target (floorRR×risk) — a run-it target for breakouts, not a level.
+  const tp1Floor = isLong ? entry + floorDist : entry - floorDist;
   const tp1 = reachable[0] ?? tp1Floor;
 
   // TP2: next structural swing beyond TP1. If the chart only offers one level
@@ -1135,8 +1146,8 @@ export function generateSignal(candles: OHLCV[], indicators: IndicatorResult): T
     // Technical TPs: fully structural (nearest swing high/low beyond entry).
     // TP3 returns undefined when no third level exists on the chart — no
     // invented stretch target.
-    const tTPs = findTechnicalTPs(candles, currentPrice, stopLoss, isBuy);
-    tp1 = tTPs.tp1;  // nearest structural level (or 2R quality floor if none)
+    const tTPs = findTechnicalTPs(candles, currentPrice, stopLoss, isBuy, 3.0); // breakout: 3R clear-air floor
+    tp1 = tTPs.tp1;  // nearest structural level (or 3R run-it floor if none)
     tp2 = tTPs.tp2;  // next structural level (or collapses to tp1)
     tp3 = tTPs.tp3;  // structural runner target if one exists, else undefined
 
@@ -2032,13 +2043,13 @@ export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetest
       // — fully structural, no fixed multipliers. Quality gate rr<2 below
       // skips the whole signal if even structure doesn't offer ≥2R.
       const nextRes = strongLevels.find(l => l.price > price + risk && l.touches >= 2);
-      const tp = nextRes ? nextRes.price : findTechnicalTPs(candles, price, sl, true).tp1;
+      const tp = nextRes ? nextRes.price : findTechnicalTPs(candles, price, sl, true, 3.0).tp1;
       const rr = (tp - price) / risk;
       if (rr < 2.0) continue;
       // TP2: next tested resistance beyond TP1, else structural next swing
       // (which returns tp1 if none — single-target trade, trailing runs post-TP1).
       const nextRes2 = strongLevels.find(l => l.price > tp + atr * 0.5 && l.touches >= 2);
-      const tp2 = nextRes2 ? nextRes2.price : findTechnicalTPs(candles, price, sl, true).tp2;
+      const tp2 = nextRes2 ? nextRes2.price : findTechnicalTPs(candles, price, sl, true, 3.0).tp2;
 
       // ── Confidence score ──
       let conf = 45;
@@ -2072,13 +2083,13 @@ export function breakRetestSignal(candles: OHLCV[], minTouches = 3): BreakRetest
       // ahead, fall back to nearest swing low via findTechnicalTPs — fully
       // structural. Quality gate rr<2 below skips the signal if no ≥2R target.
       const nextSup = [...strongLevels].reverse().find(l => l.price < price - risk && l.touches >= 2);
-      const tp = nextSup ? nextSup.price : findTechnicalTPs(candles, price, sl, false).tp1;
+      const tp = nextSup ? nextSup.price : findTechnicalTPs(candles, price, sl, false, 3.0).tp1;
       const rr = (price - tp) / risk;
       if (rr < 2.0) continue;
       // TP2: next tested support beyond TP1, else structural next swing
       // (returns tp1 if none — single-target, trailing runs post-TP1).
       const nextSup2 = [...strongLevels].reverse().find(l => l.price < tp - atr * 0.5 && l.touches >= 2);
-      const tp2Short = nextSup2 ? nextSup2.price : findTechnicalTPs(candles, price, sl, false).tp2;
+      const tp2Short = nextSup2 ? nextSup2.price : findTechnicalTPs(candles, price, sl, false, 3.0).tp2;
 
       let conf = 45;
       if (level.touches >= 3) conf += 10;
@@ -2456,6 +2467,15 @@ export function liquiditySweepSignal(
   if (best.direction === "bearish" && rsiNow > 60) conf += 5;
   if (best.direction === "bullish" && macroUp)     conf += 5;
   conf = Math.min(conf, 88);
+
+  // ── SL tightening (backtest-validated, May 2026) ──
+  // Liquidity sweeps either reverse fast or fail — a tight invalidation cuts
+  // losers quickly and lifts R per win. Pulling the structural SL 20% toward
+  // entry lifted pooled PF 1.59→1.70 and total R +24% across ALL 10 test coins
+  // (3y 1H, live-accurate exits + 0.6% SL floor). The engine's MIN_SL_DISTANCE_PCT
+  // floor (0.6%) protects against over-tight degenerate stops. Applied last so
+  // the structural-quality gates above (risk≥0.75 ATR, R:R≥2) judge the raw sweep.
+  stopLoss = entry + (stopLoss - entry) * 0.8;
 
   const dir = best.direction === "bullish" ? "LONG" : "SHORT";
   const reason =

@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff, Activity, ChevronDown, ChevronUp, Shield, KeyRound, AlertTriangle, CheckCircle2, Circle, Power, Play, Square, Loader2, ToggleLeft, ToggleRight } from "lucide-react";
+import { FlaskConical, Filter, ArrowUpDown, Wallet, TrendingUp, TrendingDown, Settings2, Zap, Eye, EyeOff, Activity, ChevronDown, ChevronUp, Shield, KeyRound, AlertTriangle, CheckCircle2, Circle, Power, Play, Square, Loader2 } from "lucide-react";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor } from "@/lib/types";
 import TradeRow from "@/components/TradeRow";
@@ -19,49 +19,6 @@ interface StrategyStats {
   winRate: number | null;
   totalPnl: number;
   avgPnl: number | null;
-}
-
-// Reusable boolean-flag toggle row used by the Engine Filters card.
-// Kept local: this component is only meaningful in the context of the
-// feature-flag panel (its layout, copy density, and recommendation field
-// are tuned to that section).
-function FlagToggle(props: {
-  title: string;
-  description: string;
-  recommendation?: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  pending?: boolean;
-}) {
-  const { title, description, recommendation, checked, onChange, pending } = props;
-  return (
-    <div className={`rounded-md border p-3 transition-colors ${checked ? "border-emerald-500/30 bg-emerald-500/[0.03]" : "border-border/30"}`}>
-      <div className="flex items-start gap-3">
-        <div className="flex-1 min-w-0">
-          <p className="text-xs font-bold flex items-center gap-2">
-            {title}
-            {checked && <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">ON</span>}
-          </p>
-          <p className="text-[10px] text-muted-foreground/80 mt-1 leading-relaxed">{description}</p>
-          {recommendation && (
-            <p className="text-[10px] text-amber-400/70 mt-1 italic">{recommendation}</p>
-          )}
-        </div>
-        <button
-          onClick={() => onChange(!checked)}
-          disabled={pending}
-          className={`shrink-0 w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
-            checked
-              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-              : "bg-card/40 border-border/30 text-muted-foreground/60 hover:text-foreground"
-          } ${pending ? "opacity-50" : ""}`}
-        >
-          {checked ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-          {checked ? "ON" : "OFF"}
-        </button>
-      </div>
-    </div>
-  );
 }
 
 export default function PaperTradingPage() {
@@ -157,15 +114,7 @@ export default function PaperTradingPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/paper/status"] }),
   });
 
-  const toggleStrategyMutation = useMutation({
-    mutationFn: async ({ id, enabled, mode }: { id: string; enabled: boolean; mode: "paper" | "live" }) => {
-      await apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled, mode });
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/strategies"] }),
-  });
-
-  // ── Engine feature flags ────────────────────────────────────────
-  const [showFlags, setShowFlags] = useState(false);
+  // ── Engine trailing config (the only remaining tunable) ─────────
   const { data: featureFlags } = useQuery<{
     regime_filter_enabled: boolean;
     short_macro_filter_enabled: boolean;
@@ -773,173 +722,162 @@ export default function PaperTradingPage() {
         )}
       </Card>
 
-      {/* ═══ Strategy Activation — per mode ═══ */}
-      <Card className="border-border/30 overflow-hidden">
-        <div className="px-4 py-3 border-b border-border/20 flex items-center gap-2">
-          <Zap className="w-3.5 h-3.5 text-purple-400" />
-          <span className="text-xs font-bold">Strategy Activation</span>
-          <span className="text-[10px] text-muted-foreground/60">choose which strategies run in each engine</span>
-        </div>
-        <div className="divide-y divide-border/10">
-          {/* Header row */}
-          <div className="px-4 py-2 grid grid-cols-[1fr_auto_auto] gap-3 text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold">
-            <span>Strategy</span>
-            <span className="w-20 text-center">Paper</span>
-            <span className="w-20 text-center">Live</span>
-          </div>
-          {strategies.map(s => {
-            const c = getStratColor(s.id);
-            const counts = paperStatus?.strategyCounts?.[s.id];
-            const paperOn = s.paperEnabled ?? s.enabled;
-            const liveOn  = s.liveEnabled ?? false;
-            return (
-              <div key={s.id} className="px-4 py-2.5 grid grid-cols-[1fr_auto_auto] gap-3 items-center hover:bg-card/30 transition-colors">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold truncate ${c.text}`}>{s.name}</span>
-                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-card/60 text-muted-foreground/70 font-mono">{s.interval}</span>
-                    {counts && counts.total > 0 && (
-                      <span className="text-[9px] text-muted-foreground/50">{counts.open} open · {counts.total} total</span>
-                    )}
-                  </div>
-                  <p className="text-[10px] text-muted-foreground/60 truncate mt-0.5">{s.description}</p>
-                </div>
-                <button
-                  onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !paperOn, mode: "paper" })}
-                  className={`w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
-                    paperOn
-                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                      : "bg-card/40 border-border/30 text-muted-foreground/50"
-                  }`}
-                  title="Toggle for paper engine"
-                >
-                  {paperOn ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-                  {paperOn ? "ON" : "OFF"}
-                </button>
-                <button
-                  onClick={() => toggleStrategyMutation.mutate({ id: s.id, enabled: !liveOn, mode: "live" })}
-                  className={`w-20 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border transition-all ${
-                    liveOn
-                      ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
-                      : "bg-card/40 border-border/30 text-muted-foreground/50"
-                  }`}
-                  title="Toggle for live engine (real capital)"
-                >
-                  {liveOn ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-                  {liveOn ? "ON" : "OFF"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <div className="px-4 py-2 bg-card/20 border-t border-border/20 flex items-start gap-1.5">
-          <AlertTriangle className="w-3 h-3 text-amber-400/70 mt-0.5 shrink-0" />
-          <p className="text-[10px] text-muted-foreground/70">
-            Paper is for backtesting the strategy mix. Live is real capital — only enable here after paper validates.
-          </p>
-        </div>
-      </Card>
-
-
-      {/* ═══ Engine Filters (experimental) ═══ */}
-      <Card className="border-border/30">
-        <button
-          onClick={() => setShowFlags(!showFlags)}
-          className="w-full px-4 py-3 flex items-center justify-between border-b border-border/20 hover:bg-card/30 transition-colors"
-        >
-          <div className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-sky-400" />
-            <span className="text-xs font-bold">Engine Filters</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/30">experimental</span>
-            <span className="text-[10px] text-muted-foreground/60">applies to paper + live</span>
-          </div>
-          {showFlags ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
-        </button>
-
-        {showFlags && featureFlags && (
-          <div className="p-4 space-y-3">
-            <div className="rounded-md bg-amber-500/5 border border-amber-500/20 p-2.5 flex items-start gap-2">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-400/80 mt-0.5 shrink-0" />
-              <p className="text-[11px] text-muted-foreground/80 leading-relaxed">
-                Experimental filters added to address bleed patterns observed in paper trading. All default OFF — engine
-                behaviour is unchanged until you flip them. Recommended: enable <span className="text-foreground font-semibold">one at a time</span>,
-                give it ≥1 week in paper, and check the scan logs for what each one is filtering.
-              </p>
+      {/* ═══ Engine Intelligence — read-only, self-governing ═══ */}
+      {(() => {
+        const intel = paperStatus?.intelligence as {
+          btcRegime: string; btcRegimeReason: string; maxOpen: number;
+          direction: { long: boolean; short: boolean; sizeMultiplier: number; reason: string };
+          pausedStrategies: string[]; updatedAt: string;
+        } | null | undefined;
+        const regimeColor: Record<string, string> = {
+          risk_on:         "text-emerald-300 border-emerald-500/40 bg-emerald-500/10",
+          neutral_bullish: "text-emerald-300/80 border-emerald-500/30 bg-emerald-500/5",
+          neutral_bearish: "text-red-300/80 border-red-500/30 bg-red-500/5",
+          volatile_drift:  "text-amber-300 border-amber-500/40 bg-amber-500/10",
+          risk_off:        "text-red-300 border-red-500/40 bg-red-500/10",
+        };
+        return (
+          <Card className="border-border/30 overflow-hidden">
+            <div className="px-4 py-3 border-b border-border/20 flex items-center gap-2">
+              <Activity className="w-3.5 h-3.5 text-sky-400" />
+              <span className="text-xs font-bold">Engine Intelligence</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/30">always on · self-governing</span>
             </div>
 
-            <FlagToggle
-              title="Short Macro Filter"
-              description="Requires EMA50 < EMA200 (confirmed bear) before SMC, Break & Retest or Liquidity Sweep can take a SHORT. Targets the bleed pattern where shorts in non-bear regimes scored PF 0.41 / WR 20%."
-              recommendation="Highest leverage on observed data — start here."
-              checked={featureFlags.short_macro_filter_enabled}
-              onChange={v => updateFlagsMutation.mutate({ short_macro_filter_enabled: v })}
-              pending={updateFlagsMutation.isPending}
-            />
+            {!intel ? (
+              <div className="px-4 py-4 text-[11px] text-muted-foreground/60">
+                Awaiting first scan — the engine publishes its regime read each cycle (every 3 min).
+              </div>
+            ) : (
+              <div className="p-4 space-y-3">
+                {/* Market regime + directional bias */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="rounded-md border border-border/30 p-3">
+                    <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold mb-1.5">BTC Regime</p>
+                    <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded border ${regimeColor[intel.btcRegime] ?? "text-muted-foreground border-border/40"}`}>
+                      {intel.btcRegime}
+                    </span>
+                    <p className="text-[10px] text-muted-foreground/60 mt-1.5 leading-snug">{intel.btcRegimeReason}</p>
+                  </div>
+                  <div className="rounded-md border border-border/30 p-3">
+                    <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold mb-1.5">Directional Bias</p>
+                    <div className="flex items-center gap-3">
+                      <span className={`flex items-center gap-1 text-[11px] font-bold ${intel.direction.long ? "text-emerald-300" : "text-muted-foreground/40 line-through"}`}>
+                        <TrendingUp className="w-3.5 h-3.5" /> LONG
+                      </span>
+                      <span className={`flex items-center gap-1 text-[11px] font-bold ${intel.direction.short ? "text-red-300" : "text-muted-foreground/40 line-through"}`}>
+                        <TrendingDown className="w-3.5 h-3.5" /> SHORT
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/60 mt-1.5 leading-snug">
+                      {intel.direction.reason}{intel.direction.sizeMultiplier !== 1 ? ` · size ×${intel.direction.sizeMultiplier}` : ""}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-border/30 p-3">
+                    <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold mb-1.5">Max Concurrent</p>
+                    <p className="text-lg font-bold font-mono text-foreground">{intel.maxOpen}</p>
+                    <p className="text-[10px] text-muted-foreground/60 mt-1.5 leading-snug">positions cap (scales with BTC regime)</p>
+                  </div>
+                </div>
 
-            <FlagToggle
-              title="ADX Regime Filter"
-              description="Computes ADX(14) per scan. dead_chop (ADX<18) blocks Confluence Swing & Break & Retest (breakouts shred in chop). strong_trend (ADX>30) blocks RSI Divergence & Bollinger MR (don't fade trends). SMC and Liquidity Sweep stay on across regimes."
-              recommendation="Enable second, after observing short-macro-filter results."
-              checked={featureFlags.regime_filter_enabled}
-              onChange={v => updateFlagsMutation.mutate({ regime_filter_enabled: v })}
-              pending={updateFlagsMutation.isPending}
-            />
+                {/* Per-strategy status */}
+                <div className="rounded-md border border-border/30 overflow-hidden">
+                  <p className="px-3 py-2 text-[9px] uppercase tracking-wider text-muted-foreground/60 font-bold border-b border-border/20">Strategies — auto-selected by regime</p>
+                  <div className="divide-y divide-border/10">
+                    {strategies.map(s => {
+                      const c = getStratColor(s.id);
+                      const counts = paperStatus?.strategyCounts?.[s.id];
+                      const paused = intel.pausedStrategies.includes(s.id);
+                      return (
+                        <div key={s.id} className="px-3 py-2 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`text-xs font-bold truncate ${c.text}`}>{s.name}</span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-card/60 text-muted-foreground/70 font-mono">{s.interval}</span>
+                            {counts && counts.total > 0 && (
+                              <span className="text-[9px] text-muted-foreground/50">{counts.open} open · {counts.total} total</span>
+                            )}
+                          </div>
+                          {paused ? (
+                            <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-300 shrink-0" title="Auto-paused: 7d netR < −3R. Re-activates as losses age out or new wins rebalance.">
+                              <AlertTriangle className="w-3 h-3" /> auto-paused
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-300 shrink-0">
+                              <CheckCircle2 className="w-3 h-3" /> active
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
 
-            <FlagToggle
-              title="BTC Regime Gate"
-              description="Reduces concurrent-position cap based on BTC weekly+daily trend. up+up = 6 trades, down+down = 2 (risk-off). Altcoin/BTC correlation is high under stress; the cap blocks NEW entries only — existing positions stay open."
-              recommendation="Enable last, after the two filters above settle."
-              checked={featureFlags.btc_regime_gate_enabled}
-              onChange={v => updateFlagsMutation.mutate({ btc_regime_gate_enabled: v })}
-              pending={updateFlagsMutation.isPending}
-            />
+                {/* Always-on guardrails */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: "BTC soft overlay", on: true },
+                    { label: "BTC regime cap", on: true },
+                    { label: "Cost-aware SL floor", on: true },
+                    { label: "Per-strategy DD kill-switch", on: true },
+                  ].map(g => (
+                    <div key={g.label} className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span className="text-[10px] text-muted-foreground/80 truncate">{g.label}</span>
+                    </div>
+                  ))}
+                </div>
 
-            <div className="rounded-md border border-border/30 p-3 space-y-2">
-              <p className="text-xs font-bold">Post-TP1 Trailing Mode</p>
-              <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                After TP1 hits and 60% closes, the remaining 40% trails. <span className="font-mono">fixed_pct</span> trails 2% from peak (legacy — too tight on crypto, runners often close near TP1 from normal noise). <span className="font-mono">r_multiple</span> trails N × original-risk from peak — adapts to each trade's natural volatility. Recommended <span className="font-mono">r_multiple</span> with 2.0 to start.
-              </p>
-              <div className="flex items-center gap-2 flex-wrap pt-1">
-                <button
-                  onClick={() => updateFlagsMutation.mutate({ trailing_mode: "fixed_pct" })}
-                  disabled={updateFlagsMutation.isPending}
-                  className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
-                    featureFlags.trailing_mode === "fixed_pct"
-                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                      : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
-                  }`}
-                >fixed_pct (2%)</button>
-                <button
-                  onClick={() => updateFlagsMutation.mutate({ trailing_mode: "r_multiple" })}
-                  disabled={updateFlagsMutation.isPending}
-                  className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
-                    featureFlags.trailing_mode === "r_multiple"
-                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                      : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
-                  }`}
-                >r_multiple</button>
-                {featureFlags.trailing_mode === "r_multiple" && (
-                  <div className="flex items-center gap-2 ml-2">
-                    <label className="text-[10px] text-muted-foreground/70">multiplier</label>
-                    <input
-                      type="number" min="0.5" max="5" step="0.25"
-                      defaultValue={featureFlags.trailing_r_multiple}
-                      onBlur={e => {
-                        const v = parseFloat(e.target.value);
-                        if (!isNaN(v) && v >= 0.5 && v <= 5 && v !== featureFlags.trailing_r_multiple) {
-                          updateFlagsMutation.mutate({ trailing_r_multiple: v });
-                        }
-                      }}
-                      className="w-16 px-2 py-1 text-xs rounded bg-background border border-border/40 focus:outline-none focus:border-emerald-500/60 font-mono"
-                    />
-                    <span className="text-[10px] text-muted-foreground/70">× R</span>
+                {/* Trailing mode — the one remaining tunable */}
+                {featureFlags && (
+                  <div className="rounded-md border border-border/30 p-3 space-y-2">
+                    <p className="text-xs font-bold">Post-TP1 Trailing</p>
+                    <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                      After TP1 closes 60%, the runner trails. Default <span className="font-mono">fixed_pct</span> (2% from peak) — backtest-best for these strategies. <span className="font-mono">r_multiple</span> (N × original-risk) was tested and gave back profit on Swing; opt in only if re-validated.
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap pt-1">
+                      <button
+                        onClick={() => updateFlagsMutation.mutate({ trailing_mode: "r_multiple" })}
+                        disabled={updateFlagsMutation.isPending}
+                        className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
+                          featureFlags.trailing_mode === "r_multiple"
+                            ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                            : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
+                        }`}
+                      >r_multiple</button>
+                      <button
+                        onClick={() => updateFlagsMutation.mutate({ trailing_mode: "fixed_pct" })}
+                        disabled={updateFlagsMutation.isPending}
+                        className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all ${
+                          featureFlags.trailing_mode === "fixed_pct"
+                            ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                            : "bg-card/40 border-border/30 text-muted-foreground hover:text-foreground"
+                        }`}
+                      >fixed_pct (2%)</button>
+                      {featureFlags.trailing_mode === "r_multiple" && (
+                        <div className="flex items-center gap-2 ml-2">
+                          <label className="text-[10px] text-muted-foreground/70">multiplier</label>
+                          <input
+                            type="number" min="0.5" max="5" step="0.25"
+                            defaultValue={featureFlags.trailing_r_multiple}
+                            onBlur={e => {
+                              const v = parseFloat(e.target.value);
+                              if (!isNaN(v) && v >= 0.5 && v <= 5 && v !== featureFlags.trailing_r_multiple) {
+                                updateFlagsMutation.mutate({ trailing_r_multiple: v });
+                              }
+                            }}
+                            className="w-16 px-2 py-1 text-xs rounded bg-background border border-border/40 focus:outline-none focus:border-emerald-500/60 font-mono"
+                          />
+                          <span className="text-[10px] text-muted-foreground/70">× R</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-        )}
-      </Card>
+            )}
+          </Card>
+        );
+      })()}
 
       {/* Strategy Mini Stats — only if there's data */}
       {activeStrats.length > 0 && (

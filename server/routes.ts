@@ -10,13 +10,11 @@ import {
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, calcATRPercentile, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
-import { defaultEnabledStrategyIds } from "./strategy-settings";
 import { dropOpenCandle } from "./candles";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
-import { detectRegime, isStrategyAllowedInRegime, shouldRequireMacroDownForShort, type RegimeContext } from "./regime-detector";
-import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
+import { classifyBtcRegime, defaultBtcContext, directionPolicyForRegime, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
@@ -55,6 +53,11 @@ const TP1_PARTIAL_CLOSE_PCT = 0.6;
 const TAKER_FEE_PCT = 0.0002;
 const SLIPPAGE_PCT = 0.0005;
 const TRADE_COSTS = { takerFeePct: TAKER_FEE_PCT, slippagePct: SLIPPAGE_PCT };
+// Round-trip cost ≈ 2×(taker+slip) = 0.14%. A stop tighter than this floor lets
+// fees dominate the risk and produces garbage R math (e.g. a 0.21% stop turned a
+// −0.35% move into −1.66R in May 2026 paper data). Reject such signals outright
+// rather than widening the structural stop. 0.6% ≈ 4× round-trip → fee drag ≤ ~0.23R.
+const MIN_SL_DISTANCE_PCT = 0.006;
 
 function normalizeDirection(direction: string): "LONG" | "SHORT" {
   return direction === "SHORT" ? "SHORT" : "LONG";
@@ -1384,24 +1387,23 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  // ── Engine feature flags (apply to BOTH paper and live engines) ──
-  // These are the experimental filter switches: ADX regime gate, short
-  // macro filter, BTC regime gate, and trailing-stop mode. All default
-  // off (legacy behaviour). The UI lets the user flip them with proper
-  // descriptions instead of editing the SQLite directly.
+  // ── Engine settings (apply to BOTH paper and live engines) ──
+  // The regime brain (ADX regime gate, short-macro filter, BTC regime gate +
+  // directional overlay) is ALWAYS ON and self-governing — there are no manual
+  // on/off switches. The only remaining tunable here is the trailing-stop mode,
+  // which defaults to r_multiple (2R). Engine "intelligence" state is reported
+  // read-only via /api/paper/status (paperStatus.intelligence).
   app.get("/api/settings/feature-flags", async (_req, res) => {
     try {
-      const [regime, shortMacro, btcGate, trailMode, trailR] = await Promise.all([
-        getSetting("regime_filter_enabled"),
-        getSetting("short_macro_filter_enabled"),
-        getSetting("btc_regime_gate_enabled"),
+      const [trailMode, trailR] = await Promise.all([
         getSetting("trailing_mode"),
         getSetting("trailing_r_multiple"),
       ]);
       res.json({
-        regime_filter_enabled:      regime     === "true",
-        short_macro_filter_enabled: shortMacro === "true",
-        btc_regime_gate_enabled:    btcGate    === "true",
+        // Always-on intelligence — reported for UI display, not toggleable.
+        regime_filter_enabled:      true,
+        short_macro_filter_enabled: true,
+        btc_regime_gate_enabled:    true,
         trailing_mode:              trailMode === "r_multiple" ? "r_multiple" : "fixed_pct",
         trailing_r_multiple:        parseFloat(trailR || "2.0"),
       });
@@ -1412,9 +1414,7 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       const body = req.body ?? {};
       const updates: Record<string, string> = {};
-      if (typeof body.regime_filter_enabled      === "boolean") updates.regime_filter_enabled      = String(body.regime_filter_enabled);
-      if (typeof body.short_macro_filter_enabled === "boolean") updates.short_macro_filter_enabled = String(body.short_macro_filter_enabled);
-      if (typeof body.btc_regime_gate_enabled    === "boolean") updates.btc_regime_gate_enabled    = String(body.btc_regime_gate_enabled);
+      // Intelligence flags are ignored — the brain is always on. Only trailing config is writable.
       if (body.trailing_mode === "fixed_pct" || body.trailing_mode === "r_multiple") {
         updates.trailing_mode = body.trailing_mode;
       }
@@ -1484,60 +1484,25 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // ── Strategy Management ──────────────────────────────────────────
-
-  // Read the per-mode enabled list. Falls back to legacy global "enabled_strategies" for migration.
-  async function readEnabled(mode: "paper" | "live"): Promise<string[]> {
-    const all = getAllStrategies();
-    const validIds = all.map(s => s.id);
-    const key = mode === "paper" ? "paper_enabled_strategies" : "live_enabled_strategies";
-    const json = await getSetting(key);
-    // Key exists (even if "[]") → user intent, honor it. Don't fall back to
-    // legacy when the user deliberately disabled everything in this mode.
-    if (json != null) {
-      try {
-        const parsed: string[] = JSON.parse(json);
-        return parsed.filter(id => validIds.includes(id));
-      } catch { /* corrupted — fall through to legacy/default */ }
-    }
-    // Legacy fallback: read old global list (one-time migration)
-    const legacy = await getSetting("enabled_strategies");
-    if (legacy) {
-      try {
-        const parsed: string[] = JSON.parse(legacy);
-        const filtered = parsed.filter(id => validIds.includes(id));
-        await setSetting(key, JSON.stringify(filtered));
-        return filtered;
-      } catch { /* corrupted — fall through to default */ }
-    }
-    // Default: paper is enabled for discovery; live starts disabled until explicitly selected.
-    const defaults = defaultEnabledStrategyIds(mode, validIds);
-    await setSetting(key, JSON.stringify(defaults));
-    return defaults;
-  }
+  // Selection is automatic (regime brain) — no per-mode enabled list is read.
 
   app.get("/api/strategies", async (_req, res) => {
+    // Every strategy is always eligible — the regime brain governs which fire.
     const all = getAllStrategies();
-    const [paper, live] = await Promise.all([readEnabled("paper"), readEnabled("live")]);
     res.json(all.map(s => ({
       id: s.id, name: s.name, description: s.description, interval: s.interval,
-      paperEnabled: paper.includes(s.id),
-      liveEnabled:  live.includes(s.id),
-      // Back-compat: some older UI code may still read `enabled`
-      enabled: paper.includes(s.id),
+      paperEnabled: true,
+      liveEnabled:  true,
+      enabled: true,
     })));
   });
 
+  // Deprecated: per-strategy toggling is gone (selection is automatic via the
+  // regime brain). Kept as a no-op so any stale client calls don't 404.
   app.put("/api/strategies/:id/toggle", async (req, res) => {
     const { id } = req.params;
-    const { enabled, mode } = req.body as { enabled: boolean; mode?: "paper" | "live" };
-    const targetMode: "paper" | "live" = mode === "live" ? "live" : "paper";
-    const key = targetMode === "paper" ? "paper_enabled_strategies" : "live_enabled_strategies";
-    const list = await readEnabled(targetMode);
-    let next = list.slice();
-    if (enabled) { if (!next.includes(id)) next.push(id); }
-    else { next = next.filter(s => s !== id); }
-    await setSetting(key, JSON.stringify(next));
-    res.json({ id, enabled, mode: targetMode });
+    const { mode } = req.body as { enabled?: boolean; mode?: "paper" | "live" };
+    res.json({ id, enabled: true, mode: mode === "live" ? "live" : "paper", note: "deprecated: strategy selection is automatic" });
   });
 
   // Per-strategy stats
@@ -1681,16 +1646,32 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   }
 
-  async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
-    const all = getAllStrategies();
-    const enabledIds = await readEnabled(mode);
-    return all.filter(s => enabledIds.includes(s.id));
+  // Strategy selection is fully automatic: every strategy is eligible on every
+  // scan, and the regime brain (per-symbol ADX regime + BTC directional overlay)
+  // plus the per-strategy drawdown kill-switch decide which actually fire. There
+  // are no manual per-strategy toggles. `mode` is kept for signature parity.
+  async function getEnabledStrategies(_mode: "paper" | "live"): Promise<Strategy[]> {
+    return getAllStrategies();
   }
 
   // Server-side paper trading loop
   let paperCheckInterval: ReturnType<typeof setInterval> | null = null;
   let paperScanInterval: ReturnType<typeof setInterval> | null = null;
-  let paperStatus = { running: false, lastCheck: null as string | null, lastScan: null as string | null, coinsScanned: 0 };
+  interface EngineIntelligence {
+    btcRegime: string;
+    btcRegimeReason: string;
+    maxOpen: number;
+    direction: { long: boolean; short: boolean; sizeMultiplier: number; reason: string };
+    pausedStrategies: string[];
+    updatedAt: string;
+  }
+  let paperStatus = {
+    running: false,
+    lastCheck: null as string | null,
+    lastScan: null as string | null,
+    coinsScanned: 0,
+    intelligence: null as EngineIntelligence | null,
+  };
 
   async function paperCheck() {
     try {
@@ -1706,6 +1687,10 @@ export async function registerRoutes(server: Server, app: Express) {
       // "r_multiple" → peak ± (N × original-risk), where N defaults to 2.0.
       //   Adapts to each trade's natural noise so tight-SL momentum entries
       //   don't get knocked out by ordinary 2% pullbacks post-TP1.
+      // Trailing defaults to fixed_pct (2%). Backtest (3y, 1H, live-accurate)
+      // showed r_multiple 2R trailing HURT Confluence Swing (+142R vs +168R at
+      // fixed 2%) and was neutral for the others — the runner gives back profit
+      // on a loose trail. Opt into "r_multiple" via setting only if re-validated.
       const trailingMode: TrailingMode =
         (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
       const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
@@ -1932,27 +1917,20 @@ export async function registerRoutes(server: Server, app: Express) {
       } catch (err) { console.error("[btc-filter] failed:", err); }
       const effectiveRiskPct = baseRiskPct * riskMultiplier;
 
-      // ── REGIME / SHORT MACRO / BTC GATE FILTERS (opt-in via settings) ─
-      // All three default OFF — flip them on once you've paper-traded ≥2 weeks
-      // with the kill-switch and observed the regime/short stats.
-      const regimeFilterEnabled     = (await getSetting("regime_filter_enabled"))      === "true";
-      const shortMacroFilterEnabled = (await getSetting("short_macro_filter_enabled")) === "true";
-      const btcRegimeGateEnabled    = (await getSetting("btc_regime_gate_enabled"))    === "true";
-
-      // ── BTC REGIME GATE — dynamic concurrent-position cap ─────────
-      // When enabled, derives maxOpen from BTC weekly+daily trend.
-      // When disabled, defaults to maxOpen=6 (prior fixed cap).
+      // ── REGIME BRAIN (always on — no manual flags) ───────────────
+      // BTC weekly+daily trend drives both the concurrent-position cap and the
+      // directional overlay (which side the bot may open). Per-symbol ADX regime
+      // and the short-macro filter run unconditionally further down the loop.
       let btcContext: BtcRegimeContext = defaultBtcContext();
-      if (btcRegimeGateEnabled) {
-        try {
-          const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
-          btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-          console.log(`[paper-scan] BTC regime: ${btcContext.reason}`);
-        } catch (err) {
-          console.error("[btc-regime-gate] failed:", err);
-        }
+      try {
+        const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
+        btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
+        console.log(`[paper-scan] BTC regime: ${btcContext.reason}`);
+      } catch (err) {
+        console.error("[btc-regime-gate] failed:", err);
       }
       const effectiveMaxOpen = btcContext.maxOpen;
+      const dirPolicy = directionPolicyForRegime(btcContext.regime);
 
       // ── FRACTIONAL KELLY PER STRATEGY ────────────────────────────
       // Kelly% = WinRate - (LossRate / R:R)  — use half Kelly (more conservative)
@@ -2010,6 +1988,16 @@ export async function registerRoutes(server: Server, app: Express) {
         if (netR < -3) pausedStrategies.add(strat.id);
       }
 
+      // ── Publish engine intelligence snapshot (read-only, for the UI) ──
+      paperStatus.intelligence = {
+        btcRegime:       btcContext.regime,
+        btcRegimeReason: btcContext.reason,
+        maxOpen:         effectiveMaxOpen,
+        direction:       { long: dirPolicy.long, short: dirPolicy.short, sizeMultiplier: dirPolicy.sizeMultiplier, reason: dirPolicy.reason },
+        pausedStrategies: Array.from(pausedStrategies),
+        updatedAt:       new Date().toISOString(),
+      };
+
       // Track open trades per (symbol, strategy) to avoid duplicates
       const openPairs = new Set(
         paperTrades
@@ -2039,7 +2027,7 @@ export async function registerRoutes(server: Server, app: Express) {
       }));
       const totalOpen = openTradesList.length;
       if (totalOpen >= effectiveMaxOpen) {
-        if (btcRegimeGateEnabled && effectiveMaxOpen < 6) {
+        if (effectiveMaxOpen < 6) {
           console.log(`[paper-scan] BTC regime cap reached: ${totalOpen}/${effectiveMaxOpen} (${btcContext.regime})`);
         }
         return;
@@ -2134,7 +2122,6 @@ export async function registerRoutes(server: Server, app: Express) {
           let candles: OHLCV[] | null = null;
 
           let atrPercentile: number | null = null; // computed once per (sym, interval)
-          let regimeCtx: RegimeContext | null = null; // computed once per (sym, interval)
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -2190,22 +2177,24 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
-              // ── ADX REGIME FILTER (opt-in: regime_filter_enabled) ─────
-              // Blocks strategies in regimes they're not designed for:
-              //   dead_chop (ADX<18)    → blocks Confluence Swing & B&R
-              //   strong_trend (ADX>30) → blocks RSI Divergence (don't fade trends)
-              // SMC and Liquidity Sweep stay on across all regimes.
-              if (regimeFilterEnabled) {
-                if (regimeCtx === null) regimeCtx = detectRegime(candles);
-                if (!isStrategyAllowedInRegime(strat.id, regimeCtx.regime)) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${regimeCtx.reason} — strategy not allowed in this regime` });
-                  continue;
-                }
-              }
+              // NOTE: per-symbol ADX regime gate was tested in the backtest
+              // harness and REMOVED — it hurt Confluence Swing (PF 1.02→0.96)
+              // and was neutral elsewhere. Direction is governed by the BTC
+              // soft overlay below instead.
 
               const signal = strat.analyze(candles);
               if (!signal) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "no_signal", reason: "No setup detected" });
+                continue;
+              }
+
+              // ── DIRECTIONAL OVERLAY (BTC regime) ──
+              // Trade with the broad-market tide: bull → new longs only, bear →
+              // new shorts only, volatile_drift → both at half size. This is what
+              // makes the bot short in bear instead of forcing losing longs.
+              if ((signal.direction === "LONG" && !dirPolicy.long) ||
+                  (signal.direction === "SHORT" && !dirPolicy.short)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Directional overlay: ${dirPolicy.reason} — ${signal.direction} blocked`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 
@@ -2246,22 +2235,11 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
-              // ── SHORT MACRO FILTER (opt-in: short_macro_filter_enabled) ──
-              // SMC, B&R and Liquidity Sweep historically allowed SHORTs based
-              // on micro-trend only — fine in mixed markets, painful in confirmed
-              // bulls (longs PF≈3.5 vs shorts PF≈0.4 in May 2026 paper data).
-              // This requires EMA50 < EMA200 * 0.99 (decisive bear macro) before
-              // any of those three strategies can short. Confluence Swing already
-              // enforces this internally; RSI Div uses inBull/inBear by design.
-              if (shortMacroFilterEnabled
-                  && signal.direction === "SHORT"
-                  && shouldRequireMacroDownForShort(strat.id)) {
-                if (regimeCtx === null) regimeCtx = detectRegime(candles);
-                if (!regimeCtx.macroDown) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT macro filter: EMA50/200 not in confirmed bear (macroDown=false) — blocked`, signal: "SHORT", confidence: signal.confidence });
-                  continue;
-                }
-              }
+              // NOTE: the per-symbol "macroDown required for SHORTs" filter was
+              // tested and REMOVED — it cratered Liquidity Sweep (PF 1.54→1.36,
+              // sumR +249→+126) and SMC (1.06→0.78) by killing profitable
+              // counter-trend reversal shorts. The BTC soft overlay handles
+              // direction at the portfolio level instead.
 
               // ── FUNDING RATE FILTER ──
               // Crowded longs (funding > +0.1%) → squeeze risk for new LONGs
@@ -2283,6 +2261,13 @@ export async function registerRoutes(server: Server, app: Express) {
               // This just guards against degenerate signals (risk=0, inverted TPs).
               const risk = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
+              const slDistPctSig = signal.entry > 0 ? risk / signal.entry : 0;
+              // ── MINIMUM SL DISTANCE — cost-aware gate ──
+              // Reject stops so tight that round-trip fees dominate the risk.
+              if (slDistPctSig < MIN_SL_DISTANCE_PCT) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SL too tight ${(slDistPctSig*100).toFixed(2)}% < ${(MIN_SL_DISTANCE_PCT*100).toFixed(2)}% — fees would dominate`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
               if (risk <= 0 || reward / risk < 1.5) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
                 continue;
@@ -2291,7 +2276,7 @@ export async function registerRoutes(server: Server, app: Express) {
               // ── POSITION SIZING (Fractional Kelly per strategy) ──
               // Uses half-Kelly derived from real closed trades if ≥10 available,
               // otherwise falls back to base risk %. Multiplied by BTC macro multiplier.
-              const kellyPct    = (strategyKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier;
+              const kellyPct    = (strategyKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier * dirPolicy.sizeMultiplier;
               const slDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
               const riskUsd     = currentBalance * kellyPct / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
@@ -2597,6 +2582,10 @@ export async function registerRoutes(server: Server, app: Express) {
 
       // ── TRAILING STOP MODE — opt-in via setting (default fixed_pct/2%) ──
       // Mirrors paperCheck. See computeTrailStop() in trailing-stop.ts.
+      // Trailing defaults to fixed_pct (2%). Backtest (3y, 1H, live-accurate)
+      // showed r_multiple 2R trailing HURT Confluence Swing (+142R vs +168R at
+      // fixed 2%) and was neutral for the others — the runner gives back profit
+      // on a loose trail. Opt into "r_multiple" via setting only if re-validated.
       const trailingMode: TrailingMode =
         (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
       const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
@@ -2814,13 +2803,10 @@ export async function registerRoutes(server: Server, app: Express) {
         return;
       }
 
-      // ── REGIME / SHORT MACRO / BTC GATE FILTERS (opt-in via settings) ──
-      // Mirrors paper engine. All default OFF; flip on after paper validation.
-      // Loaded BEFORE the early concurrent-position cap so the dynamic maxOpen
-      // can apply to the cap check itself.
-      const regimeFilterEnabled     = (await getSetting("regime_filter_enabled"))      === "true";
-      const shortMacroFilterEnabled = (await getSetting("short_macro_filter_enabled")) === "true";
-      const btcRegimeGateEnabled    = (await getSetting("btc_regime_gate_enabled"))    === "true";
+      // ── REGIME BRAIN (always on — no manual flags) ──
+      // Mirrors paper engine: BTC weekly+daily trend drives the concurrent
+      // cap and the directional overlay; per-symbol ADX regime + short-macro
+      // filter run unconditionally below. Loaded BEFORE the early cap check.
 
       // BTC trends — daily fetched here so it's available for both the BTC gate
       // (computed next) and the per-trade riskMultiplier (set later).
@@ -2830,20 +2816,19 @@ export async function registerRoutes(server: Server, app: Express) {
       } catch (err) { console.error("[btc-filter] failed:", err); }
 
       let btcContext: BtcRegimeContext = defaultBtcContext();
-      if (btcRegimeGateEnabled) {
-        try {
-          const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
-          btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-          console.log(`[live-scan] BTC regime: ${btcContext.reason}`);
-        } catch (err) {
-          console.error("[btc-regime-gate] failed:", err);
-        }
+      try {
+        const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
+        btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
+        console.log(`[live-scan] BTC regime: ${btcContext.reason}`);
+      } catch (err) {
+        console.error("[btc-regime-gate] failed:", err);
       }
       const effectiveMaxOpen = btcContext.maxOpen;
+      const dirPolicy = directionPolicyForRegime(btcContext.regime);
 
-      // Cap at effectiveMaxOpen concurrent live positions (dynamic when BTC regime gate is on, else 6)
+      // Cap at effectiveMaxOpen concurrent live positions (dynamic per BTC regime)
       if (openLive.length >= effectiveMaxOpen || liveEngineStatus.openPositions >= effectiveMaxOpen) {
-        if (btcRegimeGateEnabled && effectiveMaxOpen < 6) {
+        if (effectiveMaxOpen < 6) {
           console.log(`[live-scan] BTC regime cap reached: open=${openLive.length} mexc=${liveEngineStatus.openPositions} cap=${effectiveMaxOpen} (${btcContext.regime})`);
         }
         return;
@@ -3006,7 +2991,6 @@ export async function registerRoutes(server: Server, app: Express) {
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
           let atrPercentile: number | null = null;
-          let regimeCtx: RegimeContext | null = null;
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -3049,17 +3033,17 @@ export async function registerRoutes(server: Server, app: Express) {
               if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
               if (atrPercentile > 85) continue;
 
-              // ── ADX REGIME FILTER (opt-in: regime_filter_enabled) ──
-              if (regimeFilterEnabled) {
-                if (regimeCtx === null) regimeCtx = detectRegime(candles);
-                if (!isStrategyAllowedInRegime(strat.id, regimeCtx.regime)) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${regimeCtx.reason} — strategy not allowed in this regime` });
-                  continue;
-                }
-              }
+              // (ADX regime gate removed — backtest-negative; see paper scanner note)
 
               const signal = strat.analyze(candles);
               if (!signal) continue;
+
+              // ── DIRECTIONAL OVERLAY (BTC regime) ──
+              if ((signal.direction === "LONG" && !dirPolicy.long) ||
+                  (signal.direction === "SHORT" && !dirPolicy.short)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Directional overlay: ${dirPolicy.reason} — ${signal.direction} blocked`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
 
               // ── DAILY TREND FILTER ──
               const isContraTrend =
@@ -3082,16 +3066,7 @@ export async function registerRoutes(server: Server, app: Express) {
               // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
               if (signal.direction === "SHORT" && signal.confidence < 72) continue;
 
-              // ── SHORT MACRO FILTER (opt-in: short_macro_filter_enabled) ──
-              if (shortMacroFilterEnabled
-                  && signal.direction === "SHORT"
-                  && shouldRequireMacroDownForShort(strat.id)) {
-                if (regimeCtx === null) regimeCtx = detectRegime(candles);
-                if (!regimeCtx.macroDown) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT macro filter: EMA50/200 not in confirmed bear (macroDown=false) — blocked`, signal: "SHORT", confidence: signal.confidence });
-                  continue;
-                }
-              }
+              // (per-symbol SHORT macro filter removed — backtest-negative; see paper scanner note)
 
               // ── FUNDING RATE FILTER ──
               if (funding != null) {
@@ -3099,13 +3074,18 @@ export async function registerRoutes(server: Server, app: Express) {
                 if (signal.direction === "SHORT" && funding < FUNDING_SHORT_MIN) continue;
               }
 
-              // ── MINIMUM R:R CHECK ──
+              // ── MINIMUM R:R CHECK + cost-aware SL floor ──
               const risk   = Math.abs(signal.entry - signal.stopLoss);
               const reward = Math.abs(signal.takeProfit1 - signal.entry);
+              const slDistPctSig = signal.entry > 0 ? risk / signal.entry : 0;
+              if (slDistPctSig < MIN_SL_DISTANCE_PCT) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SL too tight ${(slDistPctSig*100).toFixed(2)}% < ${(MIN_SL_DISTANCE_PCT*100).toFixed(2)}% — fees would dominate`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
               if (risk <= 0 || reward / risk < 1.5) continue;
 
               // ── POSITION SIZING (Fractional Kelly per strategy) ──
-              const kellyPct  = (liveKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier;
+              const kellyPct  = (liveKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier * dirPolicy.sizeMultiplier;
               const slDistPct = risk / signal.entry;
               const riskUsd   = currentBalance * kellyPct / 100;
               const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;

@@ -29,8 +29,14 @@ export const breakRetestStrategy: Strategy = {
   //   🟢 SAND train +118 / test +18 PF 2.50
   //   🟢 BNB  train +2 / test +19 PF 3.23
   //   ❌ NEAR (train -14 → test +85 but only 9 trades train, unstable)
-  //   ❌ ETC  (train +78 → test -5) overfit
-  preferredSymbols: ["SOL", "SAND", "BNB"],
+  // ── Universe expansion May 2026 (offline harness, 8000×4H ≈ 3.6y full-sample) ──
+  //   Added on PF≥1.7 + positive netR + adequate T across the full window:
+  //     🟢 XRP  T=23 PF 2.40 +10.4R   🟢 AVAX T=18 PF 1.75 +7.9R
+  //     🟢 ETC  T=19 PF 1.71 +4.6R
+  //   Rejected: LTC 0.70 / DOT 0.49 / ATOM 0.85 (net-negative); NEAR PF 2.14 but T=10 (too few).
+  //   Under the BTC soft overlay the 6-coin set pools to PF 1.93 / +37R (vs 3-coin 2.31 / +25R)
+  //   — lower PF but ~60% more trades and more total R, the right trade for a low-freq strategy.
+  preferredSymbols: ["SOL", "SAND", "BNB", "XRP", "AVAX", "ETC"],
   cooldownHours: 12,  // matches backtest COOLDOWN=3×4H bars
 
   analyze(candles: OHLCV[]): StrategySignal | null {

@@ -13,6 +13,10 @@ export interface ManagedExitConfig {
   trailingPct?: number;
   takerFeePct?: number;
   slippagePct?: number;
+  /** Trailing mode for the post-TP1 runner. Defaults to "fixed_pct" (legacy). */
+  trailMode?: "fixed_pct" | "r_multiple";
+  /** R-multiple for "r_multiple" trail (peak ∓ k×|entry-SL|). Defaults to 2.0. */
+  trailRMultiple?: number;
 }
 
 export interface ManagedExitResult {
@@ -61,6 +65,8 @@ export function simulateManagedExit(
   const trailingPct = Math.max(0, config.trailingPct ?? DEFAULT_TRAILING_PCT);
   const takerFeePct = Math.max(0, config.takerFeePct ?? DEFAULT_TAKER_FEE_PCT);
   const slippagePct = Math.max(0, config.slippagePct ?? DEFAULT_SLIPPAGE_PCT);
+  const trailMode   = config.trailMode ?? "fixed_pct";
+  const trailR      = Math.max(0, config.trailRMultiple ?? 2.0);
 
   const { direction, entry, stopLoss, takeProfit1 } = levels;
   const takeProfit2 = levels.takeProfit2 ?? takeProfit1;
@@ -68,6 +74,17 @@ export function simulateManagedExit(
   if (riskAbs <= 0 || entry <= 0) {
     throw new Error("Managed exit requires positive entry and non-zero risk");
   }
+
+  // Trailing-stop level for the post-TP1 runner. Matches computeTrailStop() in
+  // trailing-stop.ts so the backtest mirrors the live engine exactly:
+  //   fixed_pct  → peak ∓ peak×trailingPct   (legacy 2%)
+  //   r_multiple → peak ∓ trailR×|entry-SL|  (adapts to each trade's own risk)
+  const trailStopFor = (pk: number): number => {
+    if (trailMode === "r_multiple") {
+      return direction === "LONG" ? pk - trailR * riskAbs : pk + trailR * riskAbs;
+    }
+    return direction === "LONG" ? pk * (1 - trailingPct) : pk * (1 + trailingPct);
+  };
 
   let outcome: ManagedExitResult["outcome"] = "timeout";
   let tp1Hit = false;
@@ -109,7 +126,7 @@ export function simulateManagedExit(
       }
 
       if (tp1Hit && remainingShare > 0) {
-        const trailStop = peak * (1 - trailingPct);
+        const trailStop = trailStopFor(peak);
         if (candle.low <= trailStop && trailStop > entry) {
           outcome = "trailing";
           closeShare(remainingShare, trailStop);
@@ -147,7 +164,7 @@ export function simulateManagedExit(
       }
 
       if (tp1Hit && remainingShare > 0) {
-        const trailStop = peak * (1 + trailingPct);
+        const trailStop = trailStopFor(peak);
         if (candle.high >= trailStop && trailStop < entry) {
           outcome = "trailing";
           closeShare(remainingShare, trailStop);

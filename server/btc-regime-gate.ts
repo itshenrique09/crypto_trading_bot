@@ -51,8 +51,6 @@ export interface BtcRegimeContext {
   reason: string;
 }
 
-const FALLBACK_MAX_OPEN = 6;
-
 export function classifyBtcRegime(input: BtcTrendInput): BtcRegimeContext {
   const { daily, weekly } = input;
 
@@ -99,13 +97,57 @@ export function classifyBtcRegime(input: BtcTrendInput): BtcRegimeContext {
   };
 }
 
-// Default context used when the gate is disabled or input is unavailable.
-// Preserves the original `maxOpen=6` behaviour so toggling the gate off
-// returns the engine to its prior limits exactly.
+// Fallback context used when BTC trend data is unavailable (API failure).
+// Conservative neutral_bullish: longs allowed, shorts blocked, max_open=5.
 export function defaultBtcContext(): BtcRegimeContext {
   return {
     regime: "neutral_bullish",
-    maxOpen: FALLBACK_MAX_OPEN,
-    reason: "BTC regime gate disabled — default max_open=6",
+    maxOpen: 5,
+    reason: "BTC trend unavailable — defaulting to neutral_bullish (max_open=5)",
   };
+}
+
+// ─── DIRECTIONAL OVERLAY (SOFT) ────────────────────────────────────────────
+// Portfolio-level "trade with BTC's tide" gate. This is what lets the bot
+// SHORT in a confirmed bear instead of forcing longs into a falling tape.
+//
+// SOFT policy — backtest-validated (Apr 2026 harness, 8000-candle Binance):
+//   Direction is only restricted in *high-conviction* BTC regimes. In neutral /
+//   mixed markets both directions stay open so each strategy's own edge (incl.
+//   mean-reversion shorts) can play out. Imposing direction in neutral regimes
+//   was tested and was strictly worse — e.g. Liquidity Sweep:
+//     baseline       PF 1.54  sumR +249
+//     hard overlay   PF 1.81  sumR +218   (over-filters profitable counter-trades)
+//     SOFT overlay   PF 1.77  sumR +272   ← best PF *and* best total R
+//   Break & Retest also improved (PF 1.91 → 2.31); Swing/RSI neutral.
+//   (A per-symbol "macroDown required for shorts" filter was also tested and
+//    REJECTED — it cratered Liquidity Sweep to PF 1.36 / +126R.)
+//
+//   regime           | new longs | new shorts | size× | rationale
+//   -----------------|-----------|------------|-------|----------------------------
+//   risk_on          | yes       | no         | 1.00  | clear bull — don't fight it
+//   risk_off         | no        | yes        | 1.00  | clear bear — don't fight it
+//   neutral_bullish  | yes       | yes        | 1.00  | mixed — let strategy edge decide
+//   neutral_bearish  | yes       | yes        | 1.00  | mixed — let strategy edge decide
+//   volatile_drift   | yes       | yes        | 0.50  | low conviction — both, half size
+export interface DirectionPolicy {
+  long: boolean;
+  short: boolean;
+  sizeMultiplier: number;
+  reason: string;
+}
+
+export function directionPolicyForRegime(regime: BtcRegime): DirectionPolicy {
+  switch (regime) {
+    case "risk_on":
+      return { long: true, short: false, sizeMultiplier: 1.0, reason: "risk_on → new longs only (clear BTC bull)" };
+    case "risk_off":
+      return { long: false, short: true, sizeMultiplier: 1.0, reason: "risk_off → new shorts only (clear BTC bear)" };
+    case "volatile_drift":
+      return { long: true, short: true, sizeMultiplier: 0.5, reason: "volatile_drift → both directions, half size" };
+    case "neutral_bullish":
+      return { long: true, short: true, sizeMultiplier: 1.0, reason: "neutral_bullish → both directions (strategy edge decides)" };
+    case "neutral_bearish":
+      return { long: true, short: true, sizeMultiplier: 1.0, reason: "neutral_bearish → both directions (strategy edge decides)" };
+  }
 }
