@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyBtcRegime, defaultBtcContext } from "./btc-regime-gate";
+import { classifyBtcRegime, defaultBtcContext, directionPolicyForRegime } from "./btc-regime-gate";
 
 test("risk_on: BTC weekly up + daily up → maxOpen 6", () => {
   const ctx = classifyBtcRegime({ daily: "up", weekly: "up" });
@@ -57,10 +57,47 @@ test("neutral_bullish: daily up + weekly neutral → maxOpen 5", () => {
   assert.equal(ctx.maxOpen, 5);
 });
 
-test("defaultBtcContext preserves the prior maxOpen=6 behaviour", () => {
+test("defaultBtcContext is a conservative neutral_bullish fallback (maxOpen=5)", () => {
   const ctx = defaultBtcContext();
-  assert.equal(ctx.maxOpen, 6);
+  assert.equal(ctx.maxOpen, 5);
   assert.equal(ctx.regime, "neutral_bullish");
+});
+
+// ─── Directional overlay (SOFT — backtest-validated) ──────────────────────
+test("risk_on restricts to longs only (clear BTC bull)", () => {
+  const d = directionPolicyForRegime("risk_on");
+  assert.equal(d.long, true);
+  assert.equal(d.short, false);
+  assert.equal(d.sizeMultiplier, 1.0);
+});
+
+test("risk_off restricts to shorts only (clear BTC bear)", () => {
+  const d = directionPolicyForRegime("risk_off");
+  assert.equal(d.long, false);
+  assert.equal(d.short, true);
+  assert.equal(d.sizeMultiplier, 1.0);
+});
+
+test("neutral regimes allow BOTH directions (soft overlay — strategy edge decides)", () => {
+  for (const regime of ["neutral_bullish", "neutral_bearish"] as const) {
+    const d = directionPolicyForRegime(regime);
+    assert.equal(d.long, true, `${regime} should allow longs`);
+    assert.equal(d.short, true, `${regime} should allow shorts`);
+    assert.equal(d.sizeMultiplier, 1.0);
+  }
+});
+
+test("volatile_drift allows both directions at half size", () => {
+  const d = directionPolicyForRegime("volatile_drift");
+  assert.equal(d.long, true);
+  assert.equal(d.short, true);
+  assert.equal(d.sizeMultiplier, 0.5);
+});
+
+test("direction is only hard-restricted in the two high-conviction regimes", () => {
+  const restricted = (["risk_on", "neutral_bullish", "neutral_bearish", "risk_off", "volatile_drift"] as const)
+    .filter(r => { const d = directionPolicyForRegime(r); return !(d.long && d.short); });
+  assert.deepEqual(restricted.sort(), ["risk_off", "risk_on"]);
 });
 
 test("regime is monotonic: risk-off has the lowest maxOpen, risk-on the highest", () => {
