@@ -14,6 +14,7 @@ import { dropOpenCandle } from "./candles";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
+import { isRollingDrawdownBreached, strategiesToPause } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, directionPolicyForRegime, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
@@ -58,6 +59,20 @@ const TRADE_COSTS = { takerFeePct: TAKER_FEE_PCT, slippagePct: SLIPPAGE_PCT };
 // −0.35% move into −1.66R in May 2026 paper data). Reject such signals outright
 // rather than widening the structural stop. 0.6% ≈ 4× round-trip → fee drag ≤ ~0.23R.
 const MIN_SL_DISTANCE_PCT = 0.006;
+
+// ── Drawdown-guard tuning (shared by paper + live engines) ──
+// Calendar daily (−4R) and monthly (−8R) limits reset on their boundaries and
+// can miss a slow multi-day grind. A rolling 7-day window has no blind spot;
+// −6R over a week (1.5× the daily cap across 7× the time) signals a structural
+// problem, not normal R-multiple variance, so it only trips on a real bleed.
+const ROLLING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const ROLLING_DRAWDOWN_MAX_LOSS_R = 6;
+// Per-strategy kill-switch: 4-trade floor (was 6). At ~3 min scans most of the
+// suite is low-frequency and never reached 6 closed trades in 7 days, leaving
+// the switch effectively dead for them; 4 keeps random-variance protection
+// while letting it actually fire. Pause when window netR < −3R.
+const KILL_SWITCH_MIN_TRADES = 4;
+const KILL_SWITCH_MAX_NET_R = -3;
 
 function normalizeDirection(direction: string): "LONG" | "SHORT" {
   return direction === "SHORT" ? "SHORT" : "LONG";
@@ -1906,6 +1921,13 @@ export async function registerRoutes(server: Server, app: Express) {
       const monthPnlUsd = monthTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       if (monthPnlUsd < -8 * daily1R) return;  // Monthly drawdown limit: -8R
 
+      // Rolling 7-day: catches a multi-day grind that never trips the calendar
+      // daily/monthly caps because each single period stays above its limit.
+      if (isRollingDrawdownBreached(closedTrades, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
+        console.log(`[paper-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
+        return;
+      }
+
       // ── BTC MACRO RISK FILTER ─────────────────────────────────────
       // Adjust risk % based on BTC daily trend
       let riskMultiplier = 1.0;
@@ -1964,29 +1986,17 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       // ── PER-STRATEGY DRAWDOWN KILL-SWITCH ─────────────────────────
-      // Complements portfolio-level -4R daily / -8R monthly checks.
-      // Pauses an individual strategy in regime shift even when the
+      // Complements portfolio-level -4R daily / -8R monthly / -6R rolling-7d
+      // checks. Pauses an individual strategy in a regime shift even when the
       // overall portfolio is net positive (other strategies carrying).
-      // Trigger: ≥6 closed trades in last 7d AND netR < -3R.
-      // The ≥6 floor filters out random variance; low-freq strategies
-      // (B&R, SMC) rarely hit it and are less regime-sensitive anyway.
-      // Self-healing: re-evaluated each scan — auto-resumes as losses
-      // age past the 7d window or new wins rebalance the netR.
-      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      const pausedStrategies = new Set<string>();
-      for (const strat of strategies) {
-        const recent = closedTrades.filter(e =>
-          e.strategy === strat.id &&
-          e.closed_at &&
-          new Date(e.closed_at).getTime() >= weekAgo
-        );
-        if (recent.length < 6) continue;
-        const netR = recent.reduce((s, e) => {
-          if (!e.pnl_usd || !e.risk_usd || e.risk_usd <= 0) return s;
-          return s + e.pnl_usd / e.risk_usd;
-        }, 0);
-        if (netR < -3) pausedStrategies.add(strat.id);
-      }
+      // Trigger: ≥KILL_SWITCH_MIN_TRADES closed trades in last 7d AND
+      // netR < KILL_SWITCH_MAX_NET_R. Self-healing: re-evaluated each scan —
+      // auto-resumes as losses age past the 7d window or wins rebalance netR.
+      const pausedStrategies = strategiesToPause(
+        closedTrades,
+        strategies.map(s => s.id),
+        { windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R },
+      );
 
       // ── Publish engine intelligence snapshot (read-only, for the UI) ──
       paperStatus.intelligence = {
@@ -2876,24 +2886,20 @@ export async function registerRoutes(server: Server, app: Express) {
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       if (monthPnl < -8 * daily1R) return;  // Monthly DD limit: -8R
 
-      // ── PER-STRATEGY DRAWDOWN KILL-SWITCH (live) ───────────────────
-      // Same rule as paper: ≥6 closed trades in last 7d AND netR < -3R
-      // → pause that strategy until the rolling window recovers.
-      const weekAgoLive = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      const pausedStrategiesLive = new Set<string>();
-      for (const strat of strategies) {
-        const recent = closedLive.filter(e =>
-          e.strategy === strat.id &&
-          e.closed_at &&
-          new Date(e.closed_at).getTime() >= weekAgoLive
-        );
-        if (recent.length < 6) continue;
-        const netR = recent.reduce((s, e) => {
-          if (!e.pnl_usd || !e.risk_usd || e.risk_usd <= 0) return s;
-          return s + e.pnl_usd / e.risk_usd;
-        }, 0);
-        if (netR < -3) pausedStrategiesLive.add(strat.id);
+      // Rolling 7-day portfolio guard — matches paper engine.
+      if (isRollingDrawdownBreached(closedLive, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
+        console.log(`[live-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
+        return;
       }
+
+      // ── PER-STRATEGY DRAWDOWN KILL-SWITCH (live) ───────────────────
+      // Same rule as paper: ≥KILL_SWITCH_MIN_TRADES closed trades in last 7d
+      // AND netR < KILL_SWITCH_MAX_NET_R → pause until the window recovers.
+      const pausedStrategiesLive = strategiesToPause(
+        closedLive,
+        strategies.map(s => s.id),
+        { windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R },
+      );
 
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
       const openSymbolExposures = openLive.map(e => ({

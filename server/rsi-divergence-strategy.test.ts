@@ -3,5 +3,6 @@ import assert from "node:assert/strict";
 import { rsiDivergenceStrategy } from "./strategies/rsi-divergence";
 
 test("RSI Divergence only enables MEXC-vetted symbols with recent edge", () => {
-  assert.deepEqual(rsiDivergenceStrategy.preferredSymbols, ["BCH", "ATOM", "INJ"]);
+  // BCH dropped Jun 2026 after re-validation (T=16 exp -0.09R, edge decayed OOS).
+  assert.deepEqual(rsiDivergenceStrategy.preferredSymbols, ["ATOM", "INJ"]);
 });

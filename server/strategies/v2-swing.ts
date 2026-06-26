@@ -26,7 +26,12 @@ export const v2SwingStrategy: Strategy = {
   //     SAND/SOL/INJ/BTC/LTC/FIL/UNI/NEAR/DOT/AAVE/LINK/BCH/SUI — test<0
   //   ❌ Still excluded: MATIC (Binance delisted → POL migration)
   //   Low WR 20-26% is expected — R-multiple strategy (TP1=1.5R, TP2=2.5R).
-  preferredSymbols: ["DOGE", "AVAX", "XRP", "ICP", "ETH", "BNB"],
+  // ── 2026 re-validation (Jun 26, validate-2026.ts, 1y 1H, live gates) ──
+  //   AVAX DROPPED: T=82 exp -0.16R PF 0.79 — net-negative on a solid sample.
+  //   Kept (2026 exp/PF): XRP +0.34/1.52  ETH +0.20/1.30  DOGE +0.07/1.11
+  //   ICP +0.04/1.06  BNB +0.03/1.05. Suite is thin (pooled exp +0.08R) — Swing
+  //   is the weakest active strategy; keep but do not lean on it.
+  preferredSymbols: ["DOGE", "XRP", "ICP", "ETH", "BNB"],
   cooldownHours: 20,  // matches backtest COOLDOWN=20×1H bars (= 5×4H bars, same 20h real-time)
 
   analyze(candles: OHLCV[]): StrategySignal | null {

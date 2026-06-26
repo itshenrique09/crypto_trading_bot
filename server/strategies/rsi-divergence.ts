@@ -19,7 +19,11 @@ export const rsiDivergenceStrategy: Strategy = {
   //   INJ  +1.2R overall / +9.6R 2026
   // Removed FIL (no current MEXC futures ticker), DOT/SOL/SAND/AAVE/AVAX
   // because recent MEXC results were flat or negative.
-  preferredSymbols: ["BCH", "ATOM", "INJ"],
+  // ── 2026 re-validation (Jun 26, validate-2026.ts, 1y 1H, live gates) ──
+  //   BCH DROPPED: T=16 exp -0.09R PF 0.88 — the +1.0R/2026 edge it was kept
+  //   for has decayed out-of-sample (now net-negative); a live BCH short also
+  //   lost. Kept: ATOM +0.44R/PF 1.77, INJ +0.45R/PF 1.74 (both strong 2026).
+  preferredSymbols: ["ATOM", "INJ"],
   cooldownHours: 20,
 
   analyze(candles: OHLCV[]): StrategySignal | null {
