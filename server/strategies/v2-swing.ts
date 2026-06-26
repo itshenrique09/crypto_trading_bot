@@ -26,12 +26,16 @@ export const v2SwingStrategy: Strategy = {
   //     SAND/SOL/INJ/BTC/LTC/FIL/UNI/NEAR/DOT/AAVE/LINK/BCH/SUI — test<0
   //   ❌ Still excluded: MATIC (Binance delisted → POL migration)
   //   Low WR 20-26% is expected — R-multiple strategy (TP1=1.5R, TP2=2.5R).
-  // ── 2026 re-validation (Jun 26, validate-2026.ts, 1y 1H, live gates) ──
+  // ── 2026 re-validation (Jun 26, validate-2026.ts + validate-universe.ts) ──
   //   AVAX DROPPED: T=82 exp -0.16R PF 0.79 — net-negative on a solid sample.
-  //   Kept (2026 exp/PF): XRP +0.34/1.52  ETH +0.20/1.30  DOGE +0.07/1.11
-  //   ICP +0.04/1.06  BNB +0.03/1.05. Suite is thin (pooled exp +0.08R) — Swing
-  //   is the weakest active strategy; keep but do not lean on it.
-  preferredSymbols: ["DOGE", "XRP", "ICP", "ETH", "BNB"],
+  //   Universe scan promoted 4 large-sample coins whose 2026 edge dwarfs the
+  //   current weakest holdings (DOGE/ICP/BNB ~+0.05R):
+  //     SUI +0.39R/PF1.62/T85  BCH +0.39R/PF1.67/T65  PEPE +0.35R/PF1.59/T89
+  //     NEAR +0.31R/PF1.51/T87  (all cross-confirmed positive in Liquidity Sweep)
+  //   NOTE: BCH is added HERE (momentum confluence) even though it was cut from
+  //   RSI Divergence — it has edge with trend-following logic, not mean-reversion.
+  //   These edges are trend-regime dependent — paper-watch before leaning on them.
+  preferredSymbols: ["DOGE", "XRP", "ICP", "ETH", "BNB", "SUI", "BCH", "PEPE", "NEAR"],
   cooldownHours: 20,  // matches backtest COOLDOWN=20×1H bars (= 5×4H bars, same 20h real-time)
 
   analyze(candles: OHLCV[]): StrategySignal | null {

@@ -47,7 +47,14 @@ export const liquiditySweepStrategy: Strategy = {
   //   ⚠️  ENA PF 3.06 T=39 (just below T≥40 threshold — re-test when more data)
   //   ⚠️  WLD PF 2.76 T=34 (low trade count — re-test when more data)
   //   ❌ SHIB/SPK/PAXG drop below PF 2 under conf≥68 production gate
-  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR"],
+  // ── Universe expansion Jun 26 2026 (validate-universe.ts, 1y 1H, live gates) ──
+  //   Tested all 31 tradeable coins; promoted 7 not-yet-traded with strong 2026
+  //   edge (PF≥1.84, exp≥+0.53R) to raise trade frequency on the proven workhorse
+  //   (this strategy was the most robust OOS in the original walk-forward):
+  //     SEI +0.83R/PF2.55  ETH +0.72R/PF2.20  SUI +0.70R/PF2.18  BNB +0.70R/PF2.13
+  //     ARB +0.69R/PF2.13  TIA +0.64R/PF2.04  BTC +0.53R/PF1.84
+  //   (SHIB +0.37R and ADA +0.01R left out — sample T<15 or no edge.)
+  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {
