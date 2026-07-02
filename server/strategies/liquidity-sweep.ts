@@ -1,6 +1,18 @@
 import type { Strategy, StrategySignal } from "./types";
 import { liquiditySweepSignal, type OHLCV } from "../analysis";
 
+// ═══ PARAMETER FREEZE — 2026-07-02 ══════════════════════════════════════
+// Universe and parameters below are FROZEN as validated by the full-pipeline
+// portfolio harness (script/validate-pipeline.ts, shipped config incl. the
+// 41-coin MEXC-verified universe + group cap 3: PF 1.93 · +688R · maxDD 35.8%
+// with fees+slippage; pre-expansion fallback 28 coins/cap 2: PF 2.01 · +517R ·
+// maxDD 27.4%).
+// Do NOT add/remove coins or retune thresholds based on recent-window backtests —
+// that is the selection-bias cycle that broke this project (universe picked on
+// the same 2026 window used to "validate" it). Changes require: (1) a hypothesis
+// stated BEFORE looking at results, (2) full-pipeline A/B on ALL+2026 windows,
+// (3) 90 days of frozen paper trading confirming the direction of the change.
+// ═════════════════════════════════════════════════════════════════════════
 export const liquiditySweepStrategy: Strategy = {
   id: "liquidity-sweep",
   name: "Liquidity Sweep",
@@ -54,7 +66,16 @@ export const liquiditySweepStrategy: Strategy = {
   //     SEI +0.83R/PF2.55  ETH +0.72R/PF2.20  SUI +0.70R/PF2.18  BNB +0.70R/PF2.13
   //     ARB +0.69R/PF2.13  TIA +0.64R/PF2.04  BTC +0.53R/PF1.84
   //   (SHIB +0.37R and ADA +0.01R left out — sample T<15 or no edge.)
-  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC"],
+  // ── Universe expansion Jul 2 2026 (script/expand-universe-ls.ts) ──
+  //   Two-halves consistency screen (NOT the old 2026-only method): pass =
+  //   T≥30 · PF≥1.5 · sumR>0 in BOTH halves of the 1y window, then accepted
+  //   only after the FULL-PIPELINE portfolio run improved with them included.
+  //   13 added: FET RENDER ONDO ENA WLD CRV GALA RUNE GRT IMX POL VET ADA
+  //   12 rejected by screen: TRX ALGO XLM JUP WIF MKR MANA STX TAO AXS OP SHIB
+  //   2 passed the screen but have NO tradeable MEXC futures contract
+  //   (script/check-mexc-symbols.ts): TON (none) and BONK (only 1000BONK_USDT,
+  //   1000× price scale — unsafe alias). Excluded so backtest = paper = live.
+  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC", "FET", "RENDER", "ONDO", "ENA", "WLD", "CRV", "GALA", "RUNE", "GRT", "IMX", "POL", "VET", "ADA"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {

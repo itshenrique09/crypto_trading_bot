@@ -7,7 +7,7 @@ import {
   getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
   getSetting, setSetting,
 } from "./storage";
-import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, calcATRPercentile, type OHLCV } from "./analysis";
+import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 import { dropOpenCandle } from "./candles";
@@ -15,7 +15,7 @@ import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval
 import { getRuntimeInfo } from "./runtime-info";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
 import { isRollingDrawdownBreached, strategiesToPause } from "./portfolio-guards";
-import { classifyBtcRegime, defaultBtcContext, directionPolicyForRegime, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
+import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
@@ -73,6 +73,20 @@ const ROLLING_DRAWDOWN_MAX_LOSS_R = 6;
 // while letting it actually fire. Pause when window netR < −3R.
 const KILL_SWITCH_MIN_TRADES = 4;
 const KILL_SWITCH_MAX_NET_R = -3;
+
+// ── MAX-HOLD TIMEOUT — parity with the validation harness (Jul 2026) ──────
+// The pipeline harness (script/validate-pipeline.ts) and every backtest that
+// validated this system force-close any trade still open after maxBars
+// (200×1h ≈ 8.3 days, 60×4h = 10 days). The engines previously had no such
+// exit: positions could linger for weeks (an XRP paper trade once sat open
+// 5+ weeks), blocking the symbol slot and diverging from the validated system.
+// Both engines now close stale positions at market once the age exceeds the
+// strategy interval's budget.
+const MAX_HOLD_HOURS_BY_INTERVAL: Record<string, number> = { "1h": 200, "4h": 240 };
+function maxHoldHoursForStrategy(strategyId: string | null | undefined): number {
+  const strat = strategyId ? getAllStrategies().find(s => s.id === strategyId) : undefined;
+  return MAX_HOLD_HOURS_BY_INTERVAL[strat?.interval ?? "4h"] ?? 240;
+}
 
 function normalizeDirection(direction: string): "LONG" | "SHORT" {
   return direction === "SHORT" ? "SHORT" : "LONG";
@@ -1568,10 +1582,17 @@ export async function registerRoutes(server: Server, app: Express) {
     BTC: "major", ETH: "major", BNB: "major", XRP: "major", LTC: "major",
     DOGE: "meme", SHIB: "meme", PEPE: "meme",
     LINK: "defi", UNI: "defi", FIL: "defi", ATOM: "defi",
-    SAND: "gaming", VET: "infra",
+    ONDO: "defi", ENA: "defi", CRV: "defi", RUNE: "defi",
+    SAND: "gaming", GALA: "gaming", IMX: "gaming", VET: "infra",
     SUI: "L1", ARB: "L1", OP: "L1", APT: "L1", INJ: "L1", SEI: "L1", TIA: "L1",
+    POL: "L1",
+    FET: "ai", RENDER: "ai", WLD: "ai", GRT: "ai",
   };
-  const MAX_PER_GROUP = 2;
+  // Raised 2 → 3 with the Jul 2026 LS universe expansion (43 coins): at cap 2
+  // the new coins bottlenecked inside their groups and only diluted expectancy
+  // (PF 1.82, maxDD 42.4%); at cap 3 the expansion pays: +671R vs +517R
+  // pre-expansion (PF 1.90, maxDD 37.6%). Cap 3 + maxOpen 12 was worse — keep 10.
+  const MAX_PER_GROUP = 3;
 
   // ── Minimum 24h volume (USDT) to trade — avoids illiquid / manipulated markets ──
   const MIN_VOLUME_USDT = 30_000_000; // $30M
@@ -1728,6 +1749,23 @@ export async function registerRoutes(server: Server, app: Express) {
           remainingPositionSizeUsd: trade.remaining_position_size_usd,
           realizedPnlUsd: trade.realized_pnl_usd,
         };
+
+        // ── MAX-HOLD TIMEOUT — close stale positions at market ──────────
+        const ageHours = (Date.now() - new Date(trade.created_at).getTime()) / 3_600_000;
+        const maxHoldH = maxHoldHoursForStrategy(trade.strategy);
+        if (Number.isFinite(ageHours) && ageHours > maxHoldH) {
+          const timeoutAccounting = finalizeTradeAccounting(accountingState, price, TRADE_COSTS);
+          await updateJournalEntry(trade.id, {
+            outcome:     timeoutAccounting.outcome,
+            exit_price:  Math.round(price * 10000) / 10000,
+            pnl_pct:     Math.round(timeoutAccounting.pnlPct * 100) / 100,
+            pnl_usd:     timeoutAccounting.pnlUsd !== null ? Math.round(timeoutAccounting.pnlUsd * 100) / 100 : undefined,
+            remaining_position_size_usd: 0,
+            closed_at:   new Date().toISOString(),
+            notes:       (trade.notes || "") + ` | Max-hold timeout ${maxHoldH}h — closed at market (backtest parity)`,
+          });
+          continue;
+        }
 
         // Update peak price (best price in favour of trade)
         const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
@@ -1915,14 +1953,13 @@ export async function registerRoutes(server: Server, app: Express) {
       const dailyPnlUsd = todayTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       if (dailyPnlUsd < -4 * daily1R) return;  // Daily drawdown limit: -4R
 
-      // Monthly: if this month's closed P&L < -8R → pause
-      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-      const monthTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= monthStart);
-      const monthPnlUsd = monthTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (monthPnlUsd < -8 * daily1R) return;  // Monthly drawdown limit: -8R
+      // NOTE (Jul 2026): the -8R MONTHLY guard was removed after the full-pipeline
+      // harness (script/validate-pipeline.ts) showed it fired on normal variance
+      // (1609 blocked entries in baseline) and then froze the rest of the month:
+      // removing it alone was worth +36R over the window. Daily -4R and rolling-7d
+      // -6R remain — they bind rarely and cut genuine loss streaks.
 
-      // Rolling 7-day: catches a multi-day grind that never trips the calendar
-      // daily/monthly caps because each single period stays above its limit.
+      // Rolling 7-day: catches a multi-day grind that never trips the daily cap.
       if (isRollingDrawdownBreached(closedTrades, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
         console.log(`[paper-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
         return;
@@ -1937,53 +1974,35 @@ export async function registerRoutes(server: Server, app: Express) {
         if      (btcDailyTrend === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
         else if (btcDailyTrend === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
       } catch (err) { console.error("[btc-filter] failed:", err); }
-      const effectiveRiskPct = baseRiskPct * riskMultiplier;
 
       // ── REGIME BRAIN (always on — no manual flags) ───────────────
-      // BTC weekly+daily trend drives both the concurrent-position cap and the
-      // directional overlay (which side the bot may open). Per-symbol ADX regime
-      // and the short-macro filter run unconditionally further down the loop.
+      // BTC weekly+daily trend is computed for the risk multiplier and reported
+      // to the UI. Jul 2026 full-pipeline A/B (script/validate-pipeline.ts):
+      //   • the DYNAMIC position cap (2-6 by regime) was mixed vs a fixed 6 and
+      //     the pruned stack performed better with fixed 6 → cap is fixed.
+      //   • the DIRECTIONAL overlay (blocking longs in risk_off etc.) cost ~27R
+      //     over the window — profitable reversal trades were the casualties →
+      //     both directions always allowed; strategy edge + weekly filter govern.
       let btcContext: BtcRegimeContext = defaultBtcContext();
       try {
         const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
         btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-        console.log(`[paper-scan] BTC regime: ${btcContext.reason}`);
+        console.log(`[paper-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 6, both directions open)`);
       } catch (err) {
         console.error("[btc-regime-gate] failed:", err);
       }
-      const effectiveMaxOpen = btcContext.maxOpen;
-      const dirPolicy = directionPolicyForRegime(btcContext.regime);
+      // Cap raised 6 → 10 (Jul 2026 capacity A/B): +55R and LOWER maxDD (27.4%
+      // vs 28.4%) — more concurrent diversification smooths the equity curve.
+      // 12 was identical to 10 (saturation); 2-per-symbol was worse. At 2% risk,
+      // 10 concurrent = 20% max at-risk, spread across ≥5 correlation groups.
+      const effectiveMaxOpen = 10;
+      const dirPolicy = { long: true, short: true, sizeMultiplier: 1.0, reason: "directional overlay retired Jul 2026 — pipeline A/B: blocking cost ~27R/yr" };
 
-      // ── FRACTIONAL KELLY PER STRATEGY ────────────────────────────
-      // Kelly% = WinRate - (LossRate / R:R)  — use half Kelly (more conservative)
-      // Only activates when a strategy has ≥10 closed trades (reliable stats)
-      // Falls back to baseRiskPct when insufficient data
-      // Capped at 2× baseRiskPct to prevent over-sizing
-      const strategyKellyPct = new Map<string, number>();
-      for (const strat of strategies) {
-        const closed = closedTrades.filter(e => e.strategy === strat.id);
-        if (closed.length < 10) {
-          strategyKellyPct.set(strat.id, baseRiskPct); // not enough data → use base
-          continue;
-        }
-        const wins   = closed.filter(e => e.outcome === "win").length;
-        const losses = closed.length - wins;
-        const winRate  = wins / closed.length;
-        const lossRate = losses / closed.length;
-        // Average R:R from actual trades (reward / risk, both in USD)
-        const winTrades  = closed.filter(e => e.outcome === "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
-        const lossTrades = closed.filter(e => e.outcome !== "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
-        const avgWinR  = winTrades.length  > 0 ? winTrades.reduce((s, e)  => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / winTrades.length  : 2.0;
-        const avgLossR = lossTrades.length > 0 ? lossTrades.reduce((s, e) => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / lossTrades.length : 1.0;
-        const rr = avgLossR > 0 ? avgWinR / avgLossR : avgWinR;
-        // Full Kelly: WR - (LR / R:R)
-        const fullKelly = winRate - (lossRate / Math.max(rr, 0.5));
-        // Half Kelly — captures ~75% of optimal growth with ~50% less drawdown
-        const halfKelly = fullKelly * 0.5;
-        // Clamp: minimum 0.5%, maximum 2× base risk
-        const kellyClamped = Math.min(Math.max(halfKelly * 100, 0.5), baseRiskPct * 2);
-        strategyKellyPct.set(strat.id, kellyClamped);
-      }
+      // ── POSITION SIZING — fixed fractional (Kelly retired Jul 2026) ──
+      // Half-Kelly from ≥10 closed trades was A/B-tested in the full-pipeline
+      // harness: it added return only by over-sizing after win streaks and more
+      // than DOUBLED max drawdown (62% vs 28% in the final config). Fixed base
+      // risk % won on every risk-adjusted basis. 10-trade samples are noise.
 
       // ── PER-STRATEGY DRAWDOWN KILL-SWITCH ─────────────────────────
       // Complements portfolio-level -4R daily / -8R monthly / -6R rolling-7d
@@ -2125,13 +2144,8 @@ export async function registerRoutes(server: Server, app: Express) {
           continue;
         }
 
-        // Daily trend filter — fetch once per coin
-        const dailyTrend = await getDailyTrend(sym);
-
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
-
-          let atrPercentile: number | null = null; // computed once per (sym, interval)
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -2178,50 +2192,22 @@ export async function registerRoutes(server: Server, app: Express) {
               }
               if (candles.length < strat.minCandles) continue;
 
-              // ── VOLATILITY REGIME FILTER — computed once per (sym, interval) ──
-              // Skips entries when ATR is in the top 15% of its last 50-period range.
-              // Explosive volatility = wider stops, unreliable candle structure, poor fills.
-              if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
-              if (atrPercentile > 85) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Volatility regime: ATR at ${atrPercentile}th percentile (>85) — explosive, skip entry` });
-                continue;
-              }
-
-              // NOTE: per-symbol ADX regime gate was tested in the backtest
-              // harness and REMOVED — it hurt Confluence Swing (PF 1.02→0.96)
-              // and was neutral elsewhere. Direction is governed by the BTC
-              // soft overlay below instead.
+              // NOTE (Jul 2026): three entry filters were REMOVED here after the
+              // full-pipeline A/B (script/validate-pipeline.ts, both ALL and 2026
+              // windows agreed):
+              //   • ATR-percentile >85 skip — the single most damaging filter:
+              //     removing it alone took the stack from +107R to +175R. Stop-hunt
+              //     entries NEED volatility spikes; this filter skipped the best ones.
+              //   • per-symbol ADX regime gate — tested earlier, hurt Confluence
+              //     Swing (PF 1.02→0.96), neutral elsewhere.
+              //   • daily contra-trend confidence filter — cost ~17R; the weekly
+              //     filter below (which SAVES ~45R in 2026) covers trend alignment
+              //     where it actually matters (multi-day 4h holds).
 
               const signal = strat.analyze(candles);
               if (!signal) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "no_signal", reason: "No setup detected" });
                 continue;
-              }
-
-              // ── DIRECTIONAL OVERLAY (BTC regime) ──
-              // Trade with the broad-market tide: bull → new longs only, bear →
-              // new shorts only, volatile_drift → both at half size. This is what
-              // makes the bot short in bear instead of forcing losing longs.
-              if ((signal.direction === "LONG" && !dirPolicy.long) ||
-                  (signal.direction === "SHORT" && !dirPolicy.short)) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Directional overlay: ${dirPolicy.reason} — ${signal.direction} blocked`, signal: signal.direction, confidence: signal.confidence });
-                continue;
-              }
-
-              // ── DAILY TREND FILTER ──
-              const isContraTrend =
-                (signal.direction === "LONG" && dailyTrend === "down") ||
-                (signal.direction === "SHORT" && dailyTrend === "up");
-
-              if (isContraTrend) {
-                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra-trend (daily ${dailyTrend}), score ${signal.confluenceScore} < 6`, signal: signal.direction, confidence: signal.confidence });
-                  continue;
-                }
-                if (strat.id !== "confluence-swing" && signal.confidence < 75) {
-                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Contra-trend (daily ${dailyTrend}), confidence ${signal.confidence}% < 75%`, signal: signal.direction, confidence: signal.confidence });
-                  continue;
-                }
               }
 
               // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
@@ -2238,18 +2224,14 @@ export async function registerRoutes(server: Server, app: Express) {
                 }
               }
 
-              // ── SHORT confirmation — require higher confidence ──
-              // Shorts are riskier (squeezes, funding rates) — need stronger signal
-              if (signal.direction === "SHORT" && signal.confidence < 72) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SHORT needs ≥72% confidence, got ${signal.confidence}%`, signal: "SHORT", confidence: signal.confidence });
-                continue;
-              }
-
-              // NOTE: the per-symbol "macroDown required for SHORTs" filter was
-              // tested and REMOVED — it cratered Liquidity Sweep (PF 1.54→1.36,
-              // sumR +249→+126) and SMC (1.06→0.78) by killing profitable
-              // counter-trend reversal shorts. The BTC soft overlay handles
-              // direction at the portfolio level instead.
+              // NOTE (Jul 2026): the SHORT ≥72% confidence gate was REMOVED —
+              // pipeline A/B: it blocked 1863 candidate entries and cost ~26R
+              // (+80R 2026 without it vs +57R with it). Most of this suite's edge
+              // is on the short side (L/S ≈ 1:2); penalizing shorts was asymmetric
+              // risk aversion, not risk management. The funding filter below still
+              // protects against crowded-short squeezes at entry time.
+              // (The per-symbol "macroDown required for SHORTs" filter was likewise
+              // tested and rejected earlier — PF 1.54→1.36 on Liquidity Sweep.)
 
               // ── FUNDING RATE FILTER ──
               // Crowded longs (funding > +0.1%) → squeeze risk for new LONGs
@@ -2283,14 +2265,13 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
-              // ── POSITION SIZING (Fractional Kelly per strategy) ──
-              // Uses half-Kelly derived from real closed trades if ≥10 available,
-              // otherwise falls back to base risk %. Multiplied by BTC macro multiplier.
-              const kellyPct    = (strategyKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier * dirPolicy.sizeMultiplier;
+              // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
+              // Kelly retired Jul 2026 (see sizing note above): fixed base risk
+              // halved max drawdown for <4% less total R in the pipeline A/B.
+              const riskPctUsed = baseRiskPct * riskMultiplier;
               const slDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
-              const riskUsd     = currentBalance * kellyPct / 100;
+              const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
-              const kellySource = (closedTrades.filter(e => e.strategy === strat.id).length >= 10) ? "kelly" : "base";
 
               await addJournalEntry({
                 symbol: sym,
@@ -2305,10 +2286,10 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed: "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${kellyPct.toFixed(2)}%(${kellySource}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
+                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
               });
 
-              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} kelly=${kellyPct.toFixed(2)}%(${kellySource})`, signal: signal.direction, confidence: signal.confidence });
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} risk=${riskPctUsed.toFixed(2)}%`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
               newOpens++;
@@ -2652,6 +2633,36 @@ export async function registerRoutes(server: Server, app: Express) {
         if (!price) continue;
 
         const isLong = trade.direction === "LONG";
+
+        // ── MAX-HOLD TIMEOUT — close stale positions at market (mirrors paper) ──
+        const ageHoursLive = (Date.now() - new Date(trade.created_at).getTime()) / 3_600_000;
+        const maxHoldHLive = maxHoldHoursForStrategy(trade.strategy);
+        if (Number.isFinite(ageHoursLive) && ageHoursLive > maxHoldHLive) {
+          try {
+            await client.closePosition(mexcSym, isLong ? 1 : 2, pos.holdVol);
+          } catch (closeErr: any) {
+            console.error(`[Live] Max-hold close failed for ${trade.symbol}: ${closeErr.message}`);
+            continue; // retry on next check
+          }
+          const timeoutAccounting = finalizeTradeAccounting({
+            direction: isLong ? "LONG" : "SHORT",
+            entryPrice: trade.entry_price,
+            positionSizeUsd: trade.position_size_usd,
+            remainingPositionSizeUsd: trade.remaining_position_size_usd,
+            realizedPnlUsd: trade.realized_pnl_usd,
+          }, price, TRADE_COSTS);
+          await updateJournalEntry(trade.id, {
+            outcome:     timeoutAccounting.outcome,
+            exit_price:  Math.round(price * 10000) / 10000,
+            pnl_pct:     Math.round(timeoutAccounting.pnlPct * 100) / 100,
+            pnl_usd:     timeoutAccounting.pnlUsd !== null ? Math.round(timeoutAccounting.pnlUsd * 100) / 100 : undefined,
+            remaining_position_size_usd: 0,
+            closed_at:   new Date().toISOString(),
+            notes:       (trade.notes || "") + ` | Max-hold timeout ${maxHoldHLive}h — closed at market (backtest parity)`,
+          });
+          continue;
+        }
+
         const peak   = trade.peak_price ?? trade.entry_price;
         const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
         if (newPeak !== peak) {
@@ -2829,18 +2840,16 @@ export async function registerRoutes(server: Server, app: Express) {
       try {
         const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
         btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-        console.log(`[live-scan] BTC regime: ${btcContext.reason}`);
+        console.log(`[live-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 6, both directions open)`);
       } catch (err) {
         console.error("[btc-regime-gate] failed:", err);
       }
-      const effectiveMaxOpen = btcContext.maxOpen;
-      const dirPolicy = directionPolicyForRegime(btcContext.regime);
+      // Jul 2026 pipeline A/B: dynamic regime cap and directional overlay retired;
+      // cap raised to 10 (mirrors paper scan — see the REGIME BRAIN note there).
+      const effectiveMaxOpen = 10;
 
-      // Cap at effectiveMaxOpen concurrent live positions (dynamic per BTC regime)
+      // Cap concurrent live positions
       if (openLive.length >= effectiveMaxOpen || liveEngineStatus.openPositions >= effectiveMaxOpen) {
-        if (effectiveMaxOpen < 6) {
-          console.log(`[live-scan] BTC regime cap reached: open=${openLive.length} mexc=${liveEngineStatus.openPositions} cap=${effectiveMaxOpen} (${btcContext.regime})`);
-        }
         return;
       }
 
@@ -2857,34 +2866,15 @@ export async function registerRoutes(server: Server, app: Express) {
       // Drawdown protection (same as paper)
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
 
-      // ── FRACTIONAL KELLY PER STRATEGY (live) ─────────────────────
-      // Uses live closed trades if ≥10, otherwise falls back to baseRiskPct
-      const liveKellyPct = new Map<string, number>();
-      for (const strat of strategies) {
-        const closed = closedLive.filter(e => e.strategy === strat.id);
-        if (closed.length < 10) { liveKellyPct.set(strat.id, baseRiskPct); continue; }
-        const wins    = closed.filter(e => e.outcome === "win").length;
-        const winRate = wins / closed.length;
-        const lossRate = 1 - winRate;
-        const winT  = closed.filter(e => e.outcome === "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
-        const lossT = closed.filter(e => e.outcome !== "win"  && e.pnl_usd != null && e.risk_usd != null && e.risk_usd > 0);
-        const avgWinR  = winT.length  > 0 ? winT.reduce((s, e)  => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / winT.length  : 2.0;
-        const avgLossR = lossT.length > 0 ? lossT.reduce((s, e) => s + Math.abs(e.pnl_usd!) / e.risk_usd!, 0) / lossT.length : 1.0;
-        const rr = avgLossR > 0 ? avgWinR / avgLossR : avgWinR;
-        const halfKelly = (winRate - (lossRate / Math.max(rr, 0.5))) * 0.5;
-        liveKellyPct.set(strat.id, Math.min(Math.max(halfKelly * 100, 0.5), baseRiskPct * 2));
-      }
+      // Sizing is fixed fractional — live Kelly retired Jul 2026 together with the
+      // paper one (pipeline A/B: Kelly doubled maxDD for <4% extra R).
       const daily1R    = currentBalance * baseRiskPct / 100;
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       if (todayPnl < -4 * daily1R) return;  // Daily DD limit: -4R
 
-      // Monthly drawdown pause — matches paper engine
-      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-      const monthPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= monthStart)
-                                   .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (monthPnl < -8 * daily1R) return;  // Monthly DD limit: -8R
+      // Monthly -8R guard removed Jul 2026 — same rationale as paper scan.
 
       // Rolling 7-day portfolio guard — matches paper engine.
       if (isRollingDrawdownBreached(closedLive, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
@@ -2992,11 +2982,8 @@ export async function registerRoutes(server: Server, app: Express) {
           continue;
         }
 
-        const dailyTrend = await getDailyTrend(sym);
-
         for (const [interval, strats] of Object.entries(byInterval)) {
           let candles: OHLCV[] | null = null;
-          let atrPercentile: number | null = null;
 
           for (const strat of strats) {
             const exposureDecision = shouldSkipSymbolForOpenExposure(openSymbolExposures, sym);
@@ -3035,30 +3022,13 @@ export async function registerRoutes(server: Server, app: Express) {
               }
               if (candles.length < strat.minCandles) continue;
 
-              // ── VOLATILITY REGIME FILTER ──
-              if (atrPercentile === null) atrPercentile = calcATRPercentile(candles);
-              if (atrPercentile > 85) continue;
-
-              // (ADX regime gate removed — backtest-negative; see paper scanner note)
+              // Jul 2026: ATR-percentile, directional-overlay, daily contra-trend
+              // and SHORT-confidence filters removed — mirrors paper scan; see the
+              // pipeline A/B notes there. Weekly alignment for 4h strategies kept
+              // (it saved ~45R in 2026).
 
               const signal = strat.analyze(candles);
               if (!signal) continue;
-
-              // ── DIRECTIONAL OVERLAY (BTC regime) ──
-              if ((signal.direction === "LONG" && !dirPolicy.long) ||
-                  (signal.direction === "SHORT" && !dirPolicy.short)) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Directional overlay: ${dirPolicy.reason} — ${signal.direction} blocked`, signal: signal.direction, confidence: signal.confidence });
-                continue;
-              }
-
-              // ── DAILY TREND FILTER ──
-              const isContraTrend =
-                (signal.direction === "LONG" && dailyTrend === "down") ||
-                (signal.direction === "SHORT" && dailyTrend === "up");
-              if (isContraTrend) {
-                if (strat.id === "confluence-swing" && Math.abs(signal.confluenceScore) < 6) continue;
-                if (strat.id !== "confluence-swing" && signal.confidence < 75) continue;
-              }
 
               // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
               if (interval === "4h") {
@@ -3068,11 +3038,6 @@ export async function registerRoutes(server: Server, app: Express) {
                   (signal.direction === "SHORT" && weeklyTrend === "up");
                 if (isContraWeekly) continue;
               }
-
-              // ── SHORT confirmation — require higher confidence (squeezes, funding) ──
-              if (signal.direction === "SHORT" && signal.confidence < 72) continue;
-
-              // (per-symbol SHORT macro filter removed — backtest-negative; see paper scanner note)
 
               // ── FUNDING RATE FILTER ──
               if (funding != null) {
@@ -3090,11 +3055,11 @@ export async function registerRoutes(server: Server, app: Express) {
               }
               if (risk <= 0 || reward / risk < 1.5) continue;
 
-              // ── POSITION SIZING (Fractional Kelly per strategy) ──
-              const kellyPct  = (liveKellyPct.get(strat.id) ?? baseRiskPct) * riskMultiplier * dirPolicy.sizeMultiplier;
-              const slDistPct = risk / signal.entry;
-              const riskUsd   = currentBalance * kellyPct / 100;
-              const posSize   = slDistPct > 0 ? riskUsd / slDistPct : 0;
+              // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
+              const riskPctUsed = baseRiskPct * riskMultiplier;
+              const slDistPct   = risk / signal.entry;
+              const riskUsd     = currentBalance * riskPctUsed / 100;
+              const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
               const mexcSym  = toMexcSymbol(sym);
               const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
@@ -3158,7 +3123,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed:          "yes",
                 position_size_usd: Math.round(actualPosSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${kellyPct.toFixed(2)}%(${closedLive.filter(e=>e.strategy===strat.id).length>=10?"kelly":"base"}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
+                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });

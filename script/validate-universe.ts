@@ -1,7 +1,12 @@
 // ─── UNIVERSE EDGE SCAN ──────────────────────────────────────────────────
-// Tests each 1H strategy against the FULL tradeable universe (not just its
-// current preferredSymbols) to find coins with real 2026 edge that are NOT yet
-// traded — i.e. where to add trades WITHOUT adding negative-EV setups.
+// ⚠️ FROZEN Jul 2026 — DO NOT apply this script's promotions directly.
+// Its methodology (pick coins by their 2026-window expectancy, then "validate"
+// on that same 2026 window) is textbook selection bias, and the Jun 26 universe
+// expansion it produced is exactly the overfitting cycle the project audit
+// flagged. Kept for reference only. Any universe change must instead go through
+// script/validate-pipeline.ts (full-pipeline A/B, ALL+2026 windows) followed by
+// 90 days of frozen paper validation — see the FREEZE header in
+// server/strategies/liquidity-sweep.ts.
 //
 // Run: npx tsx script/validate-universe.ts
 //

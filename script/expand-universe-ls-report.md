@@ -1,0 +1,32 @@
+# LS Universe Screen (two-halves consistency) — 2026-07-02
+Pass rule: T≥30 · PF≥1.5 · sumR>0 in BOTH halves of the 8000×1h window
+
+  TON     ✅ PASS  T= 45 WR=42% PF=1.77 sumR=+22.4  |  H1=+16.5 (T=26)  H2=+5.8 (T=19)
+  TRX        fail  T=  6 WR=67% PF=3.52 sumR=+6.1  |  H1=+2.8 (T=3)  H2=+3.4 (T=3)
+  ALGO       fail  T= 40 WR=38% PF=1.38 sumR=+10.7  |  H1=+8.2 (T=19)  H2=+2.4 (T=21)
+  XLM        fail  T= 29 WR=38% PF=1.65 sumR=+13.0  |  H1=+1.2 (T=14)  H2=+11.8 (T=15)
+  FET     ✅ PASS  T= 32 WR=50% PF=2.54 sumR=+26.6  |  H1=+6.1 (T=11)  H2=+20.5 (T=21)
+  RENDER  ✅ PASS  T= 41 WR=41% PF=1.95 sumR=+24.8  |  H1=+10.3 (T=14)  H2=+14.5 (T=27)
+  ONDO    ✅ PASS  T= 33 WR=42% PF=2.25 sumR=+25.9  |  H1=+9.8 (T=15)  H2=+16.1 (T=18)
+  JUP        fail  T= 49 WR=35% PF=1.39 sumR=+13.6  |  H1=+20.2 (T=29)  H2=-6.6 (T=20)
+  WIF        fail  T= 19 WR=47% PF=2.30 sumR=+13.9  |  H1=+10.8 (T=14)  H2=+3.1 (T=5)
+  BONK    ✅ PASS  T= 37 WR=51% PF=2.74 sumR=+33.7  |  H1=+16.9 (T=20)  H2=+16.8 (T=17)
+  ENA     ✅ PASS  T= 37 WR=43% PF=2.08 sumR=+24.4  |  H1=+5.7 (T=21)  H2=+18.8 (T=16)
+  WLD     ✅ PASS  T= 32 WR=53% PF=2.71 sumR=+27.2  |  H1=+15.8 (T=13)  H2=+11.5 (T=19)
+  CRV     ✅ PASS  T= 43 WR=47% PF=2.19 sumR=+29.9  |  H1=+14.9 (T=27)  H2=+15.0 (T=16)
+  MKR        fail  T= 48 WR=35% PF=1.33 sumR=+11.0  |  H1=+12.0 (T=21)  H2=-0.9 (T=27)
+  GALA    ✅ PASS  T= 35 WR=40% PF=1.72 sumR=+16.4  |  H1=+9.5 (T=23)  H2=+6.9 (T=12)
+  MANA       fail  T= 46 WR=37% PF=1.43 sumR=+13.7  |  H1=+14.9 (T=22)  H2=-1.2 (T=24)
+  RUNE    ✅ PASS  T= 44 WR=39% PF=1.51 sumR=+14.9  |  H1=+11.1 (T=23)  H2=+3.9 (T=21)
+  GRT     ✅ PASS  T= 46 WR=43% PF=1.79 sumR=+22.6  |  H1=+9.8 (T=20)  H2=+12.8 (T=26)
+  IMX     ✅ PASS  T= 30 WR=47% PF=1.90 sumR=+15.5  |  H1=+4.4 (T=16)  H2=+11.2 (T=14)
+  STX        fail  T= 32 WR=31% PF=1.01 sumR=+0.1  |  H1=+0.4 (T=10)  H2=-0.3 (T=22)
+  TAO        fail  T= 41 WR=34% PF=1.38 sumR=+11.0  |  H1=+4.3 (T=18)  H2=+6.7 (T=23)
+  POL     ✅ PASS  T= 37 WR=49% PF=2.20 sumR=+24.9  |  H1=+10.8 (T=14)  H2=+14.1 (T=23)
+  VET     ✅ PASS  T= 33 WR=45% PF=2.20 sumR=+24.1  |  H1=+13.2 (T=15)  H2=+10.9 (T=18)
+  AXS        fail  T= 46 WR=33% PF=1.24 sumR=+8.1  |  H1=+8.1 (T=23)  H2=+0.0 (T=23)
+  OP         fail  T= 44 WR=39% PF=1.35 sumR=+10.5  |  H1=+13.7 (T=23)  H2=-3.2 (T=21)
+  ADA     ✅ PASS  T= 35 WR=37% PF=1.55 sumR=+13.5  |  H1=+12.1 (T=18)  H2=+1.4 (T=17)
+  SHIB       fail  T= 29 WR=45% PF=1.93 sumR=+16.5  |  H1=+11.0 (T=18)  H2=+5.6 (T=11)
+
+Survivors → full-pipeline validation: TON, FET, RENDER, ONDO, BONK, ENA, WLD, CRV, GALA, RUNE, GRT, IMX, POL, VET, ADA

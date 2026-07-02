@@ -20,6 +20,20 @@ export interface MexcContractTicker {
   amount24?: number | string | null;
 }
 
+// ── Contract-name overrides ────────────────────────────────────────────────
+// Assets whose MEXC futures ticker differs from the bot symbol but keeps the
+// SAME price scale (name-only alias). Verified against
+// https://contract.mexc.com/api/v1/contract/detail (script/check-mexc-symbols.ts).
+// Do NOT add scale-changing aliases here (e.g. BONK → 1000BONK_USDT quotes
+// 1000× the spot price) — the engine sends Binance-derived prices to MEXC
+// verbatim, so a scaled alias would place orders at wildly wrong levels.
+export const MEXC_CONTRACT_OVERRIDES: Record<string, string> = {
+  FIL: "FILECOIN_USDT",
+};
+const REVERSE_CONTRACT_OVERRIDES: Record<string, string> = Object.fromEntries(
+  Object.entries(MEXC_CONTRACT_OVERRIDES).map(([bot, contract]) => [contract, bot]),
+);
+
 const MEXC_INTERVALS: Record<string, string> = {
   "1m": "Min1",
   "5m": "Min5",
@@ -76,7 +90,7 @@ export function buildMexcContractTickerMaps(tickers: MexcContractTicker[]) {
     const contractSymbol = ticker.symbol?.toUpperCase();
     if (!contractSymbol?.endsWith("_USDT")) continue;
 
-    const botSymbol = contractSymbol.slice(0, -5);
+    const botSymbol = REVERSE_CONTRACT_OVERRIDES[contractSymbol] ?? contractSymbol.slice(0, -5);
     const pair = `${botSymbol}USDT`;
     const lastPrice = toFiniteNumber(ticker.lastPrice) ?? toFiniteNumber(ticker.fairPrice);
     if (lastPrice == null || lastPrice <= 0) continue;

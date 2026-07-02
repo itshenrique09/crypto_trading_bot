@@ -15,6 +15,7 @@
  */
 
 import crypto from "crypto";
+import { MEXC_CONTRACT_OVERRIDES } from "./mexc-market";
 
 const BASE_URL = "https://contract.mexc.com";
 
@@ -248,7 +249,7 @@ export function getMexcClient(apiKey: string, apiSecret: string): MexcClient {
 
 /** Convert bot symbol (e.g. "BTC") to MEXC futures symbol (e.g. "BTC_USDT") */
 export function toMexcSymbol(symbol: string): string {
-  return `${symbol}_USDT`;
+  return MEXC_CONTRACT_OVERRIDES[symbol] ?? `${symbol}_USDT`;
 }
 
 export function getOpenOrderSide(direction: "LONG" | "SHORT"): 1 | 3 {

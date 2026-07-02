@@ -7,8 +7,8 @@ Full technical reference for all trading strategies implemented in the bot.
 ## Table of Contents
 
 - [Overview](#overview)
-- [Strategy 1 — Confluence Swing](#1-confluence-swing)
-- [Strategy 2 — SMC (Smart Money Concepts)](#2-smc-smart-money-concepts)
+- [Strategy 1 — Confluence Swing](#1-confluence-swing) *(retired Jul 2026)*
+- [Strategy 2 — SMC (Smart Money Concepts)](#2-smc-smart-money-concepts) *(retired May 2026)*
 - [Strategy 3 — Break & Retest](#3-break--retest)
 - [Strategy 4 — RSI Divergence](#4-rsi-divergence)
 - [Strategy 5 — Liquidity Sweep](#5-liquidity-sweep)
@@ -19,25 +19,30 @@ Full technical reference for all trading strategies implemented in the bot.
 
 ## Overview
 
-| | Confluence Swing | SMC | Break & Retest | RSI Divergence | Liquidity Sweep |
-|---|---|---|---|---|---|
-| **ID** | `confluence-swing` | `smc` | `break-retest` | `rsi-divergence` | `liquidity-sweep` |
-| **File** | `v2-swing.ts` | `smc.ts` | `break-retest.ts` | `rsi-divergence.ts` | `liquidity-sweep.ts` |
-| **Timeframe** | 1H | 4H | 4H | 1H | 1H |
-| **Min candles** | 250 | 150 | 150 | 250 | 100 |
-| **Cooldown** | 20h | 12h | 12h | 20h | 8h |
-| **Signal type** | Score ±10 | Confidence % | Confidence % | Binary + confidence | Confidence % |
-| **SL basis** | ATR | Behind OB zone | Behind S/R level | 0.5% beyond swing | Above/below sweep wick |
-| **TP1 basis** | Next swing high/low | Next swing high/low | Next S/R level | 2.5R | ≥2R structural |
-| **TP2 basis** | Second structure level | Second structure level | Next S/R level | 4R | Opposite liquidity pool |
-| **EMA200 guard** | Yes (±1% margin) | Yes (macro bull for LONG) | Yes (macro bull for LONG) | Yes (price vs EMA200) | No (mean-reverts after sweep) |
-| **Preferred symbols** | 10 coins | 3 coins | 3 coins | 2 coins | See strategy file |
+**Active set (frozen 2026-07-02)**: Liquidity Sweep (1H, 41 coins) · RSI Divergence (1H) · Break & Retest (4H).
+Validated as a portfolio by `script/validate-pipeline.ts` (all engine gates, sequential capital, fees+slippage): **PF 1.93 · +688R · maxDD 35.8%** over the full window; PF 1.94 · +371R in 2026. The LS universe expansion (28→41, `script/expand-universe-ls.ts`) required each coin to be profitable in BOTH halves of the year independently, the portfolio to improve overall (+517R → +688R with group cap 3), and a tradeable MEXC futures contract (`script/check-mexc-symbols.ts` — TON/BONK passed the screen but failed this). The Jul 2026 capacity A/B also confirmed the LS 12h cooldown is optimal (8h/6h both reduced total R) — signal parameters stay frozen. Pre-expansion fallback (28 coins, cap 2): PF 2.01 · +517R · maxDD 27.4%. Confluence Swing and SMC are documented below for reference but are **not traded** — see `server/strategies/registry.ts` for the retirement rationale.
+
+| | Break & Retest | RSI Divergence | Liquidity Sweep |
+|---|---|---|---|
+| **ID** | `break-retest` | `rsi-divergence` | `liquidity-sweep` |
+| **File** | `break-retest.ts` | `rsi-divergence.ts` | `liquidity-sweep.ts` |
+| **Timeframe** | 4H | 1H | 1H |
+| **Min candles** | 150 | 250 | 220 |
+| **Cooldown** | 12h | 20h | 12h |
+| **Signal type** | Confidence % | Binary + confidence | Confidence % |
+| **SL basis** | Behind S/R level | 0.5% beyond swing | Above/below sweep wick |
+| **TP1 basis** | Next S/R level | 2.5R | ≥2R structural |
+| **TP2 basis** | Next S/R level | 4R | Opposite liquidity pool |
+| **EMA200 guard** | Yes (macro bull for LONG) | Yes (price vs EMA200) | No (mean-reverts after sweep) |
+| **Preferred symbols** | 6 coins | 2 coins | 41 coins (frozen; two-halves screen + MEXC-verified) |
 
 > **Source of truth**: `server/strategies/registry.ts` is the canonical list of enabled strategies. If the table above and the registry disagree, the registry wins — fix the doc.
 
 ---
 
 ## 1. Confluence Swing
+
+> **RETIRED — July 2026.** The full-pipeline portfolio harness showed PF 1.05–1.07 / exp +0.04R over the full window in every configuration — fees ate the edge. It also shared 9 coins with Liquidity Sweep on the same 1H interval and displaced higher-expectancy LS entries via the one-position-per-symbol guard. Its apparent 2026 strength was selection bias (its coin list was re-picked on 2026 data on Jun 26). Documentation kept for reference.
 
 **File**: `server/strategies/v2-swing.ts` (strategy id: `confluence-swing`)  
 **Timeframe**: 1H (uses EMA9, EMA21, EMA50, EMA200)  
@@ -501,20 +506,34 @@ Scans a configurable lookback window for Order Blocks. A bullish OB is the last 
 
 These filters run in the paper and live engines **after** a strategy returns a signal. A signal that passes all strategy-internal checks can still be rejected here.
 
+**Active filters (post Jul 2026 pipeline A/B):**
+
 | Filter | Condition | Reason |
 |--------|-----------|--------|
-| Duplicate position | Same symbol + strategy already open | No averaging in |
+| Symbol exposure | Any position already open on the symbol | One position per symbol, no averaging in |
 | Cooldown | Closed < cooldownHours ago | Avoid re-entering same zone |
 | Preferred symbols | Signal not in strategy's symbol list | Only trade proven edge |
-| Volatility regime | ATR above 85th percentile (last 50 bars) | Explosive vol → wider stops, unreliable fills |
-| Daily trend (contra) | LONG when daily is down (or vice versa) | Reduce contra-trend trades |
-| Contra-trend exception | Confluence score ≥ 6 (swing) or conf ≥ 75% (others) | Allow very strong signals |
-| Weekly trend (4H only) | 4H signal against weekly direction | 4H trades last days — weekly matters |
-| SHORT confidence | Signal < 72% confidence | Squeezes + funding risk |
-| Funding rate | Funding > +0.1% for LONG, < −0.1% for SHORT | Avoid crowded side |
+| Weekly trend (4H only) | 4H signal against weekly direction | Saved ~45R in 2026 — multi-day holds need weekly alignment |
+| Funding rate | Funding > +0.1% for LONG, < −0.1% for SHORT | Avoid crowded side (live market state, unmodelable in backtest) |
+| Min SL distance | SL closer than 0.6% | Fees would dominate the risk |
 | R:R gate | reward / risk < 1.5 | Minimum acceptable trade |
 | Volume | 24h volume < $30M USDT | Avoid illiquid markets |
-| Correlation | Group already has 2 open positions | Avoid overconcentration |
-| Daily drawdown | Today's P&L < −4R | Capital preservation |
-| Monthly drawdown | Month P&L < −8R | Longer-horizon capital preservation |
-| Max positions | 6 open positions reached | Exposure cap |
+| Spread | Bid/ask > 0.20% | Bad fills |
+| Correlation | Group already has 3 open positions | Avoid overconcentration (raised 2→3 with the 43-coin universe; at 2 the expansion bottlenecked) |
+| Daily drawdown | Today's P&L < −4R | Circuit breaker |
+| Rolling 7d drawdown | 7-day P&L < −6R | Cuts genuine loss streaks (+18R in final config) |
+| Per-strategy kill-switch | Strategy 7d netR < −3R over ≥4 trades | Pauses a strategy whose regime broke |
+| Max positions | 10 open positions reached | Capacity A/B Jul 2026: 10 beat 6 on R *and* maxDD; 12 = saturation |
+| Max hold | Age > 200h (1H) / 240h (4H) → close at market | Backtest parity; frees the symbol slot (a stale trade once blocked XRP 5 weeks) |
+
+**Removed Jul 2026** — each was A/B-tested in `script/validate-pipeline.ts` (full portfolio, ALL + 2026 windows) and cost money in both:
+
+| Removed filter | Cost of keeping it | Note |
+|--------|-----------|------|
+| ATR percentile > 85 skip | −68R | Worst offender: stop-hunt entries *need* vol spikes |
+| SHORT ≥ 72% confidence | −26R | Edge is short-heavy (L/S ≈ 1:2); asymmetric penalty |
+| Daily contra-trend gate | −17R | Weekly filter covers trend alignment where it matters |
+| BTC directional overlay | −27R | Blocked profitable reversals in high-conviction regimes |
+| Dynamic BTC position cap (2–6) | mixed | Fixed 6 performed better in the pruned stack |
+| Monthly −8R drawdown pause | −36R | Fired on normal variance, froze the rest of the month |
+| Fractional Kelly sizing | 2× maxDD | 10-trade samples are noise; fixed 2% risk won risk-adjusted |

@@ -5,10 +5,11 @@ This is an automated crypto futures trading bot. See README.md for architecture 
 ## Project Context
 
 - **Stack**: Node.js + Express (server), React + Vite (client), SQLite, Binance API (candles), MEXC Futures API (execution)
-- **Active strategies**: Confluence Swing (1H), SMC (4H), Break & Retest (4H), RSI Divergence (1H)
+- **Active strategies**: Liquidity Sweep (1H), RSI Divergence (1H), Break & Retest (4H) — frozen 2026-07-02, validated by the full-pipeline harness (Confluence Swing and SMC retired; see `server/strategies/registry.ts`)
 - **Paper engine**: running, scanning 24 coins every 3 min
 - **Live engine**: ready to activate with MEXC API keys
 - **Key files**: `server/routes.ts` (engine + API), `server/strategies/` (signal logic), `client/src/pages/` (UI)
+- **Validation policy**: any strategy/gate/universe change MUST be A/B-tested with `script/validate-pipeline.ts` (full-pipeline portfolio sim, ALL+2026 windows) — never with raw per-strategy backtests on a recent window, and never applied without a pre-stated hypothesis. `script/validate-universe.ts` is frozen (selection-bias methodology).
 
 ## Active MCPs
 
