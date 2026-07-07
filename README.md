@@ -36,7 +36,7 @@ Binance (candles) ──► Strategy Engine ──► Signal
 | **RSI Divergence** | 1H | ATOM, INJ | Mean-reversion complement |
 | **Break & Retest** | 4H | 6 coins | Uncorrelated breakout exposure |
 
-Validated as a **portfolio** by the full-pipeline harness (`script/validate-pipeline.ts`) with every engine gate, sequential capital, and fees+slippage modeled: **PF 1.93 · +688R · maxDD 35.8%** over the full window (PF 1.94 · +371R in 2026-H1). The LS universe was expanded 28→41 coins in Jul 2026 via a two-halves consistency screen (`script/expand-universe-ls.ts`) — each new coin had to be independently profitable in both halves of the year, then the whole portfolio had to improve with them included (+517R → +688R). Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`) so backtest = paper = live; TON and BONK passed the screen but were excluded for lacking one. The tighter pre-expansion config (28 coins, group cap 2: PF 2.01, +517R, maxDD 27.4%) is the documented fallback if live drawdown tolerance demands it. Retired: Confluence Swing (Jul 2026, fee fodder at PF 1.07), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
+Validated as a **portfolio** by the full-pipeline harness (`script/validate-pipeline.ts`) with every engine gate, sequential capital, and fees+slippage modeled: **PF 1.99 · +715R · maxDD 31.2%** over the full window (PF 2.00 · +400R in 2026, data through Jul 7). The direction×regime matrix confirms the edge is symmetric — more than half of total R comes from BTC-down periods. The LS universe was expanded 28→41 coins in Jul 2026 via a two-halves consistency screen (`script/expand-universe-ls.ts`) — each new coin had to be independently profitable in both halves of the year, then the whole portfolio had to improve with them included (+517R → +688R). Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`) so backtest = paper = live; TON and BONK passed the screen but were excluded for lacking one. The tighter pre-expansion config (28 coins, group cap 2: PF 2.01, +517R, maxDD 27.4%) is the documented fallback if live drawdown tolerance demands it. Retired: Confluence Swing (Jul 2026, fee fodder at PF 1.07), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
 
 > **Change policy**: strategy parameters and coin universes are FROZEN. Any change requires a pre-stated hypothesis, a full-pipeline A/B (`script/validate-pipeline.ts`, ALL + 2026 windows), and 90 days of frozen paper validation. Recent-window per-coin re-optimization is how this project previously destroyed its own edge.
 
@@ -83,8 +83,10 @@ Always-on scanner + simulated delta-neutral carry ledger (`server/funding-carry.
 
 1. Position opens with SL and TP1/TP2 from the strategy signal
 2. Price hits **TP1** → close 60%, SL moves to break-even
-3. Runner trails (fixed 2% from peak, or R-multiple mode via settings)
-4. Position closes at **TP2**, the trailing stop, or break-even
+3. Runner trails at **2× the trade's original risk** from the peak (`r_multiple` mode — default since the Jul 2026 portfolio exit A/B: beat the fixed-2% trail on every metric in both windows, PF 1.99 vs 1.90 · +715R vs +674R · maxDD 31.2% vs 35.8%; a fixed % is too tight for wide-ATR entries and too loose for tight ones). `fixed_pct` remains available via settings.
+4. Position closes at **TP2**, the trailing stop, break-even, or the max-hold timeout
+
+Exit-layer variants A/B-tested at portfolio level (Jul 2026): TP1 close 50%/75%/100% — the 60% partial held its ground (100% all-out was second-best); trail 1.5%/3% — both worse than 2R r_multiple.
 
 ---
 

@@ -1,12 +1,12 @@
 import type { Strategy, StrategySignal } from "./types";
 import { liquiditySweepSignal, type OHLCV } from "../analysis";
 
-// ═══ PARAMETER FREEZE — 2026-07-02 ══════════════════════════════════════
+// ═══ PARAMETER FREEZE — 2026-07-02 (exits re-validated 2026-07-07) ═══════
 // Universe and parameters below are FROZEN as validated by the full-pipeline
-// portfolio harness (script/validate-pipeline.ts, shipped config incl. the
-// 41-coin MEXC-verified universe + group cap 3: PF 1.93 · +688R · maxDD 35.8%
-// with fees+slippage; pre-expansion fallback 28 coins/cap 2: PF 2.01 · +517R ·
-// maxDD 27.4%).
+// portfolio harness (script/validate-pipeline.ts, shipped config: 41-coin
+// MEXC-verified universe, group cap 3, r_multiple 2R trailing:
+// PF 1.99 · +715R · maxDD 31.2% with fees+slippage; pre-expansion fallback
+// 28 coins/cap 2: PF 2.01 · +517R · maxDD 27.4%).
 // Do NOT add/remove coins or retune thresholds based on recent-window backtests —
 // that is the selection-bias cycle that broke this project (universe picked on
 // the same 2026 window used to "validate" it). Changes require: (1) a hypothesis

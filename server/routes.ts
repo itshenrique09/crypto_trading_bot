@@ -1444,7 +1444,8 @@ export async function registerRoutes(server: Server, app: Express) {
         regime_filter_enabled:      true,
         short_macro_filter_enabled: true,
         btc_regime_gate_enabled:    true,
-        trailing_mode:              trailMode === "r_multiple" ? "r_multiple" : "fixed_pct",
+        // Default = r_multiple 2R since the Jul 2026 portfolio exit A/B (see paperCheck note).
+        trailing_mode:              trailMode === "fixed_pct" ? "fixed_pct" : "r_multiple",
         trailing_r_multiple:        parseFloat(trailR || "2.0"),
       });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -1734,12 +1735,16 @@ export async function registerRoutes(server: Server, app: Express) {
       // "r_multiple" → peak ± (N × original-risk), where N defaults to 2.0.
       //   Adapts to each trade's natural noise so tight-SL momentum entries
       //   don't get knocked out by ordinary 2% pullbacks post-TP1.
-      // Trailing defaults to fixed_pct (2%). Backtest (3y, 1H, live-accurate)
-      // showed r_multiple 2R trailing HURT Confluence Swing (+142R vs +168R at
-      // fixed 2%) and was neutral for the others — the runner gives back profit
-      // on a loose trail. Opt into "r_multiple" via setting only if re-validated.
+      // DEFAULT = r_multiple 2R since Jul 2026: the full-pipeline portfolio A/B
+      // (script/validate-pipeline.ts, exit-layer round) showed r_multiple beats
+      // fixed 2% on EVERY metric in BOTH windows: PF 1.99 vs 1.90, +715.5R vs
+      // +674.3R, maxDD 31.2% vs 35.8%. The old per-strategy objection (it hurt
+      // Confluence Swing) is moot — that strategy was cut. A fixed % trail is
+      // too tight for wide-ATR entries and too loose for tight ones; scaling
+      // the trail to each trade's own risk unit is the technically correct form.
+      // Opt back into "fixed_pct" via the trailing_mode setting if ever needed.
       const trailingMode: TrailingMode =
-        (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
+        (await getSetting("trailing_mode")) === "fixed_pct" ? "fixed_pct" : "r_multiple";
       const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
 
       for (const trade of openPaper) {
@@ -2582,14 +2587,10 @@ export async function registerRoutes(server: Server, app: Express) {
       liveEngineStatus.openPositions = mexcPositions.length;
       liveEngineStatus.balance = (await client.getBalance()).availableBalance;
 
-      // ── TRAILING STOP MODE — opt-in via setting (default fixed_pct/2%) ──
-      // Mirrors paperCheck. See computeTrailStop() in trailing-stop.ts.
-      // Trailing defaults to fixed_pct (2%). Backtest (3y, 1H, live-accurate)
-      // showed r_multiple 2R trailing HURT Confluence Swing (+142R vs +168R at
-      // fixed 2%) and was neutral for the others — the runner gives back profit
-      // on a loose trail. Opt into "r_multiple" via setting only if re-validated.
+      // ── TRAILING STOP MODE — default r_multiple 2R (Jul 2026 pipeline A/B) ──
+      // Mirrors paperCheck — see the rationale note there.
       const trailingMode: TrailingMode =
-        (await getSetting("trailing_mode")) === "r_multiple" ? "r_multiple" : "fixed_pct";
+        (await getSetting("trailing_mode")) === "fixed_pct" ? "fixed_pct" : "r_multiple";
       const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
 
       const journal = await getJournal(10_000);

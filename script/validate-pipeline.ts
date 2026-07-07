@@ -24,7 +24,7 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { getAllStrategies } from "../server/strategies/registry";
-import { simulateManagedExit } from "../server/trade-exits";
+import { simulateManagedExit, type ManagedExitConfig } from "../server/trade-exits";
 import { dropOpenCandle } from "../server/candles";
 import { calcATRPercentile, type OHLCV } from "../server/analysis";
 import {
@@ -103,6 +103,8 @@ interface RunConfig {
   perSymbolCap?: number;          // concurrent positions per symbol, different strategies only (default 1)
   cooldownOverride?: Record<string, number>; // strategyId → hours
   maxPerGroup?: number;           // correlation-group cap override (default 2)
+  /** Exit-management override (TP1 close %, trailing mode/width). Undefined = engine default. */
+  exit?: ManagedExitConfig;
 }
 
 // ── Candle fetching with day-keyed disk cache ─────────────────────────────
@@ -197,10 +199,18 @@ interface Candidate {
   confluenceScore: number;
   slDistPct: number;
   atrPercentile: number;
-  netR: number;           // from simulateManagedExit (default exit config = engine default)
-  exitTsSec: number;      // when the position frees its slot
-  outcome: string;
+  // exit simulation inputs — resolved per exit-config in Phase B (resolveExits)
+  idx: number;            // stable index into the exit-resolution arrays
+  streamKey: string;      // sym:interval → candles
+  entryIdx: number;       // index of the signal candle in the stream
+  maxBars: number;
+  ivSec: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2?: number | null;
 }
+
+interface ResolvedExit { netR: number; exitTsSec: number }
 
 function intervalSec(iv: string): number {
   if (iv === "1h") return 3600;
@@ -229,11 +239,6 @@ function buildCandidates(strat: Strategy, symbol: string, candles: OHLCV[]): Can
     if (slDistPct < MIN_SL_DISTANCE_PCT) continue;       // engine gate (not toggleable)
     if (risk <= 0 || reward / risk < MIN_RR) continue;   // engine gate (not toggleable)
 
-    const exit = simulateManagedExit(
-      { direction: sig.direction, entry: sig.entry, stopLoss: sig.stopLoss, takeProfit1: sig.takeProfit1, takeProfit2: sig.takeProfit2 },
-      candles.slice(i + 1, i + 1 + maxBars),
-    );
-
     out.push({
       stratId: strat.id,
       interval: strat.interval,
@@ -245,12 +250,42 @@ function buildCandidates(strat: Strategy, symbol: string, candles: OHLCV[]): Can
       confluenceScore: sig.confluenceScore,
       slDistPct,
       atrPercentile: calcATRPercentile(slice),
-      netR: exit.netR,
-      exitTsSec: candles[i].time + ivSec + exit.barsHeld * ivSec,
-      outcome: exit.outcome,
+      idx: -1, // assigned after all candidates are collected
+      streamKey: `${symbol}:${strat.interval}`,
+      entryIdx: i,
+      maxBars,
+      ivSec,
+      stopLoss: sig.stopLoss,
+      takeProfit1: sig.takeProfit1,
+      takeProfit2: sig.takeProfit2,
     });
   }
   return out;
+}
+
+// Resolve managed exits for every candidate under one exit config. Cached per
+// config label so gate/capacity configs that share an exit config reuse the pass.
+const exitCache = new Map<string, ResolvedExit[]>();
+function resolveExits(
+  candidates: Candidate[],
+  streams: Map<string, OHLCV[]>,
+  exitCfg: ManagedExitConfig | undefined,
+): ResolvedExit[] {
+  const key = JSON.stringify(exitCfg ?? {});
+  let resolved = exitCache.get(key);
+  if (resolved) return resolved;
+  resolved = new Array<ResolvedExit>(candidates.length);
+  for (const c of candidates) {
+    const candles = streams.get(c.streamKey)!;
+    const exit = simulateManagedExit(
+      { direction: c.dir, entry: c.entry, stopLoss: c.stopLoss, takeProfit1: c.takeProfit1, takeProfit2: c.takeProfit2 },
+      candles.slice(c.entryIdx + 1, c.entryIdx + 1 + c.maxBars),
+      exitCfg,
+    );
+    resolved[c.idx] = { netR: exit.netR, exitTsSec: c.tsSec + exit.barsHeld * c.ivSec };
+  }
+  exitCache.set(key, resolved);
+  return resolved;
 }
 
 // ── Phase B: chronological portfolio simulation ────────────────────────────
@@ -258,6 +293,7 @@ interface SimTrade {
   symbol: string; strategy: string; dir: "LONG" | "SHORT";
   netR: number; riskUsd: number; pnlUsd: number;
   openedSec: number; closedSec: number;
+  btcD: Trend; btcW: Trend; // BTC daily/weekly trend at entry — regime attribution
 }
 
 interface GateCounters { [k: string]: number }
@@ -277,8 +313,9 @@ interface MarketData {
   weeklyBySym: Map<string, OHLCV[]>;
 }
 
-function simulate(cfg: RunConfig, candidates: Candidate[], md: MarketData, strategies: Strategy[]): SimResult {
+function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, OHLCV[]>, md: MarketData, strategies: Strategy[]): SimResult {
   const skip = cfg.skip;
+  const exits = resolveExits(candidates, streams, cfg.exit);
   const active = new Set((cfg.strategies ?? strategies.map(s => s.id)));
   const cands = candidates
     .filter(c => active.has(c.stratId))
@@ -466,13 +503,15 @@ function simulate(cfg: RunConfig, candidates: Candidate[], md: MarketData, strat
     const riskUsd = balance * kellyPct / 100;
     if (riskUsd <= 0) { block("zeroRisk"); continue; }
 
+    const exit = exits[c.idx];
     const trade: SimTrade = {
       symbol: c.symbol, strategy: c.stratId, dir: c.dir,
-      netR: c.netR, riskUsd, pnlUsd: c.netR * riskUsd,
-      openedSec: nowSec, closedSec: c.exitTsSec,
+      netR: exit.netR, riskUsd, pnlUsd: exit.netR * riskUsd,
+      openedSec: nowSec, closedSec: exit.exitTsSec,
+      btcD: btcDailyTrend as Trend, btcW: wTrend("BTC", nowSec),
     };
     const list = openBySymbol.get(c.symbol) ?? [];
-    list.push({ strategy: c.stratId, group, exitTsSec: c.exitTsSec, trade });
+    list.push({ strategy: c.stratId, group, exitTsSec: exit.exitTsSec, trade });
     openBySymbol.set(c.symbol, list);
   }
 
@@ -556,22 +595,26 @@ async function main() {
       console.log(`  ${strat.id.padEnd(18)} ${sym.padEnd(6)} candidates=${String(c.length).padStart(4)} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     }
   }
+  candidates.forEach((c, i) => { c.idx = i; });
   log(`Total raw candidates (post minSL+R:R): ${candidates.length}`);
   log();
 
   // ── Phase B: suite ──
   const ALL_OFF: GateId[] = ["dirOverlay", "dailyTrend", "weeklyTrend", "shortConf", "atrPct", "btcCap", "groupCap", "killSwitch", "ddDaily", "ddMonthly", "ddRolling", "kelly", "riskMult"];
   const PROPOSED_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "groupCap", "ddMonthly", "ddRolling"]);
-  // ENGINE-CURRENT = server/routes.ts as of 2026-07-02 (PROPOSED-F + capacity round):
+  // ENGINE-CURRENT = server/routes.ts as of 2026-07-07 (PROPOSED-F + capacity + exit rounds):
   //   registry = LS + RSI + B&R (confluence-swing cut);
   //   removed from engine: atrPct, shortConf, dailyTrend, dirOverlay,
   //     dynamic btcCap (→ fixed 10), ddMonthly, kelly (→ fixed base risk %);
   //   kept in engine: weeklyTrend, riskMult, groupCap, killSwitch, ddDaily,
   //     ddRolling, exposure (1/symbol), cooldown, minSL, R:R
-  //     (+ live-only volume/spread/funding + max-hold timeout 200h/240h).
+  //     (+ live-only volume/spread/funding + max-hold timeout 200h/240h);
+  //   exits: TP1 60% → SL breakeven → trail r_multiple 2R (default since Jul 7
+  //     exit A/B: beat fixed 2% on every metric in both windows).
   const ENGINE_CURRENT_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "ddMonthly", "kelly"]);
+  const ENGINE_EXIT: ManagedExitConfig = { trailMode: "r_multiple", trailRMultiple: 2.0 };
   const configs: RunConfig[] = [
-    { label: "ENGINE-CURRENT (shipped Jul 2026 = PROPOSED-F)", skip: ENGINE_CURRENT_SKIP },
+    { label: "ENGINE-CURRENT (shipped Jul 2026)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT },
     // ── capacity suite (Jul 2026 round 2): structural throughput, not signal tuning ──
     { label: "CAP maxOpen=8", skip: ENGINE_CURRENT_SKIP, maxOpen: 8 },
     { label: "CAP maxOpen=10", skip: ENGINE_CURRENT_SKIP, maxOpen: 10 },
@@ -584,6 +627,15 @@ async function main() {
     { label: "CAP maxOpen=12", skip: ENGINE_CURRENT_SKIP, maxOpen: 12 },
     { label: "CAP groupCap=2 (pre-expansion default)", skip: ENGINE_CURRENT_SKIP, maxPerGroup: 2 },
     { label: "CAP groupCap=3 + maxOpen=12", skip: ENGINE_CURRENT_SKIP, maxPerGroup: 3, maxOpen: 12 },
+    // ── exit-management layer A/B (Jul 2026 round 4) ──
+    // The engine default (TP1 close 60% → SL to breakeven → trail fixed 2% → TP2)
+    // was only ever validated per-strategy. These test it at PORTFOLIO level.
+    { label: "EXIT tp1Close=100% (all out at TP1)", skip: ENGINE_CURRENT_SKIP, exit: { tp1ClosePct: 1.0 } },
+    { label: "EXIT tp1Close=50%", skip: ENGINE_CURRENT_SKIP, exit: { tp1ClosePct: 0.5 } },
+    { label: "EXIT tp1Close=75%", skip: ENGINE_CURRENT_SKIP, exit: { tp1ClosePct: 0.75 } },
+    { label: "EXIT trail 1.5%", skip: ENGINE_CURRENT_SKIP, exit: { trailingPct: 0.015 } },
+    { label: "EXIT trail 3%", skip: ENGINE_CURRENT_SKIP, exit: { trailingPct: 0.03 } },
+    { label: "EXIT trail r_multiple 2R", skip: ENGINE_CURRENT_SKIP, exit: { trailMode: "r_multiple", trailRMultiple: 2.0 } },
     { label: "BASELINE (all gates)", skip: new Set() },
     ...ALL_GATES.map(g => ({ label: `minus ${g}`, skip: new Set<GateId>([g]) })),
     { label: "LEAN (only exposure+cooldown+maxOpen6, opinion filters off)", skip: new Set<GateId>(ALL_OFF) },
@@ -600,7 +652,7 @@ async function main() {
 
   const results: SimResult[] = [];
   for (const cfg of configs) {
-    const r = simulate(cfg, candidates, md, strategies);
+    const r = simulate(cfg, candidates, streams, md, strategies);
     results.push(r);
     const all = stats(r.trades);
     const y26 = stats(r.trades, YEAR_2026_TS);
@@ -609,6 +661,27 @@ async function main() {
     log(`  2026: ${fmtStats(y26)}`);
     const blocked = Object.entries(r.gateBlocks).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(" ");
     log(`  blocks: ${blocked || "none"}`);
+    log();
+  }
+
+  // ── direction × BTC-regime matrix — answers "does it only win in up-markets?" ──
+  for (const label of results.map(r => r.label).filter(l => l.startsWith("ENGINE"))) {
+    const r = results.find(x => x.label === label)!;
+    log(`## Direction × BTC regime — ${label}`);
+    const bucket = (pred: (t: SimTrade) => boolean) => stats(r.trades.filter(pred));
+    for (const dir of ["LONG", "SHORT"] as const) {
+      for (const trend of ["up", "neutral", "down"] as const) {
+        const s = bucket(t => t.dir === dir && t.btcD === trend);
+        if (s.n > 0) log(`  ${dir.padEnd(5)} · BTC daily ${trend.padEnd(7)} ${fmtStats(s)}`);
+      }
+    }
+    log(`  --- by BTC weekly ---`);
+    for (const dir of ["LONG", "SHORT"] as const) {
+      for (const trend of ["up", "neutral", "down"] as const) {
+        const s = bucket(t => t.dir === dir && t.btcW === trend);
+        if (s.n > 0) log(`  ${dir.padEnd(5)} · BTC weekly ${trend.padEnd(7)} ${fmtStats(s)}`);
+      }
+    }
     log();
   }
 
