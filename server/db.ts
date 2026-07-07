@@ -69,6 +69,17 @@ export async function getDb(): Promise<Database> {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS funding_carry_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      time TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      action TEXT NOT NULL,
+      rate REAL,
+      annualized REAL,
+      notional REAL,
+      pnl_usd REAL,
+      note TEXT DEFAULT ''
+    );
   `);
 
   // Migrations — safe to run multiple times (catch = column already exists)
@@ -94,6 +105,7 @@ export async function getDb(): Promise<Database> {
     "CREATE INDEX IF NOT EXISTS idx_journal_mode_outcome ON journal(mode, outcome)",
     "CREATE INDEX IF NOT EXISTS idx_signals_timestamp    ON signals(timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_signals_symbol       ON signals(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_carry_log_time       ON funding_carry_log(time DESC)",
   ];
   for (const sql of indices) {
     _db.run(sql);

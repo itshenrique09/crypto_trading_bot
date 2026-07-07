@@ -16,6 +16,7 @@ import { getRuntimeInfo } from "./runtime-info";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
 import { isRollingDrawdownBreached, strategiesToPause } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
+import { startFundingCarryLoop, getFundingCarryReport } from "./funding-carry";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
@@ -1422,6 +1423,16 @@ export async function registerRoutes(server: Server, app: Express) {
   // on/off switches. The only remaining tunable here is the trailing-stop mode,
   // which defaults to r_multiple (2R). Engine "intelligence" state is reported
   // read-only via /api/paper/status (paperStatus.intelligence).
+  // ── Funding-rate carry — paper observer (Phase 1, no execution) ──
+  // Always-on scanner + simulated delta-neutral carry ledger. Uncorrelated
+  // return source under evaluation; see server/funding-carry.ts header.
+  startFundingCarryLoop();
+  app.get("/api/funding-carry", async (_req, res) => {
+    try {
+      res.json(await getFundingCarryReport());
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   app.get("/api/settings/feature-flags", async (_req, res) => {
     try {
       const [trailMode, trailR] = await Promise.all([
@@ -1987,7 +1998,7 @@ export async function registerRoutes(server: Server, app: Express) {
       try {
         const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
         btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-        console.log(`[paper-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 6, both directions open)`);
+        console.log(`[paper-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 10, both directions open)`);
       } catch (err) {
         console.error("[btc-regime-gate] failed:", err);
       }
@@ -2840,7 +2851,7 @@ export async function registerRoutes(server: Server, app: Express) {
       try {
         const btcWeekly = (await getWeeklyTrend("BTC")) as BtcTrend;
         btcContext = classifyBtcRegime({ daily: btcDailyTrend, weekly: btcWeekly });
-        console.log(`[live-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 6, both directions open)`);
+        console.log(`[live-scan] BTC regime: ${btcContext.reason} (informational — cap fixed at 10, both directions open)`);
       } catch (err) {
         console.error("[btc-regime-gate] failed:", err);
       }

@@ -73,6 +73,12 @@ The stop loss is always set by the strategy's technical logic — the position s
 
 ---
 
+## Funding-Rate Carry (Phase 1 — paper observer)
+
+Always-on scanner + simulated delta-neutral carry ledger (`server/funding-carry.ts`, `GET /api/funding-carry`). When perp funding on a hedgeable coin exceeds **30%/yr annualized**, the simulator "opens" a short-perp + long-spot position ($1000/leg, max 5) and accrues real funding every 8h settlement, net of realistic entry/exit costs (~0.44% round trip → breakeven ≈ 5.4 days of sustained elevated funding). Exits below 10%/yr (hysteresis). Restricted to the 41-coin hedgeable universe — extreme funding on tokenized stocks / 1000×-tickers / illiquid micro-caps is a liquidity trap, not carry. **No orders are ever placed**; if the simulated ledger proves out over weeks, Phase 2 wires execution as an uncorrelated return sleeve.
+
+---
+
 ## Exit Management
 
 1. Position opens with SL and TP1/TP2 from the strategy signal
