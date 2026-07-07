@@ -94,6 +94,26 @@ Total raw candidates (post minSL+R:R): 3658
   2026: T= 670 WR= 45% PF= 2.00 sumR=+399.5 exp=+0.60R pnl=$34524560
   blocks: exposure=1190 cooldown=301 ddRolling7d=255 killSwitch=188 maxOpen=179 groupCap=130 ddDaily=119 weeklyTrend=96
 
+## TILT LONG:up 0.75x
+  ALL:  T=1205 WR= 45% PF= 1.98 sumR=+713.5 exp=+0.59R pnl=$31652089  → balance $31652589 maxDD 33.8%
+  2026: T= 673 WR= 45% PF= 1.98 sumR=+395.8 exp=+0.59R pnl=$31592205
+  blocks: exposure=1188 cooldown=301 ddRolling7d=241 killSwitch=203 maxOpen=179 groupCap=131 ddDaily=114 weeklyTrend=96
+
+## TILT LONG:up 0.5x
+  ALL:  T=1210 WR= 45% PF= 1.97 sumR=+708.2 exp=+0.59R pnl=$27118486  → balance $27118986 maxDD 32.1%
+  2026: T= 676 WR= 45% PF= 1.96 sumR=+392.6 exp=+0.58R pnl=$27059206
+  blocks: exposure=1195 cooldown=301 ddRolling7d=219 killSwitch=217 maxOpen=179 groupCap=131 ddDaily=110 weeklyTrend=96
+
+## TILT LONG:up blocked
+  ALL:  T=1035 WR= 44% PF= 1.93 sumR=+585.1 exp=+0.57R pnl=$2112106  → balance $2112606 maxDD 64.9%
+  2026: T= 525 WR= 44% PF= 1.89 sumR=+289.1 exp=+0.55R pnl=$2073106
+  blocks: exposure=1037 ddRolling7d=442 cooldown=273 sizeTilt=224 killSwitch=192 maxOpen=131 groupCap=115 ddDaily=115 weeklyTrend=94
+
+## TILT LONG:up 0.5x + SHORT:up 1.25x
+  ALL:  T=1075 WR= 43% PF= 1.84 sumR=+564.5 exp=+0.53R pnl=$3973024  → balance $3973524 maxDD 60.7%
+  2026: T= 541 WR= 42% PF= 1.72 sumR=+248.9 exp=+0.46R pnl=$3889960
+  blocks: exposure=1083 killSwitch=395 ddRolling7d=315 cooldown=276 maxOpen=175 ddDaily=128 groupCap=115 weeklyTrend=96
+
 ## BASELINE (all gates)
   ALL:  T= 385 WR= 40% PF= 1.68 sumR=+171.5 exp=+0.45R pnl=$49734  → balance $50234 maxDD 38.3%
   2026: T= 184 WR= 41% PF= 1.63 sumR=+76.5 exp=+0.42R pnl=$44610

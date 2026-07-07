@@ -105,6 +105,10 @@ interface RunConfig {
   maxPerGroup?: number;           // correlation-group cap override (default 2)
   /** Exit-management override (TP1 close %, trailing mode/width). Undefined = engine default. */
   exit?: ManagedExitConfig;
+  /** Risk-size multiplier per direction×BTC-daily-regime bucket (e.g. "LONG:up": 0.5).
+   *  0 blocks the bucket entirely. Unlisted buckets = 1.0. Implementable 1:1 in the
+   *  engine (btcDailyTrend is already computed every scan). */
+  sizeTiltByDirRegime?: Partial<Record<string, number>>;
 }
 
 // ── Candle fetching with day-keyed disk cache ─────────────────────────────
@@ -499,7 +503,11 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
         pct = Math.min(Math.max(halfKelly * 100, 0.5), BASE_RISK_PCT * 2);
       }
     }
-    const kellyPct = pct * riskMultiplier * dirPolicy.sizeMultiplier;
+    // ── direction×regime size tilt (experimental — see RunConfig) ──
+    const tilt = cfg.sizeTiltByDirRegime?.[`${c.dir}:${btcDailyTrend}`] ?? 1.0;
+    if (tilt === 0) { block("sizeTilt"); continue; }
+
+    const kellyPct = pct * riskMultiplier * dirPolicy.sizeMultiplier * tilt;
     const riskUsd = balance * kellyPct / 100;
     if (riskUsd <= 0) { block("zeroRisk"); continue; }
 
@@ -636,6 +644,14 @@ async function main() {
     { label: "EXIT trail 1.5%", skip: ENGINE_CURRENT_SKIP, exit: { trailingPct: 0.015 } },
     { label: "EXIT trail 3%", skip: ENGINE_CURRENT_SKIP, exit: { trailingPct: 0.03 } },
     { label: "EXIT trail r_multiple 2R", skip: ENGINE_CURRENT_SKIP, exit: { trailMode: "r_multiple", trailRMultiple: 2.0 } },
+    // ── direction×regime size-tilt hypothesis (Jul 2026 round 5) ──
+    // LONG during BTC-daily-up = buying relative weakness (PF 1.11, exp +0.08R
+    // vs SHORT-up exp +1.20R). Test: shrink/block that bucket; one variant
+    // reallocates the freed risk to the strong SHORT-up bucket.
+    { label: "TILT LONG:up 0.75x", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0.75 } },
+    { label: "TILT LONG:up 0.5x", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0.5 } },
+    { label: "TILT LONG:up blocked", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0 } },
+    { label: "TILT LONG:up 0.5x + SHORT:up 1.25x", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0.5, "SHORT:up": 1.25 } },
     { label: "BASELINE (all gates)", skip: new Set() },
     ...ALL_GATES.map(g => ({ label: `minus ${g}`, skip: new Set<GateId>([g]) })),
     { label: "LEAN (only exposure+cooldown+maxOpen6, opinion filters off)", skip: new Set<GateId>(ALL_OFF) },
