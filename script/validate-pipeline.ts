@@ -103,6 +103,11 @@ interface RunConfig {
   perSymbolCap?: number;          // concurrent positions per symbol, different strategies only (default 1)
   cooldownOverride?: Record<string, number>; // strategyId → hours
   maxPerGroup?: number;           // correlation-group cap override (default 2)
+  /** Max concurrent open positions on the SAME side (LONG or SHORT). In crypto
+   *  everything correlates to BTC direction, so N shorts across N sectors are
+   *  effectively one bet — the sector group-cap doesn't catch this. undefined = no cap.
+   *  Directly implementable in the engine (count open longs/shorts before opening). */
+  maxSameDirection?: number;
   /** Exit-management override (TP1 close %, trailing mode/width). Undefined = engine default. */
   exit?: ManagedExitConfig;
   /** Risk-size multiplier per direction×BTC-daily-regime bucket (e.g. "LONG:up": 0.5).
@@ -450,6 +455,13 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
       if (inGroup >= (cfg.maxPerGroup ?? MAX_PER_GROUP)) { block("groupCap"); continue; }
     }
 
+    // ── net-directional exposure cap (correlated-cluster hypothesis) ──
+    if (cfg.maxSameDirection != null) {
+      let sameDir = 0;
+      for (const list of openBySymbol.values()) for (const pos of list) if (pos.trade.dir === c.dir) sameDir++;
+      if (sameDir >= cfg.maxSameDirection) { block("sameDir"); continue; }
+    }
+
     // ── per-strategy kill-switch ──
     if (!skip.has("killSwitch")) {
       const paused = strategiesToPause(closedLog, [c.stratId], {
@@ -652,6 +664,13 @@ async function main() {
     { label: "TILT LONG:up 0.5x", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0.5 } },
     { label: "TILT LONG:up blocked", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0 } },
     { label: "TILT LONG:up 0.5x + SHORT:up 1.25x", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, sizeTiltByDirRegime: { "LONG:up": 0.5, "SHORT:up": 1.25 } },
+    // ── net-directional exposure cap (Jul 2026 round 6) — hypothesis from live
+    //    paper: correlated same-direction cluster stop-outs (8 shorts across
+    //    sectors all lose together when BTC moves). Cap concurrent same-side opens.
+    { label: "SAMEDIR max 4", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 4 },
+    { label: "SAMEDIR max 5", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 5 },
+    { label: "SAMEDIR max 6", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 6 },
+    { label: "SAMEDIR max 7", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 7 },
     { label: "BASELINE (all gates)", skip: new Set() },
     ...ALL_GATES.map(g => ({ label: `minus ${g}`, skip: new Set<GateId>([g]) })),
     { label: "LEAN (only exposure+cooldown+maxOpen6, opinion filters off)", skip: new Set<GateId>(ALL_OFF) },
