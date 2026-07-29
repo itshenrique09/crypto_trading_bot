@@ -17,9 +17,7 @@ import {
 import { formatPrice, getSignalColor } from "@/lib/utils";
 import TradeChartModal from "@/components/TradeChartModal";
 import { ConfirmButton } from "@/components/ConfirmButton";
-import { PaperPrice, JournalEntry, StrategyInfo, STRATEGY_COLORS, getStratColor } from "@/lib/types";
-
-const DEFAULT_STRATEGY = "confluence-swing";
+import { PaperPrice, JournalEntry, StrategyInfo, STRATEGY_COLORS, getStratColor, getStratName } from "@/lib/types";
 
 export default function JournalPage() {
   const queryClient = useQueryClient();
@@ -161,7 +159,7 @@ export default function JournalPage() {
   const filtered = (journal as JournalEntry[]).filter(e => {
     if (filter !== "all" && e.outcome !== filter && !(filter === "open" && e.outcome === "open")) return false;
     if (modeFilter !== "all" && e.mode !== modeFilter) return false;
-    if (strategyFilter !== "all" && (e.strategy || DEFAULT_STRATEGY) !== strategyFilter) return false;
+    if (strategyFilter !== "all" && e.strategy !== strategyFilter) return false;
     return true;
   });
 
@@ -177,7 +175,7 @@ export default function JournalPage() {
 
   // Equity curve: closed trades filtered by strategy, sorted by close time
   const equityClosed = closed
-    .filter(e => strategyFilter === "all" || (e.strategy || DEFAULT_STRATEGY) === strategyFilter)
+    .filter(e => strategyFilter === "all" || e.strategy === strategyFilter)
     .filter(e => e.closed_at)
     .sort((a, b) => new Date(a.closed_at!).getTime() - new Date(b.closed_at!).getTime());
 
@@ -472,7 +470,7 @@ export default function JournalPage() {
         )}
 
         {filtered.map((entry) => {
-          const sc = getStratColor(entry.strategy || DEFAULT_STRATEGY);
+          const sc = getStratColor(entry.strategy);
           return (
           <Card key={entry.id} className="border-border/50 bg-card/50 p-3">
             <div className="flex items-center justify-between mb-2">
@@ -491,7 +489,7 @@ export default function JournalPage() {
                 </Link>
                 {/* Strategy badge */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
-                  {strategies.find(s => s.id === (entry.strategy || DEFAULT_STRATEGY))?.name || (entry.strategy === "v2-swing" ? "Confluence Swing" : entry.strategy || "Confluence Swing")}
+                  {getStratName(entry.strategy, strategies)}
                 </span>
                 {/* Mode */}
                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${

@@ -56,7 +56,7 @@ export default function ComparePage() {
 
   // Per-strategy coin breakdown
   const coinBreakdown = (strategyId: string) => {
-    const trades = paperTrades.filter(t => (t.strategy || "confluence-swing") === strategyId && t.outcome !== "open");
+    const trades = paperTrades.filter(t => t.strategy === strategyId && t.outcome !== "open");
     const bySymbol: Record<string, { wins: number; losses: number; pnl: number }> = {};
     for (const t of trades) {
       if (!bySymbol[t.symbol]) bySymbol[t.symbol] = { wins: 0, losses: 0, pnl: 0 };
@@ -72,7 +72,7 @@ export default function ComparePage() {
   // Recent trades per strategy
   const recentByStrategy = (strategyId: string) => {
     return paperTrades
-      .filter(t => (t.strategy || "confluence-swing") === strategyId && t.outcome !== "open")
+      .filter(t => t.strategy === strategyId && t.outcome !== "open")
       .slice(0, 12);
   };
 

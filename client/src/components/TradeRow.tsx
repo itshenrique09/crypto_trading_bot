@@ -22,7 +22,7 @@ interface TradeRowProps {
 }
 
 function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStartClose, onCancelClose, onCloseFormChange, onConfirmClose, onDelete }: TradeRowProps) {
-  const sc = getStratColor(entry.strategy || "confluence-swing");
+  const sc = getStratColor(entry.strategy);
   const isOpen = entry.outcome === "open";
   const pnl = isOpen ? price?.unrealizedPnl : entry.pnl_pct;
   const [showChart, setShowChart] = useState(false);
@@ -41,7 +41,7 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
           <div className="flex items-center gap-2 flex-wrap">
             <Link href={`/market/${entry.symbol}`} className="text-sm font-bold hover:text-purple-400 transition-colors">{entry.symbol}</Link>
             <span className={`text-[10px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
-              {getStratName(entry.strategy || "confluence-swing", strategies)}
+              {getStratName(entry.strategy, strategies)}
             </span>
             {isOpen && <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-400">Open</Badge>}
             {entry.outcome === "win" && <Badge variant="outline" className="text-[10px] border-emerald-500/30 text-emerald-400">Win</Badge>}

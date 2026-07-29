@@ -7,12 +7,12 @@ import {
   Activity, TrendingUp, TrendingDown,
   BarChart3, Target, Clock, Zap,
   ArrowUpRight, ArrowDownRight,
-  CircleDot, Trophy, Percent, ChevronRight, LineChart,
+  CircleDot, Trophy, ChevronRight, LineChart,
   Play, Square, Loader2, Wallet, Settings2
 } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
-import { getStratColor } from "@/lib/types";
+import { getStratColor, getStratName } from "@/lib/types";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
   ResponsiveContainer, ReferenceLine, CartesianGrid,
@@ -89,10 +89,21 @@ export default function Dashboard() {
   const openTrades = paperTrades.filter(e => e.outcome === "open");
   const closedTrades = paperTrades.filter(e => e.outcome !== "open");
   const totalWins = closedTrades.filter(e => e.outcome === "win").length;
-  const totalPnl = closedTrades.reduce((s, e) => s + (e.pnl_pct || 0), 0);
   const running = paperStatus?.running || false;
   const recentClosed = closedTrades.slice(0, 5);
   const activeStats = stratStats.filter(s => s.totalTrades > 0);
+
+  // ── Honest, size-normalized R metrics (the numbers a trader actually judges by).
+  // Summing pnl_pct across differently-sized positions is misleading; R = pnl/risk is not.
+  const rTrades = closedTrades
+    .filter(t => t.risk_usd && t.risk_usd > 0 && t.pnl_usd != null)
+    .map(t => t.pnl_usd! / t.risk_usd!);
+  const sumR = rTrades.reduce((s, r) => s + r, 0);
+  const grossWinR = rTrades.filter(r => r > 0).reduce((s, r) => s + r, 0);
+  const grossLossR = -rTrades.filter(r => r < 0).reduce((s, r) => s + r, 0);
+  const profitFactor = grossLossR > 0 ? grossWinR / grossLossR : (grossWinR > 0 ? Infinity : 0);
+  const expectancy = rTrades.length ? sumR / rTrades.length : 0;
+  const winRate = closedTrades.length ? (totalWins / closedTrades.length) * 100 : 0;
 
   // Sort open trades by absolute P&L (biggest movers first)
   const sortedOpen = [...openTrades].sort((a, b) => {
@@ -101,11 +112,10 @@ export default function Dashboard() {
     return Math.abs(pnlB) - Math.abs(pnlA);
   });
 
-  // ── Equity curve data ────────────────────────────────────────────
-  // Build cumulative P&L series from closed trades sorted by close date
+  // ── Equity curve — cumulative R (size-normalized, honest) ─────────
   const equityData = (() => {
     const sorted = [...closedTrades]
-      .filter(t => t.closed_at && t.pnl_pct != null)
+      .filter(t => t.closed_at && t.risk_usd && t.risk_usd > 0 && t.pnl_usd != null)
       .sort((a, b) => new Date(a.closed_at!).getTime() - new Date(b.closed_at!).getTime());
 
     if (sorted.length === 0) return [];
@@ -115,7 +125,7 @@ export default function Dashboard() {
     return [
       { date: "Start", equity: 0, drawdown: 0 },
       ...sorted.map(t => {
-        cumulative += t.pnl_pct!;
+        cumulative += t.pnl_usd! / t.risk_usd!;
         if (cumulative > peak) peak = cumulative;
         const drawdown = peak > 0 ? cumulative - peak : 0;
         return {
@@ -135,6 +145,7 @@ export default function Dashboard() {
     : 0;
 
   const cap = paperStatus?.capital;
+  const realReturnPct = cap && cap.initial > 0 ? ((cap.balance - cap.initial) / cap.initial) * 100 : null;
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1400px]">
@@ -220,35 +231,35 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      {/* Key Metrics Strip */}
+      {/* Key Metrics Strip — honest, size-normalized (R) + real account return */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <MetricCard
-          label="Open Positions"
-          value={openTrades.length}
-          icon={<Target className="w-4 h-4 text-yellow-400" />}
-          valueColor="text-yellow-400"
-          sub={`of ${paperTrades.length} total`}
+          label="Account Return"
+          value={realReturnPct != null ? `${realReturnPct > 0 ? "+" : ""}${realReturnPct.toFixed(1)}%` : "--"}
+          icon={<Wallet className="w-4 h-4 text-emerald-400" />}
+          valueColor={realReturnPct != null ? (realReturnPct >= 0 ? "text-emerald-400" : "text-red-400") : ""}
+          sub={cap ? `€${cap.balance.toFixed(2)} balance` : "No capital set"}
+        />
+        <MetricCard
+          label="Net R"
+          value={rTrades.length > 0 ? `${sumR > 0 ? "+" : ""}${sumR.toFixed(1)}R` : "--"}
+          icon={sumR >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-400" /> : <TrendingDown className="w-4 h-4 text-red-400" />}
+          valueColor={rTrades.length > 0 ? (sumR >= 0 ? "text-emerald-400" : "text-red-400") : ""}
+          sub={rTrades.length > 0 ? `expectancy ${expectancy > 0 ? "+" : ""}${expectancy.toFixed(2)}R / trade` : "No closed trades"}
+        />
+        <MetricCard
+          label="Profit Factor"
+          value={rTrades.length > 0 ? (profitFactor === Infinity ? "∞" : profitFactor.toFixed(2)) : "--"}
+          icon={<BarChart3 className="w-4 h-4 text-blue-400" />}
+          valueColor={rTrades.length > 0 ? (profitFactor >= 1 ? "text-emerald-400" : "text-red-400") : ""}
+          sub={`${closedTrades.length} closed · gross ${grossWinR.toFixed(0)}R / ${grossLossR.toFixed(0)}R`}
         />
         <MetricCard
           label="Win Rate"
-          value={closedTrades.length > 0 ? `${Math.round((totalWins / closedTrades.length) * 100)}%` : "--"}
+          value={closedTrades.length > 0 ? `${Math.round(winRate)}%` : "--"}
           icon={<Trophy className="w-4 h-4 text-amber-400" />}
-          valueColor={closedTrades.length > 0 && totalWins >= closedTrades.length / 2 ? "text-emerald-400" : closedTrades.length > 0 ? "text-red-400" : ""}
-          sub={closedTrades.length > 0 ? `${totalWins}W / ${closedTrades.length - totalWins}L` : "No closed trades"}
-        />
-        <MetricCard
-          label="Total P&L"
-          value={closedTrades.length > 0 ? `${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}%` : "--"}
-          icon={totalPnl >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-400" /> : <TrendingDown className="w-4 h-4 text-red-400" />}
-          valueColor={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-          sub={closedTrades.length > 0 ? `${closedTrades.length} closed trades` : ""}
-        />
-        <MetricCard
-          label="Avg P&L"
-          value={closedTrades.length > 0 ? `${(totalPnl / closedTrades.length) > 0 ? "+" : ""}${(totalPnl / closedTrades.length).toFixed(2)}%` : "--"}
-          icon={<Percent className="w-4 h-4 text-blue-400" />}
-          valueColor={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-          sub="per trade"
+          valueColor={closedTrades.length > 0 ? (winRate >= 45 ? "text-emerald-400" : "text-amber-400") : ""}
+          sub={closedTrades.length > 0 ? `${totalWins}W / ${closedTrades.length - totalWins}L · ${openTrades.length} open` : `${openTrades.length} open`}
         />
       </div>
 
@@ -258,20 +269,20 @@ export default function Dashboard() {
           <div className="flex items-center gap-2">
             <LineChart className="w-4 h-4 text-purple-400" />
             <h2 className="text-sm font-bold">Equity Curve</h2>
-            <span className="text-[10px] text-muted-foreground/50">paper · cumulative P&L</span>
+            <span className="text-[10px] text-muted-foreground/50">paper · cumulative R</span>
           </div>
           <div className="flex items-center gap-4 text-[11px]">
             {equityData.length > 1 && (
               <>
                 <span className={`font-mono font-bold ${equityFinal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {equityFinal > 0 ? "+" : ""}{equityFinal.toFixed(2)}%
+                  {equityFinal > 0 ? "+" : ""}{equityFinal.toFixed(1)}R
                 </span>
                 {maxDrawdown < -0.01 && (
                   <span className="font-mono text-red-400/70">
-                    DD {maxDrawdown.toFixed(2)}%
+                    DD {maxDrawdown.toFixed(1)}R
                   </span>
                 )}
-                <span className="text-muted-foreground/40">{closedTrades.length} trades</span>
+                <span className="text-muted-foreground/40">{rTrades.length} trades</span>
               </>
             )}
           </div>
@@ -310,7 +321,7 @@ export default function Dashboard() {
                   tick={{ fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`}
+                  tickFormatter={v => `${v > 0 ? "+" : ""}${v}R`}
                 />
                 <Tooltip
                   contentStyle={{
@@ -322,8 +333,8 @@ export default function Dashboard() {
                   }}
                   labelStyle={{ color: "rgba(255,255,255,0.5)", marginBottom: "2px" }}
                   formatter={(value: number, name: string) => [
-                    `${value > 0 ? "+" : ""}${value.toFixed(2)}%`,
-                    name === "equity" ? "Cumulative P&L" : "Drawdown",
+                    `${value > 0 ? "+" : ""}${value.toFixed(2)}R`,
+                    name === "equity" ? "Cumulative R" : "Drawdown",
                   ]}
                 />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 4" />
@@ -381,7 +392,7 @@ export default function Dashboard() {
             <div className="space-y-2">
               {sortedOpen.slice(0, 8).map(t => {
                 const price = priceMap.get(t.id);
-                const sc = getStratColor(t.strategy || "confluence-swing");
+                const sc = getStratColor(t.strategy);
                 const pnl = price?.unrealizedPnl;
                 return (
                   <Card key={t.id} className="border-border/20 hover:border-border/40 transition-colors overflow-hidden">
@@ -404,7 +415,7 @@ export default function Dashboard() {
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-bold">{t.symbol}</span>
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text} font-medium`}>
-                            {strategies.find(s => s.id === t.strategy)?.name || "v2 Swing"}
+                            {getStratName(t.strategy, strategies)}
                           </span>
                         </div>
                         <div className="flex items-center gap-3 mt-0.5">
@@ -570,7 +581,8 @@ export default function Dashboard() {
               </div>
               <Card className="border-border/20 divide-y divide-border/10 overflow-hidden">
                 {recentClosed.map(t => {
-                  const sc = getStratColor(t.strategy || "confluence-swing");
+                  const sc = getStratColor(t.strategy);
+                  const rMult = t.risk_usd && t.risk_usd > 0 && t.pnl_usd != null ? t.pnl_usd / t.risk_usd : null;
                   return (
                     <div key={t.id} className="flex items-center gap-2.5 px-3 py-2.5 hover:bg-card/30 transition-colors">
                       <div className={`w-6 h-6 rounded flex items-center justify-center shrink-0 ${
@@ -585,15 +597,15 @@ export default function Dashboard() {
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-bold">{t.symbol}</span>
                           <span className={`text-[9px] px-1 py-0.5 rounded ${sc.bg} ${sc.text}`}>
-                            {strategies.find(s => s.id === t.strategy)?.name || "v2"}
+                            {getStratName(t.strategy, strategies)}
                           </span>
                         </div>
                         <span className="text-[10px] text-muted-foreground/50">
                           {new Date(t.closed_at || t.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </span>
                       </div>
-                      <span className={`text-xs font-bold font-mono ${(t.pnl_pct || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {t.pnl_pct != null ? `${t.pnl_pct > 0 ? "+" : ""}${t.pnl_pct}%` : "--"}
+                      <span className={`text-xs font-bold font-mono ${(rMult ?? t.pnl_pct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {rMult != null ? `${rMult > 0 ? "+" : ""}${rMult.toFixed(2)}R` : t.pnl_pct != null ? `${t.pnl_pct > 0 ? "+" : ""}${t.pnl_pct}%` : "--"}
                       </span>
                     </div>
                   );

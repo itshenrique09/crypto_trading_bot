@@ -38,7 +38,7 @@ export default function AnalysisPage() {
   const [, marketParams] = useRoute("/market/:symbol");
   const [, analyzeParams] = useRoute("/analyze/:symbol");
   const symbol = marketParams?.symbol || analyzeParams?.symbol || "BTC";
-  const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest" | "rsi-divergence">("confluence-swing");
+  const [backtestTab, setBacktestTab] = useState<"confluence-swing" | "smc" | "break-retest" | "rsi-divergence">("break-retest");
   const [signalLogged, setSignalLogged] = useState(false);
 
   const logSignalMutation = useMutation({
@@ -224,12 +224,12 @@ export default function AnalysisPage() {
                 </Card>
               )}
 
-              {/* ── v2 Swing: 4H Signal + 1D Trend Filter ──────── */}
+              {/* ── 1H Signal + 1D Trend Filter ──────── */}
               {(timeframes || isLoading) && (
                 <Card className="border-border/30 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Clock className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-bold">v2 Swing — 1H Signal + 1D Trend Filter (bot signal)</span>
+                    <span className="text-xs font-bold">1H Signal + 1D Trend Filter (bot signal)</span>
                     {combined && (
                       <Badge variant="outline" className="ml-auto text-[10px]">
                         {combined.trendAligned
@@ -614,10 +614,10 @@ export default function AnalysisPage() {
               </div>
               <div className="flex items-center bg-card/40 border border-border/20 rounded-lg p-0.5">
                 {[
-                  { id: "confluence-swing" as const, label: "Confluence Swing" },
-                  { id: "smc" as const, label: "SMC" },
                   { id: "break-retest" as const, label: "Break & Retest" },
                   { id: "rsi-divergence" as const, label: "RSI Divergence" },
+                  { id: "confluence-swing" as const, label: "Confluence Swing (retired)" },
+                  { id: "smc" as const, label: "SMC (retired)" },
                 ].map(tab => {
                   const sc = getStratColor(tab.id);
                   return (
