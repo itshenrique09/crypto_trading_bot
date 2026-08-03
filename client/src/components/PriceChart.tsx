@@ -1,8 +1,17 @@
-import { useMemo } from "react";
+import { useEffect, useRef } from "react";
 import {
-  ResponsiveContainer, ComposedChart, Area, Line, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine
-} from "recharts";
+  createChart,
+  CandlestickSeries,
+  LineSeries,
+  HistogramSeries,
+  LineStyle,
+  CrosshairMode,
+  type IChartApi,
+  type Time,
+  type CandlestickData,
+  type LineData,
+  type HistogramData,
+} from "lightweight-charts";
 import { formatPrice } from "@/lib/utils";
 
 interface OHLCV {
@@ -20,152 +29,123 @@ interface Props {
   indicators?: any;
 }
 
-export default function PriceChart({ candles, signal, indicators }: Props) {
-  const chartData = useMemo(() => {
-    if (!candles?.length) return [];
-    return candles.map((c) => ({
-      time: new Date(c.time * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      price: c.close,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      volume: c.volume,
-      range: [c.low, c.high],
-    }));
-  }, [candles]);
-
-  if (!chartData.length) {
-    return <div className="h-[320px] flex items-center justify-center text-xs text-muted-foreground">Loading chart...</div>;
+// Exponential moving average over closes → a real series (not a flat line).
+function emaSeries(candles: OHLCV[], period: number): LineData<Time>[] {
+  if (candles.length < period) return [];
+  const k = 2 / (period + 1);
+  const out: LineData<Time>[] = [];
+  let prev = candles[0].close;
+  for (let i = 0; i < candles.length; i++) {
+    prev = i === 0 ? candles[i].close : candles[i].close * k + prev * (1 - k);
+    // Only emit once the average has enough data behind it to be meaningful.
+    if (i >= period - 1) out.push({ time: candles[i].time as Time, value: prev });
   }
+  return out;
+}
 
-  const minPrice = Math.min(...chartData.map((d) => d.low)) * 0.995;
-  const maxPrice = Math.max(...chartData.map((d) => d.high)) * 1.005;
+export default function PriceChart({ candles, signal }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || !candles?.length) return;
+
+    // De-dupe + sort ascending (lightweight-charts requires strictly increasing time).
+    const sorted = [...candles]
+      .filter(c => Number.isFinite(c.time) && Number.isFinite(c.close))
+      .sort((a, b) => a.time - b.time)
+      .filter((c, i, arr) => i === 0 || c.time !== arr[i - 1].time);
+
+    const chart: IChartApi = createChart(containerRef.current, {
+      layout: {
+        background: { color: "transparent" },
+        textColor: "#9ca3af",
+        fontSize: 10,
+      },
+      grid: {
+        vertLines: { color: "rgba(255,255,255,0.03)" },
+        horzLines: { color: "rgba(255,255,255,0.03)" },
+      },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)", scaleMargins: { top: 0.08, bottom: 0.24 } },
+      timeScale: { borderColor: "rgba(255,255,255,0.08)", timeVisible: true, secondsVisible: false },
+      width: containerRef.current.clientWidth,
+      height: 340,
+    });
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: "#10b981", downColor: "#ef4444",
+      borderUpColor: "#10b981", borderDownColor: "#ef4444",
+      wickUpColor: "#10b981", wickDownColor: "#ef4444",
+      priceLineVisible: false,
+    });
+    candleSeries.setData(sorted.map(c => ({
+      time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })) as CandlestickData<Time>[]);
+
+    // ── Volume histogram on its own overlay scale at the bottom ──
+    const volSeries = chart.addSeries(HistogramSeries, {
+      priceScaleId: "vol",
+      priceFormat: { type: "volume" },
+    });
+    volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    volSeries.setData(sorted.map(c => ({
+      time: c.time as Time,
+      value: c.volume,
+      color: c.close >= c.open ? "rgba(16,185,129,0.28)" : "rgba(239,68,68,0.28)",
+    })) as HistogramData<Time>[]);
+
+    // ── EMA overlays — the macro filter the strategies actually use ──
+    const ema50 = emaSeries(sorted, 50);
+    if (ema50.length) {
+      const s = chart.addSeries(LineSeries, { color: "#a78bfa", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      s.setData(ema50);
+    }
+    const ema200 = emaSeries(sorted, 200);
+    if (ema200.length) {
+      const s = chart.addSeries(LineSeries, { color: "#fb923c", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      s.setData(ema200);
+    }
+
+    // ── Signal levels — horizontal price lines with axis labels ──
+    const priceLine = (price: number | undefined, color: string, style: LineStyle, title: string) => {
+      if (price == null || !Number.isFinite(price)) return;
+      candleSeries.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title });
+    };
+    if (signal) {
+      priceLine(signal.entry, "#f59e0b", LineStyle.Solid, "Entry");
+      priceLine(signal.stopLoss, "#ef4444", LineStyle.Dashed, "SL");
+      priceLine(signal.takeProfit1, "#10b981", LineStyle.Dashed, "TP1");
+      if (signal.takeProfit2 && signal.takeProfit2 !== signal.takeProfit1) {
+        priceLine(signal.takeProfit2, "#6ee7b7", LineStyle.Dotted, "TP2");
+      }
+    }
+
+    chart.timeScale().fitContent();
+
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+
+    return () => { ro.disconnect(); chart.remove(); };
+  }, [candles, signal]);
+
+  if (!candles?.length) {
+    return <div className="h-[340px] flex items-center justify-center text-xs text-muted-foreground">Loading chart…</div>;
+  }
 
   return (
     <div className="space-y-1">
-      {/* Main Price Chart */}
-      <div className="h-[280px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: 5 }}>
-            <defs>
-              <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#22c55e" stopOpacity={0.15} />
-                <stop offset="100%" stopColor="#22c55e" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 15% 12%)" vertical={false} />
-            <XAxis
-              dataKey="time"
-              tick={{ fontSize: 9, fill: "hsl(215 15% 52%)" }}
-              axisLine={{ stroke: "hsl(220 15% 14%)" }}
-              tickLine={false}
-              interval={Math.max(0, Math.floor(chartData.length / 8))}
-            />
-            <YAxis
-              domain={[minPrice, maxPrice]}
-              tick={{ fontSize: 9, fill: "hsl(215 15% 52%)" }}
-              axisLine={false}
-              tickLine={false}
-              tickFormatter={(v) => `$${formatPrice(v)}`}
-              width={70}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "hsl(220 18% 10%)",
-                border: "1px solid hsl(220 15% 18%)",
-                borderRadius: "6px",
-                fontSize: "11px",
-                color: "hsl(210 20% 90%)",
-              }}
-              formatter={(value: any, name: string) => {
-                if (name === "price") return [`$${formatPrice(value)}`, "Close"];
-                return [value, name];
-              }}
-            />
-            <Area
-              type="monotone"
-              dataKey="price"
-              stroke="#22c55e"
-              strokeWidth={2}
-              fill="url(#priceGradient)"
-              dot={false}
-              activeDot={{ r: 3, fill: "#22c55e", stroke: "#22c55e33", strokeWidth: 6 }}
-            />
-            {/* Bollinger Bands */}
-            {indicators?.bollingerBands && (
-              <>
-                <ReferenceLine
-                  y={indicators.bollingerBands.upper}
-                  stroke="#3b82f680"
-                  strokeDasharray="4 4"
-                  strokeWidth={1}
-                />
-                <ReferenceLine
-                  y={indicators.bollingerBands.middle}
-                  stroke="#3b82f640"
-                  strokeDasharray="2 2"
-                  strokeWidth={1}
-                />
-                <ReferenceLine
-                  y={indicators.bollingerBands.lower}
-                  stroke="#3b82f680"
-                  strokeDasharray="4 4"
-                  strokeWidth={1}
-                />
-              </>
-            )}
-            {/* Signal Lines */}
-            {signal?.entry && (
-              <ReferenceLine y={signal.entry} stroke="#f59e0b" strokeDasharray="3 3" strokeWidth={1.5} />
-            )}
-            {signal?.stopLoss && (
-              <ReferenceLine y={signal.stopLoss} stroke="#ef4444" strokeDasharray="6 3" strokeWidth={1} />
-            )}
-            {signal?.takeProfit3 && (
-              <ReferenceLine y={signal.takeProfit3} stroke="#22c55e" strokeDasharray="6 3" strokeWidth={1} />
-            )}
-            {/* Support/Resistance */}
-            {indicators?.support && (
-              <ReferenceLine y={indicators.support} stroke="#22c55e40" strokeDasharray="8 4" strokeWidth={1} />
-            )}
-            {indicators?.resistance && (
-              <ReferenceLine y={indicators.resistance} stroke="#ef444440" strokeDasharray="8 4" strokeWidth={1} />
-            )}
-            {/* EMA lines */}
-            {indicators?.ema50 && (
-              <ReferenceLine y={indicators.ema50} stroke="#a78bfa60" strokeDasharray="2 2" strokeWidth={1} />
-            )}
-            {indicators?.ema200 && (
-              <ReferenceLine y={indicators.ema200} stroke="#f9731660" strokeDasharray="2 2" strokeWidth={1} />
-            )}
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-      {/* Volume Bars */}
-      <div className="h-[60px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 0, right: 5, bottom: 0, left: 5 }}>
-            <XAxis dataKey="time" hide />
-            <YAxis hide />
-            <Bar
-              dataKey="volume"
-              fill="hsl(220 15% 18%)"
-              radius={[1, 1, 0, 0]}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+      <div ref={containerRef} className="w-full" />
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-3 text-[9px] text-muted-foreground pt-1">
-        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-500 inline-block" /> Price</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-500/50 inline-block border-dashed" /> Bollinger</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-purple-400/40 inline-block" /> EMA 50</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-orange-400/40 inline-block" /> EMA 200</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-400 inline-block" /> EMA 50</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-orange-400 inline-block" /> EMA 200</span>
         {signal?.entry && (
           <>
-            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-amber-400 inline-block" /> Entry</span>
-            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400 inline-block" /> Stop Loss</span>
-            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block" /> Take Profit</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-amber-500 inline-block" /> Entry {formatPrice(signal.entry)}</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400 inline-block" /> SL {formatPrice(signal.stopLoss)}</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block" /> TP1 {formatPrice(signal.takeProfit1)}</span>
           </>
         )}
       </div>

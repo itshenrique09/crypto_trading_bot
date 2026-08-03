@@ -3,7 +3,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, Eye, Zap, Activity, ArrowUpRight, ArrowDownRight, ChevronRight } from "lucide-react";
+import { Search, Eye, Zap, Activity, ArrowUpRight, ArrowDownRight, ChevronRight, Percent } from "lucide-react";
 import { useLocation } from "wouter";
 import { formatPrice, formatCompact, formatPercent, getChangeColor } from "@/lib/utils";
 import { useState } from "react";
@@ -57,6 +57,14 @@ export default function ScannerPage() {
 
   const topVolume = coins ? coins.slice(0, 25) : [];
 
+  // Funding extremes — the crowded side (squeeze risk) + carry candidates.
+  // The engine reads these live to skip crowded entries; surfacing them here.
+  const fundingRanked = coins
+    ? [...coins].filter(c => c.fundingRate != null).sort((a, b) => (b.fundingRate ?? 0) - (a.fundingRate ?? 0))
+    : [];
+  const topPositiveFunding = fundingRanked.slice(0, 4);
+  const topNegativeFunding = fundingRanked.slice(-4).reverse();
+
   const filtered = search
     ? coins?.filter(c =>
         c.symbol.toLowerCase().includes(search.toLowerCase()) ||
@@ -69,9 +77,9 @@ export default function ScannerPage() {
       {/* Header + Search */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
         <div>
-          <h1 className="text-lg font-bold tracking-tight">Market Overview</h1>
+          <h1 className="text-lg font-bold tracking-tight">Market</h1>
           <p className="text-[11px] text-muted-foreground mt-0.5">
-            {coins?.length ?? 0} coins tracked · MEXC data · updated every 60s
+            What the engine holds now + the market it scans · funding-aware · MEXC · 60s refresh
           </p>
         </div>
         <div className="relative">
@@ -256,21 +264,46 @@ export default function ScannerPage() {
           </Card>
         </div>
 
-        {/* Sidebar — compacted: Quick Analyze + Moving Now only */}
+        {/* Sidebar — bot-relevant: Funding Extremes + Moving Now */}
         <div className="space-y-5">
-          {/* Quick Analyze — kept because it's fast navigation, not decorative */}
+          {/* Funding Extremes — the crowded side the engine avoids + carry candidates */}
           <Card className="border-border/20 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Eye className="w-4 h-4 text-purple-400" />
-              <span className="text-sm font-bold">Quick Analyze</span>
+            <div className="flex items-center gap-2 mb-1">
+              <Percent className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-bold">Funding Extremes</span>
+              <span className="text-[10px] text-muted-foreground/50 ml-auto">per 8h</span>
             </div>
-            <div className="grid grid-cols-4 gap-1.5">
-              {["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "ADA", "LINK", "NEAR", "SUI", "ARB"].map(sym => (
-                <Link key={sym} href={`/market/${sym}`} className="flex items-center justify-center p-2 rounded-md bg-card/30 border border-border/15 hover:border-purple-500/40 hover:bg-purple-500/5 transition-all">
-                  <span className="text-[11px] font-bold">{sym}</span>
-                </Link>
-              ))}
-            </div>
+            <p className="text-[10px] text-muted-foreground/50 mb-3 leading-snug">
+              High funding = crowded side. The engine skips entries there (squeeze risk); the carry scanner watches them too.
+            </p>
+            {fundingRanked.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground/40 py-4 text-center">No funding data</p>
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-red-400/60 font-medium mb-1">Longs crowded (pay funding)</p>
+                  <div className="space-y-0.5">
+                    {topPositiveFunding.map(coin => (
+                      <Link key={coin.symbol} href={`/market/${coin.symbol}`} className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-card/40 transition-colors group">
+                        <span className="text-xs font-bold group-hover:text-purple-400 transition-colors">{coin.symbol}</span>
+                        <span className="text-[11px] font-mono font-bold text-red-400">+{((coin.fundingRate ?? 0) * 100).toFixed(4)}%</span>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-emerald-400/60 font-medium mb-1">Shorts crowded (pay funding)</p>
+                  <div className="space-y-0.5">
+                    {topNegativeFunding.map(coin => (
+                      <Link key={coin.symbol} href={`/market/${coin.symbol}`} className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-card/40 transition-colors group">
+                        <span className="text-xs font-bold group-hover:text-purple-400 transition-colors">{coin.symbol}</span>
+                        <span className="text-[11px] font-mono font-bold text-emerald-400">{((coin.fundingRate ?? 0) * 100).toFixed(4)}%</span>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </Card>
 
           {/* Moving Now — volatility often precedes signals, keep it */}

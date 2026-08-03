@@ -48,6 +48,20 @@ export default function ComparePage() {
   const paperTrades = journal.filter(e => e.mode === "paper");
   const activeStats = stratStats.filter(s => s.totalTrades > 0);
 
+  // Size-normalized R metrics per strategy (pnl/risk) — honest vs summed %.
+  const rStats = (strategyId: string) => {
+    const rs = paperTrades
+      .filter(t => t.strategy === strategyId && t.outcome !== "open" && t.risk_usd && t.risk_usd > 0 && t.pnl_usd != null)
+      .map(t => t.pnl_usd! / t.risk_usd!);
+    const n = rs.length;
+    const sumR = rs.reduce((s, r) => s + r, 0);
+    const gw = rs.filter(r => r > 0).reduce((s, r) => s + r, 0);
+    const gl = -rs.filter(r => r < 0).reduce((s, r) => s + r, 0);
+    const pf = gl > 0 ? gw / gl : (gw > 0 ? Infinity : 0);
+    return { n, sumR, pf, exp: n ? sumR / n : 0 };
+  };
+  const rByStrategy = new Map(activeStats.map(s => [s.strategyId, rStats(s.strategyId)]));
+
   // Best per metric
   const bestWinRate = activeStats.reduce((best, s) => (!best || (s.winRate ?? 0) > (best.winRate ?? 0)) ? s : best, null as StrategyStats | null);
   const bestPnl = activeStats.reduce((best, s) => (!best || s.totalPnl > best.totalPnl) ? s : best, null as StrategyStats | null);
@@ -158,11 +172,28 @@ export default function ComparePage() {
                     stats={activeStats}
                   />
                   <CompareRow
+                    label="Net R"
+                    values={activeStats.map(s => { const r = rByStrategy.get(s.strategyId); return r && r.n ? `${r.sumR >= 0 ? "+" : ""}${r.sumR.toFixed(1)}R` : "--"; })}
+                    bestIdx={findBestIdx(activeStats.map(s => rByStrategy.get(s.strategyId)?.sumR ?? -999))}
+                    colorFn={(s) => (rByStrategy.get(s.strategyId)?.sumR ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}
+                    stats={activeStats}
+                    hint="size-normalized · pnl / risk"
+                  />
+                  <CompareRow
+                    label="Expectancy"
+                    values={activeStats.map(s => { const r = rByStrategy.get(s.strategyId); return r && r.n ? `${r.exp >= 0 ? "+" : ""}${r.exp.toFixed(2)}R` : "--"; })}
+                    bestIdx={findBestIdx(activeStats.map(s => rByStrategy.get(s.strategyId)?.exp ?? -999))}
+                    colorFn={(s) => (rByStrategy.get(s.strategyId)?.exp ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}
+                    stats={activeStats}
+                    hint="R per trade"
+                  />
+                  <CompareRow
                     label="Total P&L"
                     values={activeStats.map(s => `${s.totalPnl > 0 ? "+" : ""}${s.totalPnl.toFixed(2)}%`)}
                     bestIdx={findBestIdx(activeStats.map(s => s.totalPnl))}
                     colorFn={(s) => s.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
                     stats={activeStats}
+                    hint="summed % — see Net R for the honest figure"
                   />
                   <CompareRow
                     label="Avg P&L"
@@ -226,9 +257,20 @@ export default function ComparePage() {
                   <div className={`px-4 py-3 border-b border-border/15 ${sc.bg}`}>
                     <div className="flex items-center justify-between">
                       <span className={`text-sm font-bold ${sc.text}`}>{s.strategyName}</span>
-                      <span className={`text-sm font-bold font-mono ${s.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {s.totalPnl > 0 ? "+" : ""}{s.totalPnl.toFixed(2)}%
-                      </span>
+                      {(() => {
+                        const r = rByStrategy.get(s.strategyId);
+                        const sumR = r?.sumR ?? 0;
+                        return (
+                          <div className="text-right leading-none">
+                            <span className={`text-sm font-bold font-mono ${r && r.n ? (sumR >= 0 ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}`}>
+                              {r && r.n ? `${sumR >= 0 ? "+" : ""}${sumR.toFixed(1)}R` : "--"}
+                            </span>
+                            <span className="block text-[9px] text-muted-foreground/50 font-mono mt-0.5">
+                              {s.totalPnl > 0 ? "+" : ""}{s.totalPnl.toFixed(1)}%
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <p className="text-[10px] text-muted-foreground/60 mt-0.5">
                       {strategies.find(st => st.id === s.strategyId)?.description || ""}
