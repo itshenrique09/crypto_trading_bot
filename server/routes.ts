@@ -2573,6 +2573,12 @@ export async function registerRoutes(server: Server, app: Express) {
     openPositions: 0,
     unmanagedPositions: 0,
     error:         null as string | null,
+    // Venue snapshot refreshed each liveCheck so the UI can show real exchange
+    // state (mark price, unrealised P&L, funding, resting stops) without the
+    // user opening the exchange — and without extra API calls per page load.
+    account:   null as { equity: number; available: number; usedMargin?: number; unrealizedPnl?: number } | null,
+    positions: [] as Array<ExchangePosition & { protection?: { stop?: number; takeProfit?: number } }>,
+    snapshotAt: null as string | null,
   };
 
   const DEFAULT_EXCHANGE: ExchangeId = "kraken";
@@ -2605,7 +2611,25 @@ export async function registerRoutes(server: Server, app: Express) {
       // Reconcile the venue's open positions with our journal
       const exchangePositions = await client.getPositions();
       liveEngineStatus.openPositions = exchangePositions.length;
-      liveEngineStatus.balance = (await client.getBalance()).available;
+      const account = await client.getBalance();
+      liveEngineStatus.balance = account.available;
+
+      // Snapshot venue state for the UI: mark price and unrealised P&L come
+      // from the exchange itself, and the resting stop/TP orders are read back
+      // so the dashboard can prove a position is actually protected.
+      const protection = client.getProtection ? await client.getProtection().catch(() => []) : [];
+      liveEngineStatus.account = account;
+      liveEngineStatus.positions = exchangePositions.map(p => {
+        const forSymbol = protection.filter(x => x.botSymbol === p.botSymbol);
+        return {
+          ...p,
+          protection: {
+            stop:       forSymbol.find(x => x.kind === "stop")?.price,
+            takeProfit: forSymbol.find(x => x.kind === "take_profit")?.price,
+          },
+        };
+      });
+      liveEngineStatus.snapshotAt = new Date().toISOString();
 
       // ── TRAILING STOP MODE — default r_multiple 2R (Jul 2026 pipeline A/B) ──
       // Mirrors paperCheck — see the rationale note there.

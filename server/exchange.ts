@@ -47,6 +47,12 @@ export interface ExchangePosition {
   size: number;
   entryPrice: number;
   unrealizedPnl: number;
+  /** Venue's mark price — what it settles P&L against. */
+  markPrice?: number;
+  /** Notional value at mark. */
+  notionalUsd?: number;
+  /** Funding accrued but not yet settled (negative = you pay). */
+  unrealizedFunding?: number | null;
   /** Venue-specific payload (MEXC needs positionId for TP/SL). */
   raw: unknown;
 }
@@ -56,6 +62,18 @@ export interface ExchangeBalance {
   equity: number;
   /** Margin free for new positions. */
   available: number;
+  /** Margin currently backing open positions. */
+  usedMargin?: number;
+  /** Total unrealised PnL across open positions. */
+  unrealizedPnl?: number;
+}
+
+/** A protective order resting on the venue (what actually guards a position). */
+export interface ExchangeProtection {
+  botSymbol: string;
+  kind: "stop" | "take_profit";
+  price: number;
+  size: number;
 }
 
 export interface OpenResult {
@@ -78,6 +96,8 @@ export interface ExchangeAdapter {
   closePartial(position: ExchangePosition, closePct: number): Promise<{ orderId: string; size: number }>;
   /** Place/replace stop-loss (and optionally take-profit) for an open position. */
   setProtection(position: ExchangePosition, stopLossPrice: number, takeProfitPrice?: number): Promise<void>;
+  /** Protective orders currently resting on the venue, for display/verification. */
+  getProtection?(): Promise<ExchangeProtection[]>;
 }
 
 // ── MEXC ──────────────────────────────────────────────────────────────────
@@ -162,19 +182,40 @@ export class KrakenAdapter implements ExchangeAdapter {
 
   async getBalance(): Promise<ExchangeBalance> {
     const b = await this.client.getBalance();
-    return { equity: b.equity, available: b.availableBalance };
+    return { equity: b.equity, available: b.availableBalance, usedMargin: b.usedMargin, unrealizedPnl: b.unrealizedPnl };
   }
 
   async getPositions(): Promise<ExchangePosition[]> {
     const positions = await this.client.getPositions();
-    return positions.map(p => ({
-      botSymbol: fromKrakenSymbol(p.symbol),
-      direction: p.side === "long" ? "LONG" as const : "SHORT" as const,
-      size: p.size,
-      entryPrice: p.price,
-      unrealizedPnl: p.unrealizedPnl,
-      raw: { symbol: p.symbol },
-    }));
+    // Mark against the venue's own price so the app agrees with the exchange.
+    const tickers = await this.client.getTickers().catch(() => new Map());
+    return positions.map(p => {
+      const t = tickers.get(p.symbol);
+      const mark = t?.markPrice && t.markPrice > 0 ? t.markPrice : p.price;
+      return {
+        botSymbol: fromKrakenSymbol(p.symbol),
+        direction: p.side === "long" ? "LONG" as const : "SHORT" as const,
+        size: p.size,
+        entryPrice: p.price,
+        unrealizedPnl: p.unrealizedPnl,
+        markPrice: mark,
+        notionalUsd: p.size * mark,
+        unrealizedFunding: p.unrealizedFunding ?? null,
+        raw: { symbol: p.symbol },
+      };
+    });
+  }
+
+  async getProtection(): Promise<ExchangeProtection[]> {
+    const orders = await this.client.getOpenOrders();
+    return orders
+      .filter(o => o.reduceOnly && /stp|take_profit/i.test(o.orderType) && o.stopPrice != null)
+      .map(o => ({
+        botSymbol: fromKrakenSymbol(o.symbol),
+        kind: /take_profit/i.test(o.orderType) ? "take_profit" as const : "stop" as const,
+        price: o.stopPrice!,
+        size: o.size,
+      }));
   }
 
   async isTradeable(botSymbol: string): Promise<boolean> {

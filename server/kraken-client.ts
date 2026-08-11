@@ -49,6 +49,20 @@ export interface KrakenBalance {
   /** Margin free to open new positions. */
   availableBalance: number;
   currency: string;
+  /** Margin currently backing open positions. */
+  usedMargin: number;
+  /** Total unrealised PnL across open positions. */
+  unrealizedPnl: number;
+}
+
+export interface KrakenTicker {
+  symbol: string;
+  markPrice: number;
+  last: number;
+  fundingRate: number | null;
+  /** Predicted next funding rate, when the venue publishes one. */
+  fundingRatePrediction: number | null;
+  vol24h: number;
 }
 
 export interface KrakenInstrument {
@@ -158,6 +172,7 @@ export function selectPosition(
 
 export class KrakenClient {
   private instrumentCache: { at: number; map: Map<string, KrakenInstrument> } | null = null;
+  private tickerCache: { at: number; map: Map<string, KrakenTicker> } | null = null;
 
   constructor(
     private readonly apiKey: string,
@@ -219,13 +234,19 @@ export class KrakenClient {
     if (flex) {
       const equity = Number(flex.portfolioValue ?? flex.marginEquity ?? flex.balanceValue ?? 0);
       const available = Number(flex.availableMargin ?? flex.collateralValue ?? equity);
-      return { equity, availableBalance: available, currency: "USD" };
+      return {
+        equity,
+        availableBalance: available,
+        currency: "USD",
+        usedMargin: Number(flex.initialMargin ?? 0),
+        unrealizedPnl: Number(flex.totalUnrealized ?? flex.pnl ?? 0),
+      };
     }
 
     // Fallback: sum USD-ish balances from a cash account.
     const cash = accounts.cash?.balances ?? {};
     const usd = Number(cash.USD ?? cash.usd ?? 0);
-    if (usd > 0) return { equity: usd, availableBalance: usd, currency: "USD" };
+    if (usd > 0) return { equity: usd, availableBalance: usd, currency: "USD", usedMargin: 0, unrealizedPnl: 0 };
 
     throw new Error("No Kraken flex/cash futures account found — check that derivatives are enabled on this account");
   }
@@ -273,6 +294,34 @@ export class KrakenClient {
       });
     }
     this.instrumentCache = { at: Date.now(), map };
+    return map;
+  }
+
+  /**
+   * Public ticker feed — mark price and funding per contract. The engine marks
+   * open positions against the venue's own mark price rather than a third-party
+   * quote, so what the app shows matches what the exchange will settle on.
+   * Cached 5s: fresh enough for a live P&L readout, cheap enough to poll.
+   */
+  async getTickers(): Promise<Map<string, KrakenTicker>> {
+    if (this.tickerCache && Date.now() - this.tickerCache.at < 5_000) return this.tickerCache.map;
+    const res = await fetch(`${BASE_URL}${API_PREFIX}/tickers`);
+    if (!res.ok) throw new Error(`Kraken tickers → ${res.status}`);
+    const json: any = await res.json();
+    const map = new Map<string, KrakenTicker>();
+    for (const t of json?.tickers ?? []) {
+      const symbol = String(t?.symbol ?? "").toUpperCase();
+      if (!symbol.startsWith("PF_")) continue;
+      map.set(symbol, {
+        symbol,
+        markPrice: Number(t.markPrice ?? t.last ?? 0),
+        last: Number(t.last ?? t.markPrice ?? 0),
+        fundingRate: t.fundingRate != null ? Number(t.fundingRate) : null,
+        fundingRatePrediction: t.fundingRatePrediction != null ? Number(t.fundingRatePrediction) : null,
+        vol24h: Number(t.vol24h ?? 0),
+      });
+    }
+    this.tickerCache = { at: Date.now(), map };
     return map;
   }
 

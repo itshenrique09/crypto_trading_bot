@@ -19,10 +19,18 @@ function fakeMexc(overrides: Partial<Record<string, any>> = {}): MexcClient {
 
 function fakeKraken(overrides: Partial<Record<string, any>> = {}): KrakenClient {
   return {
-    getBalance: async () => ({ equity: 100, availableBalance: 80, currency: "USD" }),
+    getBalance: async () => ({ equity: 100, availableBalance: 80, currency: "USD", usedMargin: 5, unrealizedPnl: -0.8 }),
     getPositions: async () => ([
-      { symbol: "PF_XBTUSD", side: "short", size: 0.0031, price: 64000, unrealizedPnl: -1.2 },
-      { symbol: "PF_SOLUSD", side: "long", size: 2.7, price: 74, unrealizedPnl: 0.4 },
+      { symbol: "PF_XBTUSD", side: "short", size: 0.0031, price: 64000, unrealizedPnl: -1.2, unrealizedFunding: 0.02 },
+      { symbol: "PF_SOLUSD", side: "long", size: 2.7, price: 74, unrealizedPnl: 0.4, unrealizedFunding: null },
+    ]),
+    getTickers: async () => new Map([
+      ["PF_XBTUSD", { symbol: "PF_XBTUSD", markPrice: 64_400, last: 64_390, fundingRate: 0.00001, fundingRatePrediction: null, vol24h: 1 }],
+    ]),
+    getOpenOrders: async () => ([
+      { orderId: "o1", symbol: "PF_XBTUSD", side: "buy", orderType: "stp", size: 0.0031, stopPrice: 65_000, reduceOnly: true },
+      { orderId: "o2", symbol: "PF_XBTUSD", side: "buy", orderType: "take_profit", size: 0.0031, stopPrice: 62_000, reduceOnly: true },
+      { orderId: "o3", symbol: "PF_SOLUSD", side: "buy", orderType: "lmt", size: 1, reduceOnly: false },
     ]),
     ...overrides,
   } as unknown as KrakenClient;
@@ -48,8 +56,32 @@ test("KrakenAdapter maps PF_ symbols and long/short into the same shape", async 
 });
 
 test("both adapters report balance with the same field names", async () => {
-  assert.deepEqual(await new MexcAdapter(fakeMexc()).getBalance(), { equity: 100, available: 80 });
-  assert.deepEqual(await new KrakenAdapter(fakeKraken()).getBalance(), { equity: 100, available: 80 });
+  const mexc = await new MexcAdapter(fakeMexc()).getBalance();
+  const kraken = await new KrakenAdapter(fakeKraken()).getBalance();
+  assert.equal(mexc.equity, 100);
+  assert.equal(mexc.available, 80);
+  assert.equal(kraken.equity, 100);
+  assert.equal(kraken.available, 80);
+  // Kraken also surfaces margin detail for the dashboard.
+  assert.equal(kraken.usedMargin, 5);
+  assert.equal(kraken.unrealizedPnl, -0.8);
+});
+
+test("Kraken positions are marked against the venue's own mark price", async () => {
+  const [btc, sol] = await new KrakenAdapter(fakeKraken()).getPositions();
+  assert.equal(btc.markPrice, 64_400);                       // from the ticker feed
+  assert.ok(Math.abs(btc.notionalUsd! - 0.0031 * 64_400) < 1e-6);
+  assert.equal(btc.unrealizedFunding, 0.02);
+  // No ticker for SOL → falls back to entry rather than reporting a bogus mark.
+  assert.equal(sol.markPrice, 74);
+});
+
+test("getProtection reports only resting reduce-only stop/TP orders", async () => {
+  const prot = await new KrakenAdapter(fakeKraken()).getProtection();
+  assert.deepEqual(prot, [
+    { botSymbol: "BTC", kind: "stop", price: 65_000, size: 0.0031 },
+    { botSymbol: "BTC", kind: "take_profit", price: 62_000, size: 0.0031 },
+  ]);
 });
 
 test("Kraken open converts USD notional to base units and refuses a zero-rounded size", async () => {

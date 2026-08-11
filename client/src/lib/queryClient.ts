@@ -44,9 +44,16 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       queryFn: getQueryFn({ on401: "throw" }),
-      refetchInterval: false,
-      refetchOnWindowFocus: false,
-      staleTime: Infinity,
+      // Live money on screen must never be stale. The old defaults
+      // (staleTime: Infinity + no refetch on focus) meant the only way to see
+      // a current balance or position was a hard reload — polling intervals
+      // still fired, but nothing refreshed on mount or when returning to the
+      // tab. Data is now always refetched when a view is opened or refocused.
+      refetchInterval: false,   // per-query; see each useQuery
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
+      refetchOnMount: true,
+      staleTime: 0,
       retry: false,
     },
     mutations: {
