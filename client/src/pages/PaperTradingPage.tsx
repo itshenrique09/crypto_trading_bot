@@ -98,7 +98,37 @@ export default function PaperTradingPage() {
     enabled: section === "engine" && showScanLog,
   });
 
-  const priceMap = useMemo(() => new Map(paperPrices.map(p => [p.id, p])), [paperPrices]);
+  // Live rows had no price, no P&L and no progress bar, because /api/paper/prices
+  // only covers paper. Synthesise the same shape from the venue snapshot so a
+  // live position is presented exactly like a paper one — marked at the
+  // exchange's own mark price rather than a second-hand quote.
+  const priceMap = useMemo(() => {
+    const map = new Map<number, PaperPrice>(paperPrices.map(p => [p.id, p]));
+    const venuePositions: any[] = liveStatus?.positions ?? [];
+    for (const t of journal) {
+      if (t.mode !== "live" || t.outcome !== "open") continue;
+      const vp = venuePositions.find(p =>
+        String(p.botSymbol).toUpperCase() === t.symbol.toUpperCase() && p.direction === t.direction);
+      if (!vp?.markPrice) continue;
+
+      const moveFromEntry = t.direction === "LONG" ? vp.markPrice - t.entry_price : t.entry_price - vp.markPrice;
+      const slDistance = Math.abs(t.entry_price - t.stop_loss);
+      const tpDistance = Math.abs(t.take_profit1 - t.entry_price);
+      map.set(t.id, {
+        id: t.id, symbol: t.symbol, strategy: t.strategy,
+        currentPrice: vp.markPrice,
+        unrealizedPnl: (moveFromEntry / t.entry_price) * 100,
+        unrealizedUsd: vp.unrealizedPnl ?? null,
+        riskUsd: t.risk_usd, positionSizeUsd: vp.notionalUsd ?? t.position_size_usd,
+        remainingPositionSizeUsd: t.remaining_position_size_usd,
+        realizedPnlUsd: t.realized_pnl_usd ?? 0,
+        tp1Hit: t.tp1_hit === 1, peakPrice: t.peak_price ?? null,
+        progressPct: tpDistance > 0 ? Math.max(0, (moveFromEntry / tpDistance) * 100) : 0,
+        slProgress: slDistance > 0 ? Math.max(0, (-moveFromEntry / slDistance) * 100) : 0,
+      });
+    }
+    return map;
+  }, [paperPrices, liveStatus, journal]);
 
   const invalidateTrades = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/journal"] });

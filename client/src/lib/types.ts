@@ -21,6 +21,10 @@ export interface JournalEntry {
   notes: string;
   created_at: string;
   closed_at: string | null;
+  /** 1 once TP1 filled — the runner is then trailing. */
+  tp1_hit?: number | null;
+  /** Best price seen in the trade's favour, used by the trailing stop. */
+  peak_price?: number | null;
 }
 
 export interface PaperPrice {

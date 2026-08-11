@@ -24,6 +24,9 @@ interface TradeRowProps {
 function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStartClose, onCancelClose, onCloseFormChange, onConfirmClose, onDelete }: TradeRowProps) {
   const sc = getStratColor(entry.strategy);
   const isOpen = entry.outcome === "open";
+  // Paper is denominated in EUR, the live venue settles in USD — showing € on a
+  // Kraken trade made a correct $0.54 risk read like the wrong number entirely.
+  const ccy = entry.mode === "live" ? "$" : "€";
   const pnl = isOpen ? price?.unrealizedPnl : entry.pnl_pct;
   const [showChart, setShowChart] = useState(false);
 
@@ -162,7 +165,7 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
         <div className="flex items-center gap-2">
           {entry.risk_usd != null && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-card/40 border border-border/15 text-muted-foreground/60 font-mono">
-              1R €{entry.risk_usd.toFixed(2)}
+              1R {ccy}{entry.risk_usd.toFixed(2)}
             </span>
           )}
           {isOpen && price && (
@@ -177,7 +180,7 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
           )}
           {!isOpen && entry.pnl_usd != null && (
             <span className={`text-[10px] font-mono font-semibold ${entry.pnl_usd >= 0 ? "text-emerald-400/70" : "text-red-400/70"}`}>
-              {entry.pnl_usd >= 0 ? "+" : ""}€{Math.abs(entry.pnl_usd).toFixed(2)}
+              {entry.pnl_usd >= 0 ? "+" : ""}{ccy}{Math.abs(entry.pnl_usd).toFixed(2)}
             </span>
           )}
           {!isOpen && entry.pnl_usd != null && entry.risk_usd != null && entry.risk_usd > 0 && (
