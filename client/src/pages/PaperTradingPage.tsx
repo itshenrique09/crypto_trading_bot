@@ -43,6 +43,7 @@ export default function PaperTradingPage() {
   const [liveApiSecret, setLiveApiSecret] = useState("");
   const [liveRiskInput, setLiveRiskInput] = useState("1");
   const [liveLeverageInput, setLiveLeverageInput] = useState("5");
+  const [liveExchange, setLiveExchange] = useState<string>("kraken");
   const [showSecret, setShowSecret] = useState(false);
   const [showScanLog, setShowScanLog] = useState(false);
 
@@ -143,9 +144,9 @@ export default function PaperTradingPage() {
   });
 
   const liveConfigMutation = useMutation({
-    mutationFn: async ({ apiKey, apiSecret, riskPct, leverage }: { apiKey: string; apiSecret: string; riskPct?: number; leverage?: number }) => {
+    mutationFn: async ({ apiKey, apiSecret, riskPct, leverage, exchange }: { apiKey: string; apiSecret: string; riskPct?: number; leverage?: number; exchange?: string }) => {
       const res = await apiRequest("POST", "/api/live/config", {
-        apiKey, apiSecret,
+        apiKey, apiSecret, exchange,
         riskPct: riskPct != null ? Number(riskPct) : undefined,
         leverage: leverage != null ? Number(leverage) : undefined,
       });
@@ -507,7 +508,9 @@ export default function PaperTradingPage() {
                   <Zap className="w-3.5 h-3.5" />
                 </div>
                 <div>
-                  <p className="text-xs font-bold leading-tight">MEXC Live Trading</p>
+                  <p className="text-xs font-bold leading-tight">
+                    {(liveStatus?.exchanges ?? []).find((e: any) => e.id === liveStatus?.exchange)?.name ?? "Live Trading"}
+                  </p>
                   <p className="text-[10px] text-muted-foreground/70">
                     {liveStatus?.running
                       ? <span className="text-amber-400 inline-flex items-center gap-1"><Circle className="w-1.5 h-1.5 fill-amber-400 text-amber-400" /> Active · real capital</span>
@@ -525,6 +528,7 @@ export default function PaperTradingPage() {
                     if (!showLiveForm && liveStatus) {
                       setLiveRiskInput(String(liveStatus.riskPct ?? 1));
                       setLiveLeverageInput(String(liveStatus.leverage ?? 5));
+                      setLiveExchange(String(liveStatus.exchange ?? "kraken"));
                     }
                   }}
                   className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-card/60 transition-colors"
@@ -600,6 +604,39 @@ export default function PaperTradingPage() {
 
             {showLiveForm && (
               <div className="border-t border-border/20 bg-card/20 px-4 py-4 space-y-4">
+                {/* Venue selector — credentials are stored per exchange */}
+                <section>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Zap className="w-3 h-3 text-muted-foreground" />
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Exchange</h4>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-2">
+                    {(liveStatus?.exchanges ?? []).map((ex: any) => {
+                      const active = liveExchange === ex.id;
+                      const ready = liveStatus?.configured?.[ex.id];
+                      return (
+                        <button
+                          key={ex.id}
+                          onClick={() => setLiveExchange(ex.id)}
+                          disabled={liveStatus?.running}
+                          className={`text-left p-2.5 rounded-md border transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                            active ? "bg-amber-500/10 border-amber-500/40" : "bg-card/40 border-border/30 hover:border-border/50"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={`text-xs font-bold ${active ? "text-amber-300" : "text-foreground"}`}>{ex.name}</span>
+                            {ready && <span className="text-[9px] text-emerald-400/80 inline-flex items-center gap-0.5"><CheckCircle2 className="w-2.5 h-2.5" /> keys</span>}
+                          </div>
+                          <p className="text-[9px] text-muted-foreground/60 mt-0.5 leading-snug">{ex.note}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {liveStatus?.running && (
+                    <p className="text-[10px] text-amber-400/70 mt-1.5">Stop the engine to switch exchange.</p>
+                  )}
+                </section>
+
                 <section>
                   <div className="flex items-center gap-1.5 mb-2">
                     <KeyRound className="w-3 h-3 text-muted-foreground" />
@@ -614,7 +651,7 @@ export default function PaperTradingPage() {
                       <input
                         type="text" value={liveApiKey} onChange={e => setLiveApiKey(e.target.value)}
                         className="w-full px-2.5 py-1.5 text-xs rounded-md bg-background border border-border/40 focus:outline-none focus:border-amber-500/60 font-mono"
-                        placeholder={liveStatus?.hasKeys ? "Stored — leave empty to keep" : "mx0v…"}
+                        placeholder={liveStatus?.configured?.[liveExchange] ? "Stored — leave empty to keep" : "API key"}
                       />
                     </div>
                     <div>
@@ -623,7 +660,7 @@ export default function PaperTradingPage() {
                         <input
                           type={showSecret ? "text" : "password"} value={liveApiSecret} onChange={e => setLiveApiSecret(e.target.value)}
                           className="w-full px-2.5 py-1.5 pr-8 text-xs rounded-md bg-background border border-border/40 focus:outline-none focus:border-amber-500/60 font-mono"
-                          placeholder={liveStatus?.hasKeys ? "Stored — leave empty to keep" : "••••••••••••••••"}
+                          placeholder={liveStatus?.configured?.[liveExchange] ? "Stored — leave empty to keep" : "••••••••••••••••"}
                         />
                         <button type="button" onClick={() => setShowSecret(s => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                           {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
@@ -669,8 +706,9 @@ export default function PaperTradingPage() {
                       apiSecret: liveApiSecret || "__keep__",
                       riskPct: parseFloat(liveRiskInput),
                       leverage: parseInt(liveLeverageInput),
+                      exchange: liveExchange,
                     })}
-                    disabled={liveConfigMutation.isPending || (!liveStatus?.hasKeys && (!liveApiKey || !liveApiSecret))}
+                    disabled={liveConfigMutation.isPending || (!liveStatus?.configured?.[liveExchange] && (!liveApiKey || !liveApiSecret))}
                     className="px-3.5 py-2 text-xs rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 transition-colors font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {liveConfigMutation.isPending ? "Saving…" : "Save Settings"}

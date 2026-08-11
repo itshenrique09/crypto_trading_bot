@@ -20,7 +20,8 @@ import { startFundingCarryLoop, getFundingCarryReport } from "./funding-carry";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
-import { directionToPositionType, planLiveReconciliation } from "./live-reconciliation";
+import { planLiveReconciliation } from "./live-reconciliation";
+import { buildAdapter, isExchangeId, venueSymbol, EXCHANGES, type ExchangeId, type ExchangePosition } from "./exchange";
 import { buildLiveTp1JournalUpdate } from "./live-protection";
 import { validateLiveStartConnection } from "./live-start";
 import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting } from "./trade-accounting";
@@ -2553,10 +2554,13 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   });
 
-  // ── MEXC Live Trading Engine ──────────────────────────────────────
+  // ── Live Trading Engine ───────────────────────────────────────────
   //
-  // Mirror of the paper engine but places real orders on MEXC Futures.
-  // Keys stored in bot_settings (mexc_api_key / mexc_api_secret).
+  // Mirror of the paper engine but places real orders on a real venue.
+  // Venue is selectable (bot_settings `live_exchange`) because MEXC stopped
+  // serving EEA/Portuguese residents in Jul 2026; Kraken Futures is MiFID II
+  // licensed for the EEA. Keys are stored per venue (<id>_api_key/_secret) so
+  // switching back and forth never mixes credentials.
   // Activate by calling POST /api/live/config then POST /api/live/start.
 
   let liveCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -2571,21 +2575,37 @@ export async function registerRoutes(server: Server, app: Express) {
     error:         null as string | null,
   };
 
+  const DEFAULT_EXCHANGE: ExchangeId = "kraken";
+
+  async function getLiveExchangeId(): Promise<ExchangeId> {
+    const stored = await getSetting("live_exchange");
+    return isExchangeId(stored) ? stored : DEFAULT_EXCHANGE;
+  }
+
+  /** Settings keys holding this venue's credentials. */
+  function credentialKeys(exchange: ExchangeId) {
+    return { key: `${exchange}_api_key`, secret: `${exchange}_api_secret` };
+  }
+
   async function getLiveClient() {
-    const apiKey    = await getSetting("mexc_api_key");
-    const apiSecret = await getSetting("mexc_api_secret");
-    if (!apiKey || !apiSecret) throw new Error("MEXC API keys not configured. Use POST /api/live/config first.");
-    return getMexcClient(decryptValue(apiKey), decryptValue(apiSecret));
+    const exchange = await getLiveExchangeId();
+    const { key, secret } = credentialKeys(exchange);
+    const apiKey    = await getSetting(key);
+    const apiSecret = await getSetting(secret);
+    if (!apiKey || !apiSecret) {
+      throw new Error(`${exchange.toUpperCase()} API keys not configured. Use POST /api/live/config first.`);
+    }
+    return buildAdapter(exchange, decryptValue(apiKey), decryptValue(apiSecret));
   }
 
   async function liveCheck() {
     try {
       const client = await getLiveClient();
 
-      // Reconcile MEXC open positions with our journal
-      const mexcPositions = await client.getPositions();
-      liveEngineStatus.openPositions = mexcPositions.length;
-      liveEngineStatus.balance = (await client.getBalance()).availableBalance;
+      // Reconcile the venue's open positions with our journal
+      const exchangePositions = await client.getPositions();
+      liveEngineStatus.openPositions = exchangePositions.length;
+      liveEngineStatus.balance = (await client.getBalance()).available;
 
       // ── TRAILING STOP MODE — default r_multiple 2R (Jul 2026 pipeline A/B) ──
       // Mirrors paperCheck — see the rationale note there.
@@ -2599,25 +2619,27 @@ export async function registerRoutes(server: Server, app: Express) {
         id: t.id,
         symbol: t.symbol,
         direction: normalizeDirection(t.direction),
-      })), mexcPositions);
+      })), exchangePositions);
       liveEngineStatus.unmanagedPositions = reconciliation.unmanagedExchangePositions.length;
       const unmanagedError = reconciliation.unmanagedExchangePositions.length > 0
-        ? `Unmanaged MEXC position detected: ${reconciliation.unmanagedExchangePositions.map(p => `${p.symbol}:${p.positionType}`).join(", ")}. Live scan paused until journal/exchange are reconciled.`
+        ? `Unmanaged ${client.id.toUpperCase()} position detected: ${reconciliation.unmanagedExchangePositions.map(p => `${p.botSymbol}:${p.direction}`).join(", ")}. Live scan paused until journal/exchange are reconciled.`
         : null;
 
-      // Fetch all MEXC futures prices once.
+      // Prices come from MEXC's public ticker feed (no auth) regardless of the
+      // execution venue — perp prices track each other closely enough for
+      // journal marking, and this keeps one price source across paper and live.
       const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
       for (const trade of liveTrades) {
-        const mexcSym = toMexcSymbol(trade.symbol);
-        const pos = mexcPositions.find(p =>
-          p.symbol === mexcSym &&
-          p.positionType === directionToPositionType(normalizeDirection(trade.direction)) &&
-          p.holdVol > 0
+        const tradeDirection = normalizeDirection(trade.direction);
+        const pos = exchangePositions.find(p =>
+          p.botSymbol.toUpperCase() === trade.symbol.toUpperCase() &&
+          p.direction === tradeDirection &&
+          p.size > 0
         );
 
         if (!pos) {
-          // Position no longer open on MEXC — it was closed (SL/TP hit or manual)
+          // Position no longer open on the venue — closed (SL/TP hit or manual)
           const lastPrice = priceMap[`${trade.symbol}USDT`] || trade.entry_price;
           const isLong = trade.direction === "LONG";
           const accounting = finalizeTradeAccounting({
@@ -2635,7 +2657,7 @@ export async function registerRoutes(server: Server, app: Express) {
             pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
             closed_at: new Date().toISOString(),
-            notes:     (trade.notes || "") + " | Closed on MEXC",
+            notes:     (trade.notes || "") + ` | Closed on ${client.id.toUpperCase()}`,
           });
           continue;
         }
@@ -2651,7 +2673,7 @@ export async function registerRoutes(server: Server, app: Express) {
         const maxHoldHLive = maxHoldHoursForStrategy(trade.strategy);
         if (Number.isFinite(ageHoursLive) && ageHoursLive > maxHoldHLive) {
           try {
-            await client.closePosition(mexcSym, isLong ? 1 : 2, pos.holdVol);
+            await client.closePosition(pos);
           } catch (closeErr: any) {
             console.error(`[Live] Max-hold close failed for ${trade.symbol}: ${closeErr.message}`);
             continue; // retry on next check
@@ -2681,21 +2703,20 @@ export async function registerRoutes(server: Server, app: Express) {
           await updateJournalEntry(trade.id, { peak_price: newPeak });
         }
 
-        // TP1 hit → move SL to break-even on MEXC
+        // TP1 hit → take the partial and move SL to break-even on the venue
         if (!trade.tp1_hit && trade.take_profit1) {
           const tp1Hit = isLong ? price >= trade.take_profit1 : price <= trade.take_profit1;
           if (tp1Hit) {
-            const posType = isLong ? 1 : 2;
             let closedVol = 0;
             try {
-              const partialOrder = await client.closePartialPosition(mexcSym, posType, pos.holdVol, TP1_PARTIAL_CLOSE_PCT);
-              closedVol = partialOrder.vol;
+              const partialOrder = await client.closePartial(pos, TP1_PARTIAL_CLOSE_PCT);
+              closedVol = partialOrder.size;
             } catch (closeErr: any) {
-              console.error(`[Live] Failed to partial close TP1 on MEXC for ${trade.symbol}: ${closeErr.message}`);
+              console.error(`[Live] Failed to partial close TP1 on ${client.id.toUpperCase()} for ${trade.symbol}: ${closeErr.message}`);
               continue;
             }
 
-            const actualClosePct = pos.holdVol > 0 ? closedVol / pos.holdVol : TP1_PARTIAL_CLOSE_PCT;
+            const actualClosePct = pos.size > 0 ? closedVol / pos.size : TP1_PARTIAL_CLOSE_PCT;
             const partial = applyPartialClose({
               direction: isLong ? "LONG" : "SHORT",
               entryPrice: trade.entry_price,
@@ -2703,19 +2724,21 @@ export async function registerRoutes(server: Server, app: Express) {
               remainingPositionSizeUsd: trade.remaining_position_size_usd,
               realizedPnlUsd: trade.realized_pnl_usd,
             }, trade.take_profit1, actualClosePct, TRADE_COSTS);
-            const closedFullPosition = closedVol >= pos.holdVol;
+            const closedFullPosition = closedVol >= pos.size;
 
             let exchangeProtectionUpdated = false;
             let exchangeProtectionError: string | undefined;
             try {
               if (!closedFullPosition) {
                 const currentTp = trade.take_profit2 ?? trade.take_profit1;
-                await client.setTpSl(mexcSym, String(pos.positionId), trade.entry_price, currentTp);
+                // Protect only what is still open after the partial.
+                const runner: ExchangePosition = { ...pos, size: pos.size - closedVol };
+                await client.setProtection(runner, trade.entry_price, currentTp);
                 exchangeProtectionUpdated = true;
               }
             } catch (slErr: any) {
               exchangeProtectionError = slErr.message;
-              console.error(`[Live] Failed to update SL on MEXC for ${trade.symbol}: ${slErr.message}`);
+              console.error(`[Live] Failed to update SL on ${client.id.toUpperCase()} for ${trade.symbol}: ${slErr.message}`);
             }
 
             const journalUpdate = buildLiveTp1JournalUpdate({
@@ -2723,7 +2746,7 @@ export async function registerRoutes(server: Server, app: Express) {
               takeProfit1: trade.take_profit1,
               closedFullPosition,
               closedVol,
-              holdVol: pos.holdVol,
+              holdVol: pos.size,
               remainingPositionSizeUsd: partial.remainingPositionSizeUsd,
               realizedPnlUsd: partial.realizedPnlUsd,
               realizedPnlPct: partial.realizedPnlPct,
@@ -2761,9 +2784,9 @@ export async function registerRoutes(server: Server, app: Express) {
           if (trailHit) {
             // Close position at market
             try {
-              const posType = isLong ? 1 : 2;
-              await client.closePosition(mexcSym, posType, pos.holdVol);
-              
+              await client.closePosition(pos);
+
+
               const accounting = finalizeTradeAccounting({
                 direction: isLong ? "LONG" : "SHORT",
                 entryPrice: trade.entry_price,
@@ -2815,22 +2838,22 @@ export async function registerRoutes(server: Server, app: Express) {
       const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live");
       const openLive   = liveTrades.filter(e => e.outcome === "open");
-      const mexcPositions = await client.getPositions();
+      const exchangePositions = await client.getPositions();
       const reconciliation = planLiveReconciliation(openLive.map(t => ({
         id: t.id,
         symbol: t.symbol,
         direction: normalizeDirection(t.direction),
-      })), mexcPositions);
+      })), exchangePositions);
 
-      liveEngineStatus.openPositions = mexcPositions.filter(p => p.holdVol > 0).length;
+      liveEngineStatus.openPositions = exchangePositions.filter(p => p.size > 0).length;
       liveEngineStatus.unmanagedPositions = reconciliation.unmanagedExchangePositions.length;
       if (reconciliation.unmanagedExchangePositions.length > 0) {
-        liveEngineStatus.error = `Unmanaged MEXC position detected before live scan: ${reconciliation.unmanagedExchangePositions.map(p => `${p.symbol}:${p.positionType}`).join(", ")}. New entries paused.`;
+        liveEngineStatus.error = `Unmanaged ${client.id.toUpperCase()} position detected before live scan: ${reconciliation.unmanagedExchangePositions.map(p => `${p.botSymbol}:${p.direction}`).join(", ")}. New entries paused.`;
         liveEngineStatus.lastScan = new Date().toISOString();
         return;
       }
       if (reconciliation.missingExchangeTrades.length > 0) {
-        liveEngineStatus.error = `Journal has live trades missing on MEXC before scan; running live reconciliation before new entries.`;
+        liveEngineStatus.error = `Journal has live trades missing on ${client.id.toUpperCase()} before scan; running live reconciliation before new entries.`;
         await liveCheck();
         liveEngineStatus.lastScan = new Date().toISOString();
         return;
@@ -3073,38 +3096,28 @@ export async function registerRoutes(server: Server, app: Express) {
               const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
-              const mexcSym  = toMexcSymbol(sym);
+              const venueSym = venueSymbol(client.id, sym);
               const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
-              const vol      = await client.calcContractVol(mexcSym, posSize, signal.entry);
-              const side     = getOpenOrderSide(signal.direction);
 
-              const order = await client.placeOrder({
-                symbol:          mexcSym,
-                side,
-                openType:        2,       // cross margin
-                type:            5,       // market
-                vol,
-                leverage,
-                stopLossPrice:   signal.stopLoss,
-                takeProfitPrice: signal.takeProfit2 ?? signal.takeProfit1,
-              });
+              const order = await client.openPosition(sym, signal.direction, posSize, signal.entry, leverage);
 
               // ── Reconcile actual fill price ──────────────────────────
-              // MEXC returns only orderId; market fills may slip meaningfully.
-              // Poll the position endpoint briefly to pick up openAvgPrice
-              // before we persist the trade. If we can't find the position
+              // Venues return only an order id; market fills may slip
+              // meaningfully. Poll positions briefly to pick up the real
+              // average entry before persisting. If the position never shows
               // (rejected, still pending), skip the journal entry so the
               // engine doesn't record a ghost trade.
               let actualEntry = signal.entry;
-              let actualVol   = vol;
+              let actualVol   = order.size;
               let filled      = false;
               for (let attempt = 0; attempt < 6; attempt++) {
                 await new Promise(r => setTimeout(r, 500));
                 try {
-                  const pos = await client.getPosition(mexcSym, directionToPositionType(signal.direction));
-                  if (pos && pos.holdVol > 0 && pos.openAvgPrice > 0) {
-                    actualEntry = pos.openAvgPrice;
-                    actualVol   = pos.holdVol;
+                  const pos = (await client.getPositions()).find(p =>
+                    p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
+                  if (pos && pos.entryPrice > 0) {
+                    actualEntry = pos.entryPrice;
+                    actualVol   = pos.size;
                     filled      = true;
                     break;
                   }
@@ -3116,10 +3129,19 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // Attach protective SL/TP. MEXC could carry these on the entry
+              // order; Kraken needs separate reduce-only orders, so both go
+              // through the adapter once the fill is confirmed.
+              try {
+                const pos = (await client.getPositions()).find(p =>
+                  p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
+                if (pos) await client.setProtection(pos, signal.stopLoss, signal.takeProfit2 ?? signal.takeProfit1);
+              } catch (protErr: any) {
+                console.error(`[live-scan] protection failed for ${sym}: ${protErr?.message ?? protErr}`);
+              }
+
               // Recompute position_size_usd at actual fill price
-              const actualPosSize = await client
-                .calcPositionNotional(mexcSym, actualVol, actualEntry)
-                .catch(() => posSize);
+              const actualPosSize = actualVol > 0 ? actualVol * actualEntry : posSize;
               const slipBps = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
 
               await addJournalEntry({
@@ -3135,7 +3157,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed:          "yes",
                 position_size_usd: Math.round(actualPosSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] orderId=${order.orderId} vol=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
+                notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} size=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
@@ -3171,22 +3193,31 @@ export async function registerRoutes(server: Server, app: Express) {
     if (liveScanInterval)  { clearInterval(liveScanInterval);  liveScanInterval  = null; }
   }
 
-  // Configure MEXC API keys + optional live risk settings
+  // Configure the live venue: which exchange, its API keys, risk + leverage.
+  // Credentials are stored per venue so switching never mixes them up.
   app.post("/api/live/config", async (req, res) => {
     try {
-      const { apiKey, apiSecret, riskPct, leverage } = req.body;
+      const { apiKey, apiSecret, riskPct, leverage, exchange } = req.body;
+
+      if (exchange !== undefined) {
+        if (!isExchangeId(exchange)) return res.status(400).json({ error: `Unknown exchange: ${exchange}` });
+        await setSetting("live_exchange", exchange);
+      }
+      const venue = await getLiveExchangeId();
+      const { key: keyName, secret: secretName } = credentialKeys(venue);
+
       // Sentinel "__keep__" (or empty) means: don't overwrite stored key. Allows
       // updating risk/leverage without re-entering credentials.
       const hasNewKey    = apiKey    && apiKey    !== "__keep__";
       const hasNewSecret = apiSecret && apiSecret !== "__keep__";
-      const existingKey    = await getSetting("mexc_api_key");
-      const existingSecret = await getSetting("mexc_api_secret");
+      const existingKey    = await getSetting(keyName);
+      const existingSecret = await getSetting(secretName);
 
-      if (hasNewKey)    await setSetting("mexc_api_key",    encryptValue(apiKey));
-      if (hasNewSecret) await setSetting("mexc_api_secret", encryptValue(apiSecret));
+      if (hasNewKey)    await setSetting(keyName,    encryptValue(apiKey));
+      if (hasNewSecret) await setSetting(secretName, encryptValue(apiSecret));
 
-      if (!hasNewKey && !existingKey)       return res.status(400).json({ error: "apiKey is required" });
-      if (!hasNewSecret && !existingSecret) return res.status(400).json({ error: "apiSecret is required" });
+      if (!hasNewKey && !existingKey)       return res.status(400).json({ error: `apiKey is required for ${venue}` });
+      if (!hasNewSecret && !existingSecret) return res.status(400).json({ error: `apiSecret is required for ${venue}` });
 
       if (riskPct && riskPct > 0 && riskPct <= 3) await setSetting("live_risk_pct", String(riskPct));
       if (leverage && Number.isFinite(leverage) && leverage >= 1 && leverage <= 20) {
@@ -3196,9 +3227,8 @@ export async function registerRoutes(server: Server, app: Express) {
       // Test the connection using whatever keys are now in storage
       const effectiveKey    = hasNewKey    ? apiKey    : decryptValue(existingKey!);
       const effectiveSecret = hasNewSecret ? apiSecret : decryptValue(existingSecret!);
-      const client = getMexcClient(effectiveKey, effectiveSecret);
-      const test   = await client.testConnection();
-      res.json({ ok: test.ok, balance: test.balance, error: test.error });
+      const test = await buildAdapter(venue, effectiveKey, effectiveSecret).testConnection();
+      res.json({ ok: test.ok, balance: test.balance, error: test.error, exchange: venue });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -3228,7 +3258,15 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/live/status", async (_req, res) => {
     try {
-      const hasKeys   = !!(await getSetting("mexc_api_key")) && !!(await getSetting("mexc_api_secret"));
+      const exchange  = await getLiveExchangeId();
+      const { key: keyName, secret: secretName } = credentialKeys(exchange);
+      const hasKeys   = !!(await getSetting(keyName)) && !!(await getSetting(secretName));
+      // Which venues already hold credentials — lets the UI show what's ready.
+      const configured: Record<string, boolean> = {};
+      for (const e of EXCHANGES) {
+        const c = credentialKeys(e.id);
+        configured[e.id] = !!(await getSetting(c.key)) && !!(await getSetting(c.secret));
+      }
       const riskPct   = parseFloat(await getSetting("live_risk_pct") || "1");
       const leverage  = parseInt(await getSetting("live_leverage") || "5", 10) || 5;
       const journal   = await getJournal(10_000);
@@ -3243,6 +3281,9 @@ export async function registerRoutes(server: Server, app: Express) {
       res.json({
         ...liveEngineStatus,
         hasKeys,
+        exchange,
+        exchanges: EXCHANGES,
+        configured,
         riskPct,
         leverage,
         openTrades:      liveTrades.filter(e => e.outcome === "open").length,
