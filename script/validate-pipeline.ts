@@ -108,6 +108,9 @@ interface RunConfig {
    *  effectively one bet — the sector group-cap doesn't catch this. undefined = no cap.
    *  Directly implementable in the engine (count open longs/shorts before opening). */
   maxSameDirection?: number;
+  /** Symbols the venue does not list — drops them from the tradeable universe.
+   *  Used to answer "does the edge survive on exchange X?" before writing a connector. */
+  excludeSymbols?: string[];
   /** Exit-management override (TP1 close %, trailing mode/width). Undefined = engine default. */
   exit?: ManagedExitConfig;
   /** Risk-size multiplier per direction×BTC-daily-regime bucket (e.g. "LONG:up": 0.5).
@@ -326,8 +329,9 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
   const skip = cfg.skip;
   const exits = resolveExits(candidates, streams, cfg.exit);
   const active = new Set((cfg.strategies ?? strategies.map(s => s.id)));
+  const excluded = new Set(cfg.excludeSymbols ?? []);
   const cands = candidates
-    .filter(c => active.has(c.stratId))
+    .filter(c => active.has(c.stratId) && !excluded.has(c.symbol))
     .sort((a, b) => a.tsSec - b.tsSec || a.symbol.localeCompare(b.symbol));
 
   const perSymbolCap = cfg.perSymbolCap ?? 1;
@@ -671,6 +675,11 @@ async function main() {
     { label: "SAMEDIR max 5", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 5 },
     { label: "SAMEDIR max 6", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 6 },
     { label: "SAMEDIR max 7", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxSameDirection: 7 },
+    // ── venue-availability check (Aug 2026) — MEXC closed to PT residents.
+    //    Coverage measured by script/check-exchange-universe.ts against the
+    //    venues' public instrument APIs. Does the edge survive the missing coins?
+    { label: "VENUE Kraken (−LUNC)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, excludeSymbols: ["LUNC"] },
+    { label: "VENUE OKX (−LUNC,FET,RUNE,VET)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, excludeSymbols: ["LUNC", "FET", "RUNE", "VET"] },
     { label: "BASELINE (all gates)", skip: new Set() },
     ...ALL_GATES.map(g => ({ label: `minus ${g}`, skip: new Set<GateId>([g]) })),
     { label: "LEAN (only exposure+cooldown+maxOpen6, opinion filters off)", skip: new Set<GateId>(ALL_OFF) },
