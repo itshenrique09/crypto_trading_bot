@@ -26,10 +26,12 @@ interface StrategyStats {
 }
 
 type Section = "positions" | "history" | "engine" | "config";
+type TradeMode = "paper" | "live" | "all";
 
 export default function PaperTradingPage() {
   const queryClient = useQueryClient();
   const [section, setSection] = useState<Section>("positions");
+  const [tradeMode, setTradeMode] = useState<TradeMode>("all");
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [closingId, setClosingId] = useState<number | null>(null);
   const [closeForm, setCloseForm] = useState({ exit_price: "", outcome: "win" as string });
@@ -177,9 +179,15 @@ export default function PaperTradingPage() {
   });
 
   // ── Derived ─────────────────────────────────────────────────────
+  // Paper and live are shown side by side deliberately: running both at once
+  // is the whole point of the live rollout — any divergence between them is
+  // execution (slippage, funding, rejections), not strategy.
+  const modeTrades = journal.filter(e =>
+    tradeMode === "all" ? (e.mode === "paper" || e.mode === "live") : e.mode === tradeMode);
+  const liveTradesAll = journal.filter(e => e.mode === "live");
   const paperTrades = journal.filter(e => e.mode === "paper");
-  const openTrades = paperTrades.filter(e => e.outcome === "open");
-  const closedTrades = paperTrades.filter(e => e.outcome !== "open");
+  const openTrades = modeTrades.filter(e => e.outcome === "open");
+  const closedTrades = modeTrades.filter(e => e.outcome !== "open");
   const wins = closedTrades.filter(e => e.outcome === "win");
 
   // Honest, size-normalized R metrics (pnl/risk) — not summed percentages.
@@ -207,7 +215,7 @@ export default function PaperTradingPage() {
   }
 
   const handleClose = (id: number) => {
-    const entry = paperTrades.find(e => e.id === id);
+    const entry = journal.find(e => e.id === id);
     if (!entry) return;
     const exitPrice = parseFloat(closeForm.exit_price);
     if (isNaN(exitPrice)) return;
@@ -240,11 +248,12 @@ export default function PaperTradingPage() {
             {paperRunning ? <Activity className="w-4 h-4 animate-pulse" /> : <FlaskConical className="w-4 h-4" />}
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight leading-none">Paper Trading</h1>
+            <h1 className="text-lg font-bold tracking-tight leading-none">Trading</h1>
             <p className="text-[11px] text-muted-foreground mt-1">
               {paperRunning
-                ? <span className="text-emerald-400">Scanning every 3 min · {paperStatus?.coinsScanned ?? 0} coins</span>
-                : <span className="text-muted-foreground/60">Engine stopped</span>}
+                ? <span className="text-emerald-400">Paper scanning · {paperStatus?.coinsScanned ?? 0} coins</span>
+                : <span className="text-muted-foreground/60">Paper stopped</span>}
+              {liveStatus?.running && <span className="text-amber-400"> · Live on {liveStatus?.exchange?.toUpperCase()}</span>}
             </p>
           </div>
         </div>
@@ -283,22 +292,38 @@ export default function PaperTradingPage() {
       {/* ═══ Capital / performance strip — always visible ═══ */}
       {cap && (
         <Card className="border-border/20 p-3">
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <StripStat label="Balance" value={`€${cap.balance.toFixed(2)}`}
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+            <StripStat label="Paper balance" value={`€${cap.balance.toFixed(2)}`}
               color={cap.balance >= cap.initial ? "text-emerald-400" : "text-red-400"}
-              sub={realReturnPct != null ? `${realReturnPct >= 0 ? "+" : ""}${realReturnPct.toFixed(1)}% return` : `€${cap.initial} initial`} />
-            <StripStat label="Net R" value={rClosed.length > 0 ? `${sumR >= 0 ? "+" : ""}${sumR.toFixed(1)}R` : "--"}
+              sub={realReturnPct != null ? `${realReturnPct >= 0 ? "+" : ""}${realReturnPct.toFixed(1)}% · 1R €${cap.oneR.toFixed(2)}` : `€${cap.initial} initial`} />
+            <StripStat label="Live balance"
+              value={liveStatus?.balance != null ? `$${liveStatus.balance.toFixed(2)}` : "—"}
+              color={liveStatus?.running ? "text-amber-300" : "text-muted-foreground"}
+              sub={liveStatus?.hasKeys
+                ? `${liveStatus?.exchange?.toUpperCase() ?? ""} · risk ${liveStatus?.riskPct ?? 1}%`
+                : "not configured"} />
+            <StripStat label={`Net R · ${tradeMode}`} value={rClosed.length > 0 ? `${sumR >= 0 ? "+" : ""}${sumR.toFixed(1)}R` : "--"}
               color={sumR >= 0 ? "text-emerald-400" : "text-red-400"}
               sub={rClosed.length > 0 ? `PF ${profitFactor === Infinity ? "∞" : profitFactor.toFixed(2)}` : "no data"} />
             <StripStat label="Win Rate" value={closedTrades.length > 0 ? `${Math.round(winRate)}%` : "--"}
               color={winRate >= 45 ? "text-emerald-400" : "text-amber-400"}
               sub={`${wins.length}W / ${closedTrades.length - wins.length}L`} />
-            <StripStat label="1R risk" value={`€${cap.oneR.toFixed(2)}`} color="text-amber-400"
-              sub={`${cap.riskPct}% · ${cap.leverage ?? 5}× lev`} />
-            <StripStat label="Today" value={`${cap.todayR >= 0 ? "+" : ""}${cap.todayR.toFixed(1)}R`}
+            <StripStat label="Open now" value={`${openTrades.length}`}
+              color={openTrades.length > 0 ? "text-yellow-400" : "text-muted-foreground"}
+              sub={`${paperTrades.filter(t => t.outcome === "open").length} paper · ${liveTradesAll.filter(t => t.outcome === "open").length} live`} />
+            <StripStat label="Today (paper)" value={`${cap.todayR >= 0 ? "+" : ""}${cap.todayR.toFixed(1)}R`}
               color={cap.todayR >= 0 ? "text-emerald-400" : "text-red-400"}
               sub={`${cap.todayPnlUsd >= 0 ? "+" : ""}€${cap.todayPnlUsd.toFixed(2)}`} />
           </div>
+          {liveStatus?.unmanagedPositions > 0 && (
+            <div className="mt-2.5 flex items-start gap-2 text-[11px] text-red-300 bg-red-500/10 border border-red-500/25 rounded px-2.5 py-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>
+                <b>{liveStatus.unmanagedPositions} unmanaged position(s)</b> open on {liveStatus?.exchange?.toUpperCase()} with no matching journal entry —
+                the bot is not managing their stop or trailing. New live entries are paused until reconciled.
+              </span>
+            </div>
+          )}
         </Card>
       )}
 
@@ -329,6 +354,33 @@ export default function PaperTradingPage() {
         <div className="space-y-3">
           {/* Toolbar */}
           <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Paper / Live / All — the comparison that validates execution */}
+              <div className="flex items-center bg-card/40 border border-border/30 rounded-lg p-0.5">
+                {([
+                  { id: "all" as const, label: "All" },
+                  { id: "paper" as const, label: "Paper" },
+                  { id: "live" as const, label: "Live" },
+                ]).map(m => {
+                  const active = tradeMode === m.id;
+                  const n = m.id === "all"
+                    ? journal.filter(e => e.mode === "paper" || e.mode === "live").length
+                    : journal.filter(e => e.mode === m.id).length;
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => setTradeMode(m.id)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+                        active
+                          ? m.id === "live" ? "bg-amber-500/20 text-amber-300" : "bg-purple-500/20 text-purple-400"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {m.label} <span className="opacity-60">{n}</span>
+                    </button>
+                  );
+                })}
+              </div>
             {strategies.length > 1 ? (
               <div className="flex items-center gap-1.5">
                 <Filter className="w-3.5 h-3.5 text-muted-foreground/50" />
@@ -341,7 +393,8 @@ export default function PaperTradingPage() {
                   {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
-            ) : <span />}
+            ) : null}
+            </div>
 
             {section === "positions" && openTrades.length > 1 && (
               <button
@@ -553,7 +606,7 @@ export default function PaperTradingPage() {
                 <MiniStat label="Total P&L"
                   value={liveStatus?.totalPnlUsd != null ? `${liveStatus.totalPnlUsd >= 0 ? "+" : ""}$${liveStatus.totalPnlUsd.toFixed(2)}` : "—"}
                   valueColor={(liveStatus?.totalPnlUsd ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}
-                  sub={`${liveStatus?.totalLiveTrades ?? 0} closed trades`} />
+                  sub={`${liveStatus?.closedLiveTrades ?? 0} closed · ${liveStatus?.openTrades ?? 0} open`} />
               </div>
 
               {liveStatus?.error && (

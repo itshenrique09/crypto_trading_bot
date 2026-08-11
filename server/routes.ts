@@ -3286,8 +3286,9 @@ export async function registerRoutes(server: Server, app: Express) {
         configured,
         riskPct,
         leverage,
-        openTrades:      liveTrades.filter(e => e.outcome === "open").length,
-        totalLiveTrades: liveTrades.length,
+        openTrades:       liveTrades.filter(e => e.outcome === "open").length,
+        totalLiveTrades:  liveTrades.length,
+        closedLiveTrades: closed.length,
         totalPnlUsd:     Math.round(totalPnl * 100) / 100,
         todayPnlUsd:     Math.round(todayPnl * 100) / 100,
       });

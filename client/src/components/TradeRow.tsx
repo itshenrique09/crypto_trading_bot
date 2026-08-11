@@ -40,6 +40,10 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <Link href={`/market/${entry.symbol}`} className="text-sm font-bold hover:text-purple-400 transition-colors">{entry.symbol}</Link>
+            {/* Real money is worth an unmissable marker when paper and live sit in one list. */}
+            {entry.mode === "live" && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold tracking-wide">LIVE</span>
+            )}
             <span className={`text-[10px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>
               {getStratName(entry.strategy, strategies)}
             </span>
