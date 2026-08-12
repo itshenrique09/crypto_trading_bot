@@ -138,6 +138,12 @@ export default function PaperTradingPage() {
     mutationFn: async ({ id, updates }: { id: number; updates: any }) => { await apiRequest("PATCH", `/api/journal/${id}`, updates); },
     onSuccess: invalidateTrades,
   });
+  // Live closes must go through the venue. Writing only the journal would leave
+  // the position open on the exchange, unmanaged, and pause all live entries.
+  const closeLiveMutation = useMutation({
+    mutationFn: async (id: number) => (await apiRequest("POST", `/api/live/close/${id}`, {})).json(),
+    onSuccess: () => { invalidateTrades(); queryClient.invalidateQueries({ queryKey: ["/api/live/status"] }); },
+  });
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/journal/${id}`); },
     onSuccess: invalidateTrades,
@@ -190,6 +196,13 @@ export default function PaperTradingPage() {
   const handleClose = (id: number) => {
     const entry = journal.find(e => e.id === id);
     if (!entry) return;
+    // A live trade closes at market on the venue; the exit price is whatever
+    // the exchange fills at, not something typed into a form.
+    if (entry.mode === "live") {
+      closeLiveMutation.mutate(id);
+      setClosingId(null);
+      return;
+    }
     const exitPrice = parseFloat(closeForm.exit_price);
     if (isNaN(exitPrice)) return;
     const pnl = entry.direction === "LONG"

@@ -6,7 +6,6 @@ import { Toaster } from "@/components/ui/toaster";
 import AppLayout from "@/components/AppLayout";
 import Dashboard from "./pages/Dashboard";
 import PaperTradingPage from "./pages/PaperTradingPage";
-import JournalPage from "./pages/JournalPage";
 import ScannerPage from "./pages/ScannerPage";
 import AnalysisPage from "./pages/AnalysisPage";
 import ComparePage from "./pages/ComparePage";
@@ -23,7 +22,6 @@ function AppRouter() {
           <Route path="/market/:symbol" component={AnalysisPage} />
           <Route path="/analyze/:symbol" component={AnalysisPage} />
           <Route path="/compare" component={ComparePage} />
-          <Route path="/journal" component={JournalPage} />
           <Route component={NotFound} />
         </Switch>
       </AppLayout>

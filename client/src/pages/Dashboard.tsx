@@ -260,7 +260,48 @@ export default function Dashboard() {
             <p className="text-[10px] text-muted-foreground/45 mt-0.5">The engine opens one when a setup passes every gate</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Mobile: the nine-column table would force horizontal scrolling on a
+              phone, which is where this gets checked most. Same data, stacked. */}
+          <div className="md:hidden divide-y divide-border/10">
+            {rows.map(r => {
+              const sc = getStratColor(r.strategy ?? "");
+              const up = (r.pnlPct ?? 0) >= 0;
+              const guarded = r.isLive ? r.protection?.stop != null : true;
+              return (
+                <div key={r.key} className={`p-3 ${r.isLive ? "bg-amber-500/[0.03]" : ""}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${r.direction === "LONG" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
+                        {r.direction === "LONG" ? "L" : "S"}
+                      </span>
+                      <Link href={`/market/${r.symbol}`} className="font-bold text-sm">{r.symbol}</Link>
+                      {r.isLive && <span className="text-[8px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">LIVE</span>}
+                      {r.orphan && <span className="text-[8px] px-1 py-0.5 rounded bg-red-500/20 text-red-300 font-bold">ORPHAN</span>}
+                    </div>
+                    <div className={`text-right font-mono font-bold text-[13px] ${up ? "text-emerald-400" : "text-red-400"}`}>
+                      {r.pnlUsd != null ? fmtUsd(r.pnlUsd) : r.pnlPct != null ? `${up ? "+" : ""}${r.pnlPct.toFixed(2)}%` : "—"}
+                      {r.pnlUsd != null && r.pnlPct != null && (
+                        <span className="block text-[10px] opacity-70">{up ? "+" : ""}{r.pnlPct.toFixed(2)}%</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2.5 mt-1.5 text-[10px] text-muted-foreground/70 flex-wrap font-mono">
+                    {r.strategy && <span className={`px-1.5 py-0.5 rounded ${sc.bg} ${sc.text} font-sans`}>{getStratName(r.strategy, strategies)}</span>}
+                    <span>${formatPrice(r.entry)} → {r.mark ? `$${formatPrice(r.mark)}` : "—"}</span>
+                    {r.notional != null && <span className="text-muted-foreground/50">${r.notional.toFixed(0)}</span>}
+                    <span className={guarded ? "text-emerald-400/80 inline-flex items-center gap-0.5" : "text-red-400 inline-flex items-center gap-0.5"}>
+                      {guarded ? <Shield className="w-2.5 h-2.5" /> : <ShieldAlert className="w-2.5 h-2.5" />}
+                      {r.isLive ? (r.protection?.stop ? formatPrice(r.protection.stop) : "no stop") : (r.target.sl ? formatPrice(r.target.sl) : "—")}
+                    </span>
+                    {r.opened && <span className="text-muted-foreground/45">{heldFor(r.opened)}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50 border-b border-border/15">
@@ -330,6 +371,7 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Card>
 

@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
-import { Trash2, BarChart2 } from "lucide-react";
+import { Trash2, BarChart2, AlertTriangle } from "lucide-react";
 import { formatPrice } from "@/lib/utils";
 import type { JournalEntry, PaperPrice, StrategyInfo } from "@/lib/types";
 import { getStratColor, getStratName } from "@/lib/types";
@@ -27,6 +27,7 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
   // Paper is denominated in EUR, the live venue settles in USD — showing € on a
   // Kraken trade made a correct $0.54 risk read like the wrong number entirely.
   const ccy = entry.mode === "live" ? "$" : "€";
+  const isLive = entry.mode === "live";
   const pnl = isOpen ? price?.unrealizedPnl : entry.pnl_pct;
   const [showChart, setShowChart] = useState(false);
 
@@ -89,8 +90,13 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
         </button>
         <ConfirmButton
           onConfirm={() => onDelete(entry.id)}
-          title="Delete trade?"
-          description={`Permanently remove ${entry.symbol} ${entry.direction} from the journal. This cannot be undone.`}
+          title={isLive && isOpen ? "Delete the journal row of an OPEN live trade?" : "Delete trade?"}
+          description={isLive && isOpen
+            // Deleting the row does not touch the exchange: the position would
+            // keep running with no bot management, and reconciliation would
+            // pause all new live entries until it is resolved by hand.
+            ? `${entry.symbol} ${entry.direction} is OPEN on the exchange. Deleting only removes the journal row — the position stays open, unmanaged (no trailing stop, no max-hold), and live entries pause until reconciled. Use "Close on exchange" instead.`
+            : `Permanently remove ${entry.symbol} ${entry.direction} from the journal. This cannot be undone.`}
           confirmText="Delete"
         >
           <button className="text-muted-foreground/40 hover:text-red-400 transition-colors p-1.5 shrink-0" aria-label="Delete trade">
@@ -200,33 +206,51 @@ function TradeRowInner({ entry, strategies, price, closingId, closeForm, onStart
           })()}
         </div>
 
-        {/* Close trade controls */}
+        {/* Close trade controls.
+            Live and paper close differently and must not share one form: a live
+            close is a market order on the venue (the fill decides the price),
+            a paper close is a manual journal entry. */}
         {isOpen && closingId === entry.id ? (
-          <div className="flex items-center gap-2">
-            <input
-              type="number" step="any" placeholder="Exit price"
-              value={closeForm.exit_price}
-              onChange={e => onCloseFormChange({ exit_price: e.target.value })}
-              className="w-28 px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
-            />
-            <select
-              value={closeForm.outcome}
-              onChange={e => onCloseFormChange({ outcome: e.target.value })}
-              className="px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
-            >
-              <option value="win">Win</option>
-              <option value="loss">Loss</option>
-              <option value="breakeven">BE</option>
-            </select>
-            <button onClick={() => onConfirmClose(entry.id)} className="text-xs px-3 py-1.5 rounded-md bg-purple-500/15 border border-purple-500/30 text-purple-400 hover:bg-purple-500/25 font-medium">Save</button>
-            <button onClick={onCancelClose} className="text-xs px-2 py-1.5 text-muted-foreground hover:text-foreground">Cancel</button>
-          </div>
+          isLive ? (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-amber-300/90 inline-flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" />
+                Close {entry.symbol} on the exchange at market?
+              </span>
+              <button onClick={() => onConfirmClose(entry.id)}
+                className="text-xs px-3 py-1.5 rounded-md bg-red-500/15 border border-red-500/40 text-red-300 hover:bg-red-500/25 font-semibold">
+                Close now
+              </button>
+              <button onClick={onCancelClose} className="text-xs px-2 py-1.5 text-muted-foreground hover:text-foreground">Cancel</button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <input
+                type="number" step="any" placeholder="Exit price"
+                value={closeForm.exit_price}
+                onChange={e => onCloseFormChange({ exit_price: e.target.value })}
+                className="w-28 px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
+              />
+              <select
+                value={closeForm.outcome}
+                onChange={e => onCloseFormChange({ outcome: e.target.value })}
+                className="px-2 py-1.5 text-xs rounded-md bg-background border border-border/50 text-foreground"
+              >
+                <option value="win">Win</option>
+                <option value="loss">Loss</option>
+                <option value="breakeven">BE</option>
+              </select>
+              <button onClick={() => onConfirmClose(entry.id)} className="text-xs px-3 py-1.5 rounded-md bg-purple-500/15 border border-purple-500/30 text-purple-400 hover:bg-purple-500/25 font-medium">Save</button>
+              <button onClick={onCancelClose} className="text-xs px-2 py-1.5 text-muted-foreground hover:text-foreground">Cancel</button>
+            </div>
+          )
         ) : isOpen ? (
           <button
             onClick={() => onStartClose(entry.id)}
-            className="text-[10px] px-3 py-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-card/40 transition-colors"
+            className={`text-[10px] px-3 py-1 rounded-md transition-colors ${
+              isLive ? "text-amber-300/70 hover:text-amber-200 hover:bg-amber-500/10" : "text-muted-foreground/50 hover:text-foreground hover:bg-card/40"}`}
           >
-            Close Trade
+            {isLive ? "Close on exchange" : "Close Trade"}
           </button>
         ) : entry.exit_price != null ? (
           <div className="flex items-center gap-3 text-[10px] text-muted-foreground/50">

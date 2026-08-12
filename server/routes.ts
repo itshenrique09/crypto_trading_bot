@@ -3280,6 +3280,59 @@ export async function registerRoutes(server: Server, app: Express) {
     res.json({ running: false });
   });
 
+  /**
+   * Manually close an open LIVE trade — on the venue first, then in the journal.
+   *
+   * The generic PATCH /api/journal/:id only writes the database. That was
+   * harmless while paper was the only book, but on a live trade it closes the
+   * row while the position stays open on the exchange: the next reconciliation
+   * sees an unmanaged position, pauses all live entries, and the position runs
+   * on with no trailing stop or max-hold. So the UI's close button routes here.
+   */
+  app.post("/api/live/close/:id", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const trade = (await getJournal(10_000)).find(e => e.id === id);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+      if (trade.mode !== "live") return res.status(400).json({ error: "Not a live trade — use the journal endpoint" });
+      if (trade.outcome !== "open") return res.status(400).json({ error: "Trade is already closed" });
+
+      const client = await getLiveClient();
+      const direction = normalizeDirection(trade.direction);
+      const pos = (await client.getPositions()).find(p =>
+        p.botSymbol.toUpperCase() === trade.symbol.toUpperCase() && p.direction === direction && p.size > 0);
+
+      // No position on the venue: it already closed (stop/TP filled). Reconcile
+      // the journal rather than refusing — refusing would leave a phantom row.
+      const { priceByPair } = await fetchMexcContractTickerMaps().catch(() => ({ priceByPair: {} as Record<string, number> }));
+      const exitPrice = pos?.markPrice ?? priceByPair[`${trade.symbol}USDT`] ?? trade.entry_price;
+
+      if (pos) await client.closePosition(pos);
+
+      const accounting = finalizeTradeAccounting({
+        direction,
+        entryPrice: trade.entry_price,
+        positionSizeUsd: trade.position_size_usd,
+        remainingPositionSizeUsd: trade.remaining_position_size_usd,
+        realizedPnlUsd: trade.realized_pnl_usd,
+      }, exitPrice, TRADE_COSTS);
+
+      await updateJournalEntry(id, {
+        outcome:    accounting.outcome,
+        exit_price: Math.round(exitPrice * 10000) / 10000,
+        pnl_pct:    Math.round(accounting.pnlPct * 100) / 100,
+        pnl_usd:    accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
+        remaining_position_size_usd: 0,
+        closed_at:  new Date().toISOString(),
+        notes: (trade.notes || "") + (pos
+          ? ` | Closed manually at market on ${client.id.toUpperCase()}`
+          : ` | Manual close: no position on ${client.id.toUpperCase()}, journal reconciled`),
+      });
+
+      res.json({ ok: true, closedOnVenue: !!pos, exitPrice });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   app.get("/api/live/status", async (_req, res) => {
     try {
       const exchange  = await getLiveExchangeId();
