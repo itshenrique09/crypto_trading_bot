@@ -151,7 +151,11 @@ async function main() {
       `${fmt(bookedPnl).padStart(10)}   ${fmt(realPnl).padStart(9)}   ${(delta >= 0 ? "+" : "") + fmt(delta)}`,
     );
 
-    if (APPLY && Math.abs(delta) > 0.005) {
+    // Correct on a material PRICE difference too, not just a material P&L one.
+    // On a small position a 5bps error rounds to under a cent of P&L and would
+    // be skipped, leaving a ticker guess sitting in exit_price — which is the
+    // field the slippage analysis will read.
+    if (APPLY && (Math.abs(delta) > 0.005 || Math.abs(driftBps) > 1)) {
       await updateJournalEntry(t.id, {
         exit_price: Math.round(resolved.price * 1e6) / 1e6,
         pnl_usd: Math.round(realPnl * 100) / 100,
