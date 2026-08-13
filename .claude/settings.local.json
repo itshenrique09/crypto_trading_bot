@@ -161,7 +161,12 @@
       "Bash(curl -s \"https://contract.mexc.com/api/v1/contract/list\")",
       "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://contract.mexc.com/api/v1/contract/detail\")",
       "Bash(tee /tmp/discover-all.log)",
-      "Bash(tee /tmp/verify-winners.log)"
+      "Bash(tee /tmp/verify-winners.log)",
+      "Bash(node -e ' *)",
+      "Bash(node --check .chk.js)",
+      "Bash(rm .chk.js)",
+      "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -First 40; Write-Output \"---TSC-EXIT:$LASTEXITCODE---\")",
+      "PowerShell(npx vitest run server/portfolio-guards.test.ts 2>&1)"
     ]
   }
 }

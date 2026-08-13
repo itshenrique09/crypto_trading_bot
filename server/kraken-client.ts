@@ -85,6 +85,18 @@ export interface KrakenOrder {
   reduceOnly?: boolean;
 }
 
+/** A real execution on the venue — the only honest source of a fill price. */
+export interface KrakenFill {
+  fillId: string;
+  symbol: string;              // e.g. "PF_SEIUSD"
+  side: "buy" | "sell";
+  size: number;                // base units
+  price: number;
+  timeMs: number;
+  /** "taker" | "maker" | "liquidation" | "assignor" | "assignee" … */
+  fillType: string;
+}
+
 // ── Pure helpers (unit-tested) ────────────────────────────────────────────
 
 /** Bot symbol → Kraken perpetual symbol. "BTC" → "PF_XBTUSD" */
@@ -397,6 +409,36 @@ export class KrakenClient {
 
   async cancelOrder(orderId: string): Promise<void> {
     await this.request("POST", "/cancelorder", { order_id: orderId });
+  }
+
+  /**
+   * Recent executions for the account.
+   *
+   * This is the only place a REAL fill price can be read. Everywhere else the
+   * engine has to guess — and when a stop or take-profit fires on the venue,
+   * guessing means the journal records profit the account never earned.
+   *
+   * `since` filters server-side via `lastFillTime`. Kraken returns a bounded
+   * recent window, so this is for reconciling trades that closed minutes-to-days
+   * ago, not for rebuilding history from scratch.
+   */
+  async getFills(since?: Date): Promise<KrakenFill[]> {
+    const data = await this.request<any>("GET", "/fills", {
+      lastFillTime: since ? since.toISOString() : undefined,
+    });
+    const list: any[] = data?.fills ?? [];
+    return list
+      .map(f => ({
+        fillId:   String(f.fill_id ?? f.fillId ?? ""),
+        symbol:   String(f.symbol ?? "").toUpperCase(),
+        side:     f.side === "sell" ? "sell" as const : "buy" as const,
+        size:     Number(f.size ?? 0),
+        price:    Number(f.price ?? 0),
+        timeMs:   new Date(f.fillTime ?? 0).getTime(),
+        fillType: String(f.fillType ?? ""),
+      }))
+      .filter(f => f.size > 0 && f.price > 0 && Number.isFinite(f.timeMs))
+      .sort((a, b) => a.timeMs - b.timeMs);
   }
 
   /**

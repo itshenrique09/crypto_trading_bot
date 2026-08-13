@@ -84,6 +84,16 @@ export interface OpenResult {
   notionalUsd: number;
 }
 
+/** A real execution on the venue. */
+export interface ExchangeFill {
+  botSymbol: string;
+  side: "buy" | "sell";
+  size: number;
+  price: number;
+  timeMs: number;
+  fillType: string;
+}
+
 export interface ExchangeAdapter {
   readonly id: ExchangeId;
   testConnection(): Promise<{ ok: boolean; balance?: number; error?: string }>;
@@ -98,6 +108,102 @@ export interface ExchangeAdapter {
   setProtection(position: ExchangePosition, stopLossPrice: number, takeProfitPrice?: number): Promise<void>;
   /** Protective orders currently resting on the venue, for display/verification. */
   getProtection?(): Promise<ExchangeProtection[]>;
+  /** Recent executions — the only source of a real fill price. */
+  getFills?(since?: Date): Promise<ExchangeFill[]>;
+}
+
+// ── Fill reconstruction ───────────────────────────────────────────────────
+
+/**
+ * Kraken's fill window is generous but the entry fill can age out of it. Look
+ * back a little before the journal's entry timestamp anyway, because the row is
+ * written a few seconds AFTER the order fills.
+ */
+const FILL_LOOKBACK_GRACE_MS = 10 * 60_000;
+
+export interface ResolvedExit {
+  /** Volume-weighted price of the executions that closed this position. */
+  price: number;
+  /** Base units matched. */
+  size: number;
+  fillCount: number;
+  /** Fewer units found than expected — the venue's fill window fell short. */
+  incomplete: boolean;
+  /** A liquidation fill is among them. */
+  liquidation: boolean;
+}
+
+/**
+ * Recover the price a position ACTUALLY closed at from the venue's executions.
+ *
+ * When a stop or take-profit fires on the exchange, the engine never sees the
+ * order: it just finds the position gone on the next scan. It used to record
+ * whatever the ticker happened to read at that moment, which is a different
+ * number on a different exchange at a later time — so the journal booked P&L
+ * the account never earned, and slippage became unmeasurable by construction.
+ *
+ * Closing fills are walked NEWEST FIRST and capped at the size still open, so a
+ * position that already took a TP1 partial resolves to the price of the runner
+ * only — the partial is already booked in `realized_pnl_usd` and counting it
+ * twice would overstate the result again, in the other direction.
+ */
+export function exitPriceFromFills(
+  fills: ExchangeFill[],
+  opts: {
+    botSymbol: string;
+    direction: "LONG" | "SHORT";
+    openedAtMs: number;
+    /** Share of the ORIGINAL position still open before this close (0–1]. */
+    remainingFraction?: number;
+  },
+): ResolvedExit | null {
+  const fraction = opts.remainingFraction != null && opts.remainingFraction > 0 && opts.remainingFraction <= 1
+    ? opts.remainingFraction
+    : 1;
+
+  const sym = opts.botSymbol.toUpperCase();
+  const from = opts.openedAtMs - FILL_LOOKBACK_GRACE_MS;
+  const mine = fills.filter(f => f.botSymbol.toUpperCase() === sym && f.timeMs >= from);
+  if (mine.length === 0) return null;
+
+  const entrySide = direction2Side(opts.direction, "open");
+  const exitSide  = direction2Side(opts.direction, "close");
+
+  const openedSize = mine.filter(f => f.side === entrySide).reduce((s, f) => s + f.size, 0);
+  const closes = mine.filter(f => f.side === exitSide).sort((a, b) => b.timeMs - a.timeMs);
+  if (closes.length === 0) return null;
+
+  // Without the entry fill (aged out of the window) there is nothing to take a
+  // fraction OF, so fall back to every closing fill found for this trade.
+  const target = openedSize > 0
+    ? openedSize * fraction
+    : closes.reduce((s, f) => s + f.size, 0);
+  if (!(target > 0)) return null;
+
+  let notional = 0, size = 0, fillCount = 0, liquidation = false;
+  for (const f of closes) {
+    const take = Math.min(f.size, target - size);
+    if (take <= 0) break;
+    notional += f.price * take;
+    size += take;
+    fillCount++;
+    if (/liquidat/i.test(f.fillType)) liquidation = true;
+    if (size >= target - 1e-12) break;
+  }
+  if (!(size > 0)) return null;
+
+  return {
+    price: notional / size,
+    size,
+    fillCount,
+    incomplete: size < target - 1e-9,
+    liquidation,
+  };
+}
+
+function direction2Side(direction: "LONG" | "SHORT", intent: "open" | "close"): "buy" | "sell" {
+  const isBuy = intent === "open" ? direction === "LONG" : direction === "SHORT";
+  return isBuy ? "buy" : "sell";
 }
 
 // ── MEXC ──────────────────────────────────────────────────────────────────
@@ -216,6 +322,18 @@ export class KrakenAdapter implements ExchangeAdapter {
         price: o.stopPrice!,
         size: o.size,
       }));
+  }
+
+  async getFills(since?: Date): Promise<ExchangeFill[]> {
+    const fills = await this.client.getFills(since);
+    return fills.map(f => ({
+      botSymbol: fromKrakenSymbol(f.symbol),
+      side: f.side,
+      size: f.size,
+      price: f.price,
+      timeMs: f.timeMs,
+      fillType: f.fillType,
+    }));
   }
 
   async isTradeable(botSymbol: string): Promise<boolean> {

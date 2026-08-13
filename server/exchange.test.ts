@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MexcAdapter, KrakenAdapter, venueSymbol, isExchangeId, buildAdapter } from "./exchange";
+import { MexcAdapter, KrakenAdapter, venueSymbol, isExchangeId, buildAdapter, exitPriceFromFills, type ExchangeFill } from "./exchange";
 import type { MexcClient } from "./mexc-client";
 import type { KrakenClient } from "./kraken-client";
 
@@ -122,6 +122,127 @@ test("venueSymbol renders the right ticker per venue", () => {
   assert.equal(venueSymbol("mexc", "BTC"), "BTC_USDT");
   assert.equal(venueSymbol("kraken", "BTC"), "PF_XBTUSD");
   assert.equal(venueSymbol("mexc", "FIL"), "FILECOIN_USDT");  // MEXC alias preserved
+});
+
+// ── exitPriceFromFills ────────────────────────────────────────────────────
+// The engine cannot see a stop or take-profit fire on the venue; it only finds
+// the position gone. These fills are the sole record of what price it got, so
+// getting this wrong means the journal reports profit the account never made.
+
+const T0 = Date.parse("2026-08-12T18:00:00Z");
+const HOUR = 3_600_000;
+
+function fill(botSymbol: string, side: "buy" | "sell", size: number, price: number, atMs: number, fillType = "taker"): ExchangeFill {
+  return { botSymbol, side, size, price, timeMs: atMs, fillType };
+}
+
+// A SHORT that took its TP1 partial and later closed the runner.
+const SEI_WITH_PARTIAL: ExchangeFill[] = [
+  fill("SEI", "sell", 1000, 0.0401, T0),               // entry
+  fill("SEI", "buy",   600, 0.0394, T0 + 2 * HOUR),    // TP1 partial
+  fill("SEI", "buy",   400, 0.0397, T0 + 5 * HOUR),    // runner
+];
+
+test("exitPriceFromFills prices the runner only, not the already-booked TP1 partial", () => {
+  const r = exitPriceFromFills(SEI_WITH_PARTIAL, {
+    botSymbol: "SEI", direction: "SHORT", openedAtMs: T0, remainingFraction: 0.4,
+  });
+  assert.ok(r);
+  assert.equal(r.price, 0.0397);
+  assert.equal(r.size, 400);
+  assert.equal(r.fillCount, 1);
+  assert.equal(r.incomplete, false);
+});
+
+test("exitPriceFromFills without the remaining fraction would blend in the partial", () => {
+  // Guards the reason the fraction exists: TP1's proceeds are already in
+  // realized_pnl_usd, so averaging it into the exit books that profit twice.
+  const blended = exitPriceFromFills(SEI_WITH_PARTIAL, {
+    botSymbol: "SEI", direction: "SHORT", openedAtMs: T0,
+  });
+  assert.ok(blended);
+  assert.ok(Math.abs(blended.price - 0.03952) < 1e-9);
+  assert.notEqual(blended.price, 0.0397);
+});
+
+test("exitPriceFromFills volume-weights a close split across several fills", () => {
+  const r = exitPriceFromFills([
+    fill("ENA", "sell", 1000, 0.0886, T0),
+    fill("ENA", "buy",   500, 0.0400, T0 + HOUR),
+    fill("ENA", "buy",   500, 0.0396, T0 + 2 * HOUR),
+  ], { botSymbol: "ENA", direction: "SHORT", openedAtMs: T0, remainingFraction: 1 });
+  assert.ok(r);
+  assert.ok(Math.abs(r.price - 0.0398) < 1e-12);
+  assert.equal(r.fillCount, 2);
+});
+
+test("exitPriceFromFills handles LONG (entry buys, exit sells)", () => {
+  const r = exitPriceFromFills([
+    fill("SOL", "buy",  2.7, 76.00, T0),
+    fill("SOL", "sell", 2.7, 76.30, T0 + HOUR),
+  ], { botSymbol: "SOL", direction: "LONG", openedAtMs: T0, remainingFraction: 1 });
+  assert.ok(r);
+  assert.equal(r.price, 76.30);
+  assert.equal(r.size, 2.7);
+});
+
+test("exitPriceFromFills ignores other symbols and an earlier trade on the same one", () => {
+  const r = exitPriceFromFills([
+    fill("SEI", "buy", 5000, 0.9999, T0 - 30 * 60_000),  // previous SEI trade, outside the grace window
+    fill("RUNE", "buy", 999, 0.5000, T0 + HOUR),         // different symbol
+    ...SEI_WITH_PARTIAL,
+  ], { botSymbol: "SEI", direction: "SHORT", openedAtMs: T0, remainingFraction: 0.4 });
+  assert.ok(r);
+  assert.equal(r.price, 0.0397);
+});
+
+test("exitPriceFromFills returns null with no closing fill, so the caller falls back", () => {
+  assert.equal(exitPriceFromFills([fill("SEI", "sell", 1000, 0.0401, T0)], {
+    botSymbol: "SEI", direction: "SHORT", openedAtMs: T0,
+  }), null);
+  assert.equal(exitPriceFromFills([], { botSymbol: "SEI", direction: "SHORT", openedAtMs: T0 }), null);
+});
+
+test("exitPriceFromFills flags an incomplete match instead of silently under-reporting", () => {
+  const r = exitPriceFromFills([
+    fill("SEI", "sell", 1000, 0.0401, T0),
+    fill("SEI", "buy",   300, 0.0397, T0 + HOUR),   // only part of the close is visible
+  ], { botSymbol: "SEI", direction: "SHORT", openedAtMs: T0, remainingFraction: 1 });
+  assert.ok(r);
+  assert.equal(r.incomplete, true);
+  assert.equal(r.size, 300);
+});
+
+test("exitPriceFromFills copes when the entry fill has aged out of the window", () => {
+  const r = exitPriceFromFills([fill("SEI", "buy", 400, 0.0397, T0 + 5 * HOUR)], {
+    botSymbol: "SEI", direction: "SHORT", openedAtMs: T0, remainingFraction: 0.4,
+  });
+  assert.ok(r);
+  assert.equal(r.price, 0.0397);
+  assert.equal(r.incomplete, false);   // nothing to be short OF without an entry size
+});
+
+test("exitPriceFromFills surfaces a liquidation", () => {
+  const r = exitPriceFromFills([
+    fill("SUI", "sell", 104, 0.6844, T0),
+    fill("SUI", "buy",  104, 0.7500, T0 + HOUR, "liquidation"),
+  ], { botSymbol: "SUI", direction: "SHORT", openedAtMs: T0, remainingFraction: 1 });
+  assert.ok(r);
+  assert.equal(r.liquidation, true);
+});
+
+test("KrakenAdapter.getFills maps PF_ tickers back to bot symbols", async () => {
+  const adapter = new KrakenAdapter(fakeKraken({
+    getFills: async () => ([
+      { fillId: "f1", symbol: "PF_XBTUSD", side: "buy", size: 0.003, price: 64_000, timeMs: T0, fillType: "taker" },
+      { fillId: "f2", symbol: "PF_SEIUSD", side: "sell", size: 1000, price: 0.0401, timeMs: T0, fillType: "maker" },
+    ]),
+  }));
+  const fills = await adapter.getFills!();
+  assert.deepEqual(fills.map(f => [f.botSymbol, f.side, f.price]), [
+    ["BTC", "buy", 64_000],
+    ["SEI", "sell", 0.0401],
+  ]);
 });
 
 test("isExchangeId gates unknown venue ids and buildAdapter honours the choice", () => {

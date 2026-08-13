@@ -21,10 +21,10 @@ import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEF
 import { confluenceBacktestDirection, isConfluenceBacktestEligible } from "./confluence-backtest";
 import { getMexcClient, getOpenOrderSide, toMexcSymbol } from "./mexc-client";
 import { planLiveReconciliation } from "./live-reconciliation";
-import { buildAdapter, isExchangeId, venueSymbol, EXCHANGES, type ExchangeId, type ExchangePosition } from "./exchange";
+import { buildAdapter, isExchangeId, venueSymbol, exitPriceFromFills, EXCHANGES, type ExchangeId, type ExchangePosition, type ExchangeFill, type ExchangeAdapter, type ResolvedExit } from "./exchange";
 import { buildLiveTp1JournalUpdate } from "./live-protection";
 import { validateLiveStartConnection } from "./live-start";
-import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting } from "./trade-accounting";
+import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting, TRADE_COSTS } from "./trade-accounting";
 import { simulateManagedExit } from "./trade-exits";
 import crypto from "crypto";
 
@@ -53,9 +53,6 @@ const BINANCE_BASE = "https://api.binance.com/api/v3";
 const MEXC_BASE = "https://api.mexc.com/api/v3";
 const MEXC_CONTRACT_BASE = "https://contract.mexc.com";
 const TP1_PARTIAL_CLOSE_PCT = 0.6;
-const TAKER_FEE_PCT = 0.0002;
-const SLIPPAGE_PCT = 0.0005;
-const TRADE_COSTS = { takerFeePct: TAKER_FEE_PCT, slippagePct: SLIPPAGE_PCT };
 // Round-trip cost ≈ 2×(taker+slip) = 0.14%. A stop tighter than this floor lets
 // fees dominate the risk and produces garbage R math (e.g. a 0.21% stop turned a
 // −0.35% move into −1.66R in May 2026 paper data). Reject such signals outright
@@ -92,6 +89,63 @@ function maxHoldHoursForStrategy(strategyId: string | null | undefined): number 
 
 function normalizeDirection(direction: string): "LONG" | "SHORT" {
   return direction === "SHORT" ? "SHORT" : "LONG";
+}
+
+/** Describe a resolved fill for the journal, including its drift from the ticker. */
+function describeFill(resolved: ResolvedExit, tickerPrice: number): string {
+  const driftBps = tickerPrice > 0 ? ((resolved.price - tickerPrice) / tickerPrice) * 10_000 : 0;
+  return `fill ${resolved.price.toPrecision(6)} (${resolved.fillCount} exec${resolved.fillCount > 1 ? "s" : ""}`
+    + `, vs ticker ${driftBps >= 0 ? "+" : ""}${driftBps.toFixed(1)}bps`
+    + `${resolved.liquidation ? ", LIQUIDATION" : ""}${resolved.incomplete ? ", partial fill data" : ""})`;
+}
+
+/**
+ * Price a market close the engine just sent, from the venue's own executions.
+ *
+ * `closePosition` returns an order id, not a price, so the engine used to book
+ * these at whatever the ticker read — on a different exchange, moments later.
+ * Real slippage went straight into the gap between the two and was invisible.
+ * The fill takes a beat to appear, hence the short poll; the ticker remains the
+ * fallback but is labelled an estimate so the two can never be conflated when
+ * measuring execution quality.
+ */
+/** Share of the original position still open — 1 unless a TP1 partial ran. */
+function remainingFractionOf(trade: TradeSizing): number {
+  const total = trade.position_size_usd;
+  if (!total || !(total > 0)) return 1;
+  return (trade.remaining_position_size_usd ?? total) / total;
+}
+
+interface TradeSizing {
+  symbol: string;
+  created_at: string;
+  position_size_usd: number | null;
+  remaining_position_size_usd?: number | null;
+}
+
+async function priceMarketClose(
+  client: ExchangeAdapter,
+  trade: TradeSizing,
+  direction: "LONG" | "SHORT",
+  tickerPrice: number,
+): Promise<{ price: number; note: string }> {
+  if (!client.getFills) return { price: tickerPrice, note: "ticker ESTIMATE — venue exposes no fill history" };
+
+  const openedAtMs = new Date(trade.created_at).getTime();
+  const opts = {
+    botSymbol: trade.symbol,
+    direction,
+    openedAtMs,
+    remainingFraction: remainingFractionOf(trade),
+  };
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await new Promise(r => setTimeout(r, 600));
+    const fills = await client.getFills(new Date(openedAtMs - 60 * 60_000)).catch(() => [] as ExchangeFill[]);
+    const resolved = exitPriceFromFills(fills, opts);
+    if (resolved && !resolved.incomplete) return { price: resolved.price, note: describeFill(resolved, tickerPrice) };
+  }
+  return { price: tickerPrice, note: "ticker ESTIMATE — fill not visible in time" };
 }
 
 // Default strategy ID — used as fallback when strategy field is missing (legacy entries)
@@ -2654,6 +2708,18 @@ export async function registerRoutes(server: Server, app: Express) {
       // journal marking, and this keeps one price source across paper and live.
       const { priceByPair: priceMap } = await fetchMexcContractTickerMaps();
 
+      // Real executions, fetched once per scan. Needed because a stop or TP
+      // firing on the venue leaves no trace the engine can see except this —
+      // the position is simply gone by the next scan.
+      let venueFills: ExchangeFill[] = [];
+      if (client.getFills && liveTrades.length > 0) {
+        const oldestOpen = liveTrades.reduce(
+          (min, t) => Math.min(min, new Date(t.created_at).getTime()),
+          Date.now(),
+        );
+        venueFills = await client.getFills(new Date(oldestOpen - 60 * 60_000)).catch(() => []);
+      }
+
       for (const trade of liveTrades) {
         const tradeDirection = normalizeDirection(trade.direction);
         const pos = exchangePositions.find(p =>
@@ -2663,8 +2729,23 @@ export async function registerRoutes(server: Server, app: Express) {
         );
 
         if (!pos) {
-          // Position no longer open on the venue — closed (SL/TP hit or manual)
-          const lastPrice = priceMap[`${trade.symbol}USDT`] || trade.entry_price;
+          // Position no longer open on the venue — a stop, a take-profit or a
+          // manual close fired. Price it from the venue's own executions; the
+          // ticker is only a fallback for when the fill window has nothing,
+          // and it is recorded as an estimate so it can never be mistaken for
+          // a measured fill later.
+          const resolved = exitPriceFromFills(venueFills, {
+            botSymbol: trade.symbol,
+            direction: tradeDirection,
+            openedAtMs: new Date(trade.created_at).getTime(),
+            remainingFraction: remainingFractionOf(trade),
+          });
+          const tickerPrice = priceMap[`${trade.symbol}USDT`] || trade.entry_price;
+          const lastPrice = resolved?.price ?? tickerPrice;
+          const priceNote = resolved
+            ? describeFill(resolved, tickerPrice)
+            : "ticker ESTIMATE — no venue fill found";
+
           const isLong = trade.direction === "LONG";
           const accounting = finalizeTradeAccounting({
             direction: isLong ? "LONG" : "SHORT",
@@ -2681,7 +2762,7 @@ export async function registerRoutes(server: Server, app: Express) {
             pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
             closed_at: new Date().toISOString(),
-            notes:     (trade.notes || "") + ` | Closed on ${client.id.toUpperCase()}`,
+            notes:     (trade.notes || "") + ` | Closed on ${client.id.toUpperCase()} @ ${priceNote}`,
           });
           continue;
         }
@@ -2702,21 +2783,22 @@ export async function registerRoutes(server: Server, app: Express) {
             console.error(`[Live] Max-hold close failed for ${trade.symbol}: ${closeErr.message}`);
             continue; // retry on next check
           }
+          const fill = await priceMarketClose(client, trade, tradeDirection, price);
           const timeoutAccounting = finalizeTradeAccounting({
             direction: isLong ? "LONG" : "SHORT",
             entryPrice: trade.entry_price,
             positionSizeUsd: trade.position_size_usd,
             remainingPositionSizeUsd: trade.remaining_position_size_usd,
             realizedPnlUsd: trade.realized_pnl_usd,
-          }, price, TRADE_COSTS);
+          }, fill.price, TRADE_COSTS);
           await updateJournalEntry(trade.id, {
             outcome:     timeoutAccounting.outcome,
-            exit_price:  Math.round(price * 10000) / 10000,
+            exit_price:  Math.round(fill.price * 10000) / 10000,
             pnl_pct:     Math.round(timeoutAccounting.pnlPct * 100) / 100,
             pnl_usd:     timeoutAccounting.pnlUsd !== null ? Math.round(timeoutAccounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
             closed_at:   new Date().toISOString(),
-            notes:       (trade.notes || "") + ` | Max-hold timeout ${maxHoldHLive}h — closed at market (backtest parity)`,
+            notes:       (trade.notes || "") + ` | Max-hold timeout ${maxHoldHLive}h — closed at market @ ${fill.note}`,
           });
           continue;
         }
@@ -2810,23 +2892,23 @@ export async function registerRoutes(server: Server, app: Express) {
             try {
               await client.closePosition(pos);
 
-
+              const trailFill = await priceMarketClose(client, trade, tradeDirection, price);
               const accounting = finalizeTradeAccounting({
                 direction: isLong ? "LONG" : "SHORT",
                 entryPrice: trade.entry_price,
                 positionSizeUsd: trade.position_size_usd,
                 remainingPositionSizeUsd: trade.remaining_position_size_usd,
                 realizedPnlUsd: trade.realized_pnl_usd,
-              }, price, TRADE_COSTS);
+              }, trailFill.price, TRADE_COSTS);
 
               await updateJournalEntry(trade.id, {
                 outcome:   accounting.outcome,
-                exit_price: Math.round(price * 10000) / 10000,
+                exit_price: Math.round(trailFill.price * 10000) / 10000,
                 pnl_pct:   Math.round(accounting.pnlPct * 100) / 100,
                 pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
                 remaining_position_size_usd: 0,
                 closed_at: new Date().toISOString(),
-                notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, mode=${trailingMode}${trailingMode === "r_multiple" ? ` ${trailingRMultiple}×` : ` ${(DEFAULT_TRAIL_PCT*100).toFixed(0)}%`})`,
+                notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, mode=${trailingMode}${trailingMode === "r_multiple" ? ` ${trailingRMultiple}×` : ` ${(DEFAULT_TRAIL_PCT*100).toFixed(0)}%`}) @ ${trailFill.note}`,
               });
             } catch (err) { console.error("[live-trail] journal update failed (position may already be closed):", err); }
           }
@@ -3305,9 +3387,13 @@ export async function registerRoutes(server: Server, app: Express) {
       // No position on the venue: it already closed (stop/TP filled). Reconcile
       // the journal rather than refusing — refusing would leave a phantom row.
       const { priceByPair } = await fetchMexcContractTickerMaps().catch(() => ({ priceByPair: {} as Record<string, number> }));
-      const exitPrice = pos?.markPrice ?? priceByPair[`${trade.symbol}USDT`] ?? trade.entry_price;
+      const tickerPrice = pos?.markPrice ?? priceByPair[`${trade.symbol}USDT`] ?? trade.entry_price;
 
       if (pos) await client.closePosition(pos);
+
+      // Book the execution the venue actually gave us, not the ticker.
+      const fill = await priceMarketClose(client, trade, direction, tickerPrice);
+      const exitPrice = fill.price;
 
       const accounting = finalizeTradeAccounting({
         direction,
@@ -3325,8 +3411,8 @@ export async function registerRoutes(server: Server, app: Express) {
         remaining_position_size_usd: 0,
         closed_at:  new Date().toISOString(),
         notes: (trade.notes || "") + (pos
-          ? ` | Closed manually at market on ${client.id.toUpperCase()}`
-          : ` | Manual close: no position on ${client.id.toUpperCase()}, journal reconciled`),
+          ? ` | Closed manually at market on ${client.id.toUpperCase()} @ ${fill.note}`
+          : ` | Manual close: no position on ${client.id.toUpperCase()}, journal reconciled @ ${fill.note}`),
       });
 
       res.json({ ok: true, closedOnVenue: !!pos, exitPrice });

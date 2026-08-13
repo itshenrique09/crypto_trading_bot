@@ -11,6 +11,19 @@ export interface TradeCostConfig {
   slippagePct?: number;
 }
 
+/**
+ * What a round trip is assumed to cost. Both engines and the backtests share
+ * these numbers, so a trade must never be booked against a different set —
+ * that is how paper and live silently stop being comparable.
+ *
+ * NOTE: `slippagePct` is a MODEL. Measured live slippage belongs in the
+ * journal via the venue's real fills (see exitPriceFromFills), not here.
+ */
+export const TRADE_COSTS: Required<TradeCostConfig> = {
+  takerFeePct: 0.0002,
+  slippagePct: 0.0005,
+};
+
 export interface PartialCloseResult {
   closedSizeUsd: number;
   remainingPositionSizeUsd: number;
