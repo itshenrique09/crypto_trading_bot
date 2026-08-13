@@ -121,6 +121,13 @@ export interface ExchangeAdapter {
  */
 const FILL_LOOKBACK_GRACE_MS = 10 * 60_000;
 
+/**
+ * One close usually lands as a single execution, occasionally as a handful
+ * split across the book within seconds. A TP1 partial, by contrast, happens
+ * hours earlier. This window separates the two without knowing either.
+ */
+const CLOSE_EVENT_WINDOW_MS = 5 * 60_000;
+
 export interface ResolvedExit {
   /** Volume-weighted price of the executions that closed this position. */
   price: number;
@@ -131,6 +138,12 @@ export interface ResolvedExit {
   incomplete: boolean;
   /** A liquidation fill is among them. */
   liquidation: boolean;
+  /**
+   * Share of the original position these executions represent, when the entry
+   * fill is still in the window. Lets a caller size the accounting to exactly
+   * what this close covered instead of assuming.
+   */
+  fractionOfPosition: number | null;
 }
 
 /**
@@ -142,10 +155,19 @@ export interface ResolvedExit {
  * number on a different exchange at a later time — so the journal booked P&L
  * the account never earned, and slippage became unmeasurable by construction.
  *
- * Closing fills are walked NEWEST FIRST and capped at the size still open, so a
- * position that already took a TP1 partial resolves to the price of the runner
- * only — the partial is already booked in `realized_pnl_usd` and counting it
- * twice would overstate the result again, in the other direction.
+ * Closing fills are walked NEWEST FIRST, so a position that already took a TP1
+ * partial resolves to the price of the runner only — the partial is booked in
+ * `realized_pnl_usd` already, and averaging it into the exit would count that
+ * profit twice.
+ *
+ * How much to take is decided one of two ways:
+ *   • `remainingFraction` given — size-match against it. The engine knows this
+ *     for a position that is still open.
+ *   • otherwise — take the LAST CLOSE EVENT (fills clustered at the newest
+ *     timestamp). This is the honest default: a closed journal row has had its
+ *     remaining size zeroed, and the previous fallback of "take everything"
+ *     silently swept the TP1 partial back in, inflating the result by the very
+ *     amount this function exists to measure.
  */
 export function exitPriceFromFills(
   fills: ExchangeFill[],
@@ -157,9 +179,8 @@ export function exitPriceFromFills(
     remainingFraction?: number;
   },
 ): ResolvedExit | null {
-  const fraction = opts.remainingFraction != null && opts.remainingFraction > 0 && opts.remainingFraction <= 1
-    ? opts.remainingFraction
-    : 1;
+  const wantFraction = opts.remainingFraction;
+  const haveFraction = wantFraction != null && wantFraction > 0 && wantFraction <= 1;
 
   const sym = opts.botSymbol.toUpperCase();
   const from = opts.openedAtMs - FILL_LOOKBACK_GRACE_MS;
@@ -173,11 +194,15 @@ export function exitPriceFromFills(
   const closes = mine.filter(f => f.side === exitSide).sort((a, b) => b.timeMs - a.timeMs);
   if (closes.length === 0) return null;
 
-  // Without the entry fill (aged out of the window) there is nothing to take a
-  // fraction OF, so fall back to every closing fill found for this trade.
-  const target = openedSize > 0
-    ? openedSize * fraction
-    : closes.reduce((s, f) => s + f.size, 0);
+  // Size-match against the caller's fraction when it has one AND there is an
+  // entry fill to take a fraction OF; otherwise price the last close event.
+  const sizeMatched = haveFraction && openedSize > 0;
+  const newestCloseMs = closes[0].timeMs;
+  const target = sizeMatched
+    ? openedSize * (wantFraction as number)
+    : closes
+        .filter(c => c.timeMs >= newestCloseMs - CLOSE_EVENT_WINDOW_MS)
+        .reduce((s, c) => s + c.size, 0);
   if (!(target > 0)) return null;
 
   let notional = 0, size = 0, fillCount = 0, liquidation = false;
@@ -198,6 +223,7 @@ export function exitPriceFromFills(
     fillCount,
     incomplete: size < target - 1e-9,
     liquidation,
+    fractionOfPosition: openedSize > 0 ? size / openedSize : null,
   };
 }
 

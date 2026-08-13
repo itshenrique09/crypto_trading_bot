@@ -154,15 +154,41 @@ test("exitPriceFromFills prices the runner only, not the already-booked TP1 part
   assert.equal(r.incomplete, false);
 });
 
-test("exitPriceFromFills without the remaining fraction would blend in the partial", () => {
-  // Guards the reason the fraction exists: TP1's proceeds are already in
-  // realized_pnl_usd, so averaging it into the exit books that profit twice.
-  const blended = exitPriceFromFills(SEI_WITH_PARTIAL, {
+test("exitPriceFromFills falls back to the LAST CLOSE EVENT, never to everything", () => {
+  // A closed journal row has had remaining_position_size_usd zeroed, so the
+  // caller cannot supply a fraction. The old fallback took every closing fill,
+  // which averaged TP1's proceeds — already counted in realized_pnl_usd — back
+  // into the exit and inflated the result by roughly the execution cost this
+  // function exists to measure. The runner alone is the honest answer.
+  const noFraction = exitPriceFromFills(SEI_WITH_PARTIAL, {
     botSymbol: "SEI", direction: "SHORT", openedAtMs: T0,
   });
-  assert.ok(blended);
-  assert.ok(Math.abs(blended.price - 0.03952) < 1e-9);
-  assert.notEqual(blended.price, 0.0397);
+  assert.ok(noFraction);
+  assert.equal(noFraction.price, 0.0397);
+  assert.equal(noFraction.size, 400);
+  assert.ok(Math.abs(noFraction.fractionOfPosition! - 0.4) < 1e-12);
+
+  // A zero fraction (what a closed row actually holds) must behave the same,
+  // not silently degrade to "take everything".
+  const zeroFraction = exitPriceFromFills(SEI_WITH_PARTIAL, {
+    botSymbol: "SEI", direction: "SHORT", openedAtMs: T0, remainingFraction: 0,
+  });
+  assert.deepEqual(zeroFraction, noFraction);
+});
+
+test("exitPriceFromFills groups a close split across several fills seconds apart", () => {
+  // One close, filled in three pieces against the book — all of it belongs to
+  // the same exit, unlike a TP1 partial hours earlier.
+  const r = exitPriceFromFills([
+    fill("ONDO", "sell", 900, 0.3363, T0),
+    fill("ONDO", "buy",  540, 0.3300, T0 + 3 * HOUR),          // TP1 partial
+    fill("ONDO", "buy",  120, 0.3294, T0 + 5 * HOUR),          // runner, piece 1
+    fill("ONDO", "buy",  240, 0.3292, T0 + 5 * HOUR + 4_000),  // runner, piece 2
+  ], { botSymbol: "ONDO", direction: "SHORT", openedAtMs: T0 });
+  assert.ok(r);
+  assert.equal(r.size, 360);          // both runner pieces, not the TP1 partial
+  assert.equal(r.fillCount, 2);
+  assert.ok(Math.abs(r.price - (0.3292 * 240 + 0.3294 * 120) / 360) < 1e-12);
 });
 
 test("exitPriceFromFills volume-weights a close split across several fills", () => {

@@ -63,11 +63,13 @@ async function main() {
   for (const t of closed) {
     const direction = normalizeDirection(t.direction);
     const total = t.position_size_usd ?? 0;
+    // No remainingFraction on purpose: a closed row has had its remaining size
+    // zeroed, so there is nothing truthful to pass. exitPriceFromFills then
+    // prices the last close event, which is exactly the runner.
     const resolved = exitPriceFromFills(fills, {
       botSymbol: t.symbol,
       direction,
       openedAtMs: new Date(t.created_at).getTime(),
-      remainingFraction: total > 0 ? (t.remaining_position_size_usd ?? total) / total : 1,
     });
 
     const bookedPnl = t.pnl_usd ?? 0;
@@ -83,14 +85,20 @@ async function main() {
       continue;
     }
 
-    // NOTE: the partial the trade already realised is deliberately NOT re-priced
-    // here — it was executed and booked at the time, and this only corrects the
-    // final exit. A full re-derivation would need per-partial fill matching.
+    // Re-price ONLY the portion this close actually covered. Feeding the full
+    // size here while realizedPnlUsd already holds the TP1 proceeds books that
+    // profit twice — which is how a trade that lost to slippage came out ahead.
+    const remainingUsd = resolved.fractionOfPosition != null
+      ? total * resolved.fractionOfPosition
+      : total;
+
+    // A TP1 partial is left as executed: it filled at the time and its proceeds
+    // are in realized_pnl_usd. Only the final exit is corrected here.
     const accounting = finalizeTradeAccounting({
       direction,
       entryPrice: t.entry_price,
       positionSizeUsd: t.position_size_usd,
-      remainingPositionSizeUsd: total,   // the row was zeroed on close; re-price the whole remainder
+      remainingPositionSizeUsd: remainingUsd,
       realizedPnlUsd: t.realized_pnl_usd,
     }, resolved.price, TRADE_COSTS);
 
