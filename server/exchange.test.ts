@@ -27,10 +27,14 @@ function fakeKraken(overrides: Partial<Record<string, any>> = {}): KrakenClient 
     getTickers: async () => new Map([
       ["PF_XBTUSD", { symbol: "PF_XBTUSD", markPrice: 64_400, last: 64_390, fundingRate: 0.00001, fundingRatePrediction: null, vol24h: 1 }],
     ]),
+    // orderType strings copied from a live account: Kraken echoes a stop back
+    // as "stop" even though /sendorder was given "stp". Both appear here so a
+    // reader that understands only one spelling fails this fixture.
     getOpenOrders: async () => ([
-      { orderId: "o1", symbol: "PF_XBTUSD", side: "buy", orderType: "stp", size: 0.0031, stopPrice: 65_000, reduceOnly: true },
+      { orderId: "o1", symbol: "PF_XBTUSD", side: "buy", orderType: "stop", size: 0.0031, stopPrice: 65_000, reduceOnly: true },
       { orderId: "o2", symbol: "PF_XBTUSD", side: "buy", orderType: "take_profit", size: 0.0031, stopPrice: 62_000, reduceOnly: true },
       { orderId: "o3", symbol: "PF_SOLUSD", side: "buy", orderType: "lmt", size: 1, reduceOnly: false },
+      { orderId: "o4", symbol: "PF_SOLUSD", side: "sell", orderType: "stp", size: 2.7, stopPrice: 70, reduceOnly: true },
     ]),
     ...overrides,
   } as unknown as KrakenClient;
@@ -76,12 +80,19 @@ test("Kraken positions are marked against the venue's own mark price", async () 
   assert.equal(sol.markPrice, 74);
 });
 
-test("getProtection reports only resting reduce-only stop/TP orders", async () => {
+test("getProtection reads BOTH of Kraken's stop spellings, and only reduce-only orders", async () => {
+  // The bug this pins: reading with /stp|take_profit/ silently dropped every
+  // order typed "stop", so the app showed 8 live positions with a take-profit
+  // and NO stop loss. The stops were resting at the venue the whole time — the
+  // safety display was blind, which is worse than useless on a live account.
   const prot = await new KrakenAdapter(fakeKraken()).getProtection();
   assert.deepEqual(prot, [
-    { botSymbol: "BTC", kind: "stop", price: 65_000, size: 0.0031 },
+    { botSymbol: "BTC", kind: "stop", price: 65_000, size: 0.0031 },        // "stop"
     { botSymbol: "BTC", kind: "take_profit", price: 62_000, size: 0.0031 },
+    { botSymbol: "SOL", kind: "stop", price: 70, size: 2.7 },               // "stp"
   ]);
+  // the non-reduce-only limit order is not protection
+  assert.ok(!prot.some(p => p.price === 1));
 });
 
 test("Kraken open converts USD notional to base units and refuses a zero-rounded size", async () => {

@@ -24,6 +24,7 @@ import {
 } from "./mexc-client";
 import {
   getKrakenClient, toKrakenSymbol, fromKrakenSymbol,
+  isProtectiveOrderType, protectionKind,
   type KrakenClient,
 } from "./kraken-client";
 
@@ -341,10 +342,10 @@ export class KrakenAdapter implements ExchangeAdapter {
   async getProtection(): Promise<ExchangeProtection[]> {
     const orders = await this.client.getOpenOrders();
     return orders
-      .filter(o => o.reduceOnly && /stp|take_profit/i.test(o.orderType) && o.stopPrice != null)
+      .filter(o => o.reduceOnly && isProtectiveOrderType(o.orderType) && o.stopPrice != null)
       .map(o => ({
         botSymbol: fromKrakenSymbol(o.symbol),
-        kind: /take_profit/i.test(o.orderType) ? "take_profit" as const : "stop" as const,
+        kind: protectionKind(o.orderType),
         price: o.stopPrice!,
         size: o.size,
       }));

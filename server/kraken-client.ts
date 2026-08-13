@@ -145,6 +145,28 @@ export function sizeForNotional(notionalUsd: number, price: number, sizePrecisio
   return roundSize(notionalUsd / price, sizePrecision);
 }
 
+/**
+ * Is this a protective (stop / take-profit) order type?
+ *
+ * Kraken's order types DO NOT ROUND-TRIP: /sendorder takes `"stp"`, and
+ * /openorders hands the same order back as `"stop"`. Matching only on `"stp"`
+ * therefore never recognises a stop — `"stop"` does not contain `"stp"` — and
+ * that cost twice over: the app reported every live position as having no stop
+ * loss, and setProtection's cancel-then-replace could not find the old stop to
+ * cancel, so each move to break-even orphaned one more resting order.
+ *
+ * Accepts both spellings in both directions, so it cannot matter again which
+ * side of the API a string came from.
+ */
+export function isProtectiveOrderType(orderType: string): boolean {
+  return /(^|_)stp$|stop|take[_ ]?profit/i.test(orderType.trim());
+}
+
+/** Which kind of protection an order type denotes. */
+export function protectionKind(orderType: string): "stop" | "take_profit" {
+  return /take[_ ]?profit/i.test(orderType) ? "take_profit" : "stop";
+}
+
 /** Order side to OPEN a position in the given direction. */
 export function openSide(direction: "LONG" | "SHORT"): "buy" | "sell" {
   return direction === "LONG" ? "buy" : "sell";
@@ -465,9 +487,11 @@ export class KrakenClient {
     const inst = await this.getInstrument(botSymbol);
     const side = closeSide(direction);
 
-    // Drop stale protection for this symbol before writing new levels.
+    // Drop stale protection for this symbol before writing new levels. This
+    // must recognise BOTH spellings of a stop, or the order it fails to match
+    // is left resting forever — see isProtectiveOrderType.
     for (const o of await this.getOpenOrders()) {
-      if (o.symbol === symbol && o.reduceOnly && /stp|take_profit/i.test(o.orderType)) {
+      if (o.symbol === symbol && o.reduceOnly && isProtectiveOrderType(o.orderType)) {
         await this.cancelOrder(o.orderId).catch(() => { /* already gone */ });
       }
     }

@@ -11,9 +11,38 @@ import {
   closeSide,
   computeAuthent,
   selectPosition,
+  isProtectiveOrderType,
+  protectionKind,
   KrakenClient,
   type KrakenPosition,
 } from "./kraken-client";
+
+test("isProtectiveOrderType accepts BOTH spellings Kraken uses for a stop", () => {
+  // Kraken's types do not round-trip: /sendorder takes "stp", /openorders
+  // returns "stop". Matching only "stp" reported every live position as having
+  // no stop loss, and left setProtection unable to cancel the old order — so
+  // each break-even move orphaned another resting stop. Both strings are real:
+  // "stp" is what the client sends, "stop" is what a live account returned.
+  assert.ok(isProtectiveOrderType("stp"));
+  assert.ok(isProtectiveOrderType("stop"));
+  assert.ok(isProtectiveOrderType("take_profit"));
+  assert.ok(isProtectiveOrderType("trailing_stop"));
+  assert.ok(isProtectiveOrderType(" STOP "));      // padded and upper-cased
+
+  // Non-protective types must not be swept up — setProtection CANCELS whatever
+  // this matches, so a false positive kills a legitimate order.
+  for (const t of ["lmt", "mkt", "post", "ioc", "liquidation", ""]) {
+    assert.ok(!isProtectiveOrderType(t), `${t} must not be treated as protection`);
+  }
+});
+
+test("protectionKind separates stops from take-profits", () => {
+  assert.equal(protectionKind("stop"), "stop");
+  assert.equal(protectionKind("stp"), "stop");
+  assert.equal(protectionKind("trailing_stop"), "stop");
+  assert.equal(protectionKind("take_profit"), "take_profit");
+  assert.equal(protectionKind("TAKE_PROFIT"), "take_profit");
+});
 
 // Valid base64 — computeAuthent decodes the secret before keying the HMAC.
 const FAKE_SECRET = Buffer.from("not-a-real-secret").toString("base64");
