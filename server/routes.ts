@@ -112,6 +112,14 @@ async function priceMarketClose(
   trade: TradeSizing,
   direction: "LONG" | "SHORT",
   tickerPrice: number,
+  /**
+   * "remaining" size-matches against what the journal still has open — right
+   * for a FINAL close. "last_event" prices whichever execution just happened,
+   * which is what a TP1 partial needs: the journal still shows the position as
+   * fully open at that point, so size-matching would demand the whole size,
+   * find only the 60% just sold, call it incomplete and fall back to the ticker.
+   */
+  sizing: "remaining" | "last_event" = "remaining",
 ): Promise<{ price: number; note: string }> {
   if (!client.getFills) return { price: tickerPrice, note: "ticker ESTIMATE — venue exposes no fill history" };
 
@@ -120,7 +128,7 @@ async function priceMarketClose(
     botSymbol: trade.symbol,
     direction,
     openedAtMs,
-    remainingFraction: remainingFractionOf(trade),
+    remainingFraction: sizing === "remaining" ? remainingFractionOf(trade) : undefined,
   };
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -2783,6 +2791,12 @@ export async function registerRoutes(server: Server, app: Express) {
               continue;
             }
 
+            // The partial went out as a MARKET order, so it filled wherever the
+            // book was — not at the planned TP1 level. Book the execution.
+            const tp1Fill = await priceMarketClose(
+              client, trade, tradeDirection, trade.take_profit1, "last_event",
+            );
+
             const actualClosePct = pos.size > 0 ? closedVol / pos.size : TP1_PARTIAL_CLOSE_PCT;
             const partial = applyPartialClose({
               direction: isLong ? "LONG" : "SHORT",
@@ -2790,7 +2804,7 @@ export async function registerRoutes(server: Server, app: Express) {
               positionSizeUsd: trade.position_size_usd,
               remainingPositionSizeUsd: trade.remaining_position_size_usd,
               realizedPnlUsd: trade.realized_pnl_usd,
-            }, trade.take_profit1, actualClosePct, TRADE_COSTS);
+            }, tp1Fill.price, actualClosePct, TRADE_COSTS);
             const closedFullPosition = closedVol >= pos.size;
 
             let exchangeProtectionUpdated = false;
@@ -2810,7 +2824,9 @@ export async function registerRoutes(server: Server, app: Express) {
 
             const journalUpdate = buildLiveTp1JournalUpdate({
               entryPrice: trade.entry_price,
-              takeProfit1: trade.take_profit1,
+              fillPrice: tp1Fill.price,
+              venue: client.id.toUpperCase(),
+              priceNote: tp1Fill.note,
               closedFullPosition,
               closedVol,
               holdVol: pos.size,
