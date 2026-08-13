@@ -10,8 +10,8 @@
 // the server accepts. Read-only: every call is a GET, no orders, no money.
 //   npx tsx script/debug-kraken-fills.ts
 
-import { getSetting } from "../server/storage";
 import { computeAuthent } from "../server/kraken-client";
+import { loadLiveCredentials, CredentialError } from "../server/live-credentials";
 
 const BASE_URL = "https://futures.kraken.com/derivatives";
 const API_PREFIX = "/api/v3";
@@ -54,12 +54,10 @@ async function attempt(label: string, endpoint: string, postData: string, key: s
 }
 
 async function main() {
-  const key = await getSetting("kraken_api_key");
-  const secret = await getSetting("kraken_api_secret");
-  if (!key || !secret) {
-    console.error("No Kraken credentials in settings.");
-    process.exit(1);
-  }
+  // Credentials are stored encrypted — loadLiveCredentials is the only correct
+  // way to read them. Reading them raw was what made the CONTROL call fail and
+  // dressed a decryption mistake up as a Kraken permissions problem.
+  const { apiKey: key, apiSecret: secret } = await loadLiveCredentials();
 
   const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
   const encoded = new URLSearchParams({ lastFillTime: since }).toString();   // colons as %3A
@@ -69,14 +67,17 @@ async function main() {
 
   // Control: a GET with no params on the same key. If this fails the problem
   // is the credential itself, not the encoding.
-  await attempt("CONTROL  /openpositions (no params)", "/openpositions", "", key, secret);
+  const control = await attempt("CONTROL  /openpositions (no params)", "/openpositions", "", key, secret);
 
   const noParams = await attempt("A  /fills with no params", "/fills", "", key, secret);
   const withEnc  = await attempt("B  /fills, percent-encoded param (what the client sends today)", "/fills", encoded, key, secret);
   const withRaw  = await attempt("C  /fills, unencoded param", "/fills", raw, key, secret);
 
   console.log("─".repeat(70));
-  if (noParams && !withEnc && !withRaw) {
+  if (!noParams && !withEnc && !withRaw && !control) {
+    console.log("VERDICT: even the control failed — the credentials are not reaching Kraken");
+    console.log("intact. This is an auth-plumbing problem, not an endpoint problem.");
+  } else if (noParams && !withEnc && !withRaw) {
     console.log("VERDICT: the endpoint is fine, the query parameter breaks the signature.");
     console.log("Fix: drop lastFillTime — the client already filters by symbol and time.");
   } else if (withRaw && !withEnc) {
@@ -89,4 +90,7 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(e => {
+  console.error(e instanceof CredentialError ? `\n${e.message}\n` : e);
+  process.exit(1);
+});

@@ -27,26 +27,10 @@ import { validateLiveStartConnection } from "./live-start";
 import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting, TRADE_COSTS } from "./trade-accounting";
 import { simulateManagedExit } from "./trade-exits";
 import crypto from "crypto";
-
-// Derive a 32-byte key from APP_PASSWORD (or a fixed fallback for dev)
-const ENC_KEY = crypto.createHash("sha256")
-  .update(process.env.APP_PASSWORD ?? "dev-key-not-secret")
-  .digest();
-
-function encryptValue(plaintext: string): string {
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv("aes-256-cbc", ENC_KEY, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  return iv.toString("hex") + ":" + encrypted.toString("hex");
-}
-
-function decryptValue(ciphertext: string): string {
-  const [ivHex, encHex] = ciphertext.split(":");
-  if (!ivHex || !encHex) return ciphertext; // not encrypted (legacy plain value)
-  const iv = Buffer.from(ivHex, "hex");
-  const decipher = crypto.createDecipheriv("aes-256-cbc", ENC_KEY, iv);
-  return Buffer.concat([decipher.update(Buffer.from(encHex, "hex")), decipher.final()]).toString("utf8");
-}
+import {
+  encryptValue, decryptValue, credentialKeys, getLiveExchangeId, buildLiveAdapter,
+  DEFAULT_EXCHANGE,
+} from "./live-credentials";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const BINANCE_BASE = "https://api.binance.com/api/v3";
@@ -2635,32 +2619,9 @@ export async function registerRoutes(server: Server, app: Express) {
     snapshotAt: null as string | null,
   };
 
-  const DEFAULT_EXCHANGE: ExchangeId = "kraken";
-
-  async function getLiveExchangeId(): Promise<ExchangeId> {
-    const stored = await getSetting("live_exchange");
-    return isExchangeId(stored) ? stored : DEFAULT_EXCHANGE;
-  }
-
-  /** Settings keys holding this venue's credentials. */
-  function credentialKeys(exchange: ExchangeId) {
-    return { key: `${exchange}_api_key`, secret: `${exchange}_api_secret` };
-  }
-
-  async function getLiveClient() {
-    const exchange = await getLiveExchangeId();
-    const { key, secret } = credentialKeys(exchange);
-    const apiKey    = await getSetting(key);
-    const apiSecret = await getSetting(secret);
-    if (!apiKey || !apiSecret) {
-      throw new Error(`${exchange.toUpperCase()} API keys not configured. Use POST /api/live/config first.`);
-    }
-    return buildAdapter(exchange, decryptValue(apiKey), decryptValue(apiSecret));
-  }
-
   async function liveCheck() {
     try {
-      const client = await getLiveClient();
+      const client = await buildLiveAdapter();
 
       // Reconcile the venue's open positions with our journal
       const exchangePositions = await client.getPositions();
@@ -2930,7 +2891,7 @@ export async function registerRoutes(server: Server, app: Express) {
         return;
       }
 
-      const client = await getLiveClient();
+      const client = await buildLiveAdapter();
       const strategies = await getEnabledStrategies("live");
       if (strategies.length === 0) return;
 
@@ -3341,7 +3302,7 @@ export async function registerRoutes(server: Server, app: Express) {
   // Test existing keys without saving new ones
   app.post("/api/live/test", async (_req, res) => {
     try {
-      const client = await getLiveClient();
+      const client = await buildLiveAdapter();
       const test   = await client.testConnection();
       res.json(test);
     } catch (err: any) { res.status(500).json({ ok: false, error: err.message }); }
@@ -3349,7 +3310,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.post("/api/live/start", async (_req, res) => {
     try {
-      const client = await getLiveClient();
+      const client = await buildLiveAdapter();
       validateLiveStartConnection(await client.testConnection());
       startLiveEngine();
       await setSetting("mode", "live");
@@ -3379,7 +3340,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (trade.mode !== "live") return res.status(400).json({ error: "Not a live trade — use the journal endpoint" });
       if (trade.outcome !== "open") return res.status(400).json({ error: "Trade is already closed" });
 
-      const client = await getLiveClient();
+      const client = await buildLiveAdapter();
       const direction = normalizeDirection(trade.direction);
       const pos = (await client.getPositions()).find(p =>
         p.botSymbol.toUpperCase() === trade.symbol.toUpperCase() && p.direction === direction && p.size > 0);

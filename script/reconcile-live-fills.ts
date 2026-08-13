@@ -19,8 +19,9 @@
 // Kraken's fill window is bounded: trades that closed long ago may no longer be
 // recoverable. Those are reported as unrecoverable rather than guessed at.
 
-import { getJournal, updateJournalEntry, getSetting } from "../server/storage";
-import { buildAdapter, exitPriceFromFills, isExchangeId, type ExchangeFill } from "../server/exchange";
+import { getJournal, updateJournalEntry } from "../server/storage";
+import { exitPriceFromFills, type ExchangeFill } from "../server/exchange";
+import { buildLiveAdapter, CredentialError } from "../server/live-credentials";
 import { finalizeTradeAccounting, TRADE_COSTS } from "../server/trade-accounting";
 
 const APPLY = process.argv.includes("--apply");
@@ -34,16 +35,8 @@ function fmt(n: number | null | undefined, digits = 2): string {
 }
 
 async function main() {
-  const exchangeRaw = (await getSetting("live_exchange")) ?? "kraken";
-  const exchange = isExchangeId(exchangeRaw) ? exchangeRaw : "kraken";
-  const apiKey = await getSetting(`${exchange}_api_key`);
-  const apiSecret = await getSetting(`${exchange}_api_secret`);
-  if (!apiKey || !apiSecret) {
-    console.error(`No ${exchange.toUpperCase()} credentials in settings — run this on the server where the bot lives.`);
-    process.exit(1);
-  }
-
-  const client = buildAdapter(exchange, apiKey, apiSecret);
+  const client = await buildLiveAdapter();
+  const exchange = client.id;
   if (!client.getFills) {
     console.error(`${exchange.toUpperCase()} exposes no fill history — nothing to reconcile against.`);
     process.exit(1);
@@ -144,4 +137,7 @@ async function main() {
   console.log(APPLY ? `\n${repaired} row(s) rewritten.` : `\nDry run. Re-run with --apply to write these corrections.`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(e => {
+  console.error(e instanceof CredentialError ? `\n${e.message}\n` : e);
+  process.exit(1);
+});
