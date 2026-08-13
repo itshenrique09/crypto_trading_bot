@@ -4,8 +4,38 @@ import {
   applyPartialClose,
   estimateOpenTradePnl,
   finalizeTradeAccounting,
+  roundPriceForJournal,
   type TradeAccountingState,
 } from "./trade-accounting";
+
+test("roundPriceForJournal survives sub-cent assets", () => {
+  // Real values from the 2026-08-13 paper export. The old
+  // Math.round(p * 10000) / 10000 stored PEPE as exactly 0 — nine rows in that
+  // history carry exit_price: 0 — and LUNC 98% off. On the LIVE ENTRY path a
+  // zero entry price is divided by in every P&L calculation and is the basis
+  // the trailing stop derives original risk from.
+  assert.equal(roundPriceForJournal(0.0000027956), 0.0000027956);   // PEPE — was 0
+  assert.equal(roundPriceForJournal(0.00005062), 0.00005062);       // LUNC — was 0.0001
+  assert.equal(roundPriceForJournal(0.004757), 0.004757);           // VET  — was 0.0048
+  assert.equal(roundPriceForJournal(0.002063), 0.002063);           // GALA — was 0.0021
+
+  // and still behaves for ordinary prices
+  assert.equal(roundPriceForJournal(64535.2), 64535.2);
+  assert.equal(roundPriceForJournal(76.00925925925925), 76.009259);
+  assert.equal(roundPriceForJournal(0.3354), 0.3354);
+});
+
+test("roundPriceForJournal never returns something you cannot divide by", () => {
+  // The whole point: a stored price feeds (exit - entry) / entry.
+  for (const p of [1e-9, 1e-7, 0.0000027956, 1, 1e6]) {
+    const r = roundPriceForJournal(p);
+    assert.ok(r > 0, `${p} rounded to ${r}`);
+    assert.ok(Math.abs((r - p) / p) < 1e-7, `${p} -> ${r} lost too much`);
+  }
+  // degenerate inputs pass through rather than becoming misleading numbers
+  assert.equal(roundPriceForJournal(0), 0);
+  assert.ok(Number.isNaN(roundPriceForJournal(NaN)));
+});
 
 const longTrade: TradeAccountingState = {
   direction: "LONG",

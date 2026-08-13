@@ -1,3 +1,5 @@
+import { roundPriceForJournal } from "./trade-accounting";
+
 export interface LiveTp1JournalUpdateInput {
   entryPrice: number;
   /**
@@ -44,7 +46,7 @@ export function buildLiveTp1JournalUpdate(input: LiveTp1JournalUpdateInput) {
     return {
       ...base,
       outcome: input.realizedPnlUsd > 0 ? "win" : input.realizedPnlUsd < 0 ? "loss" : "breakeven",
-      exit_price: Math.round(input.fillPrice * 10000) / 10000,
+      exit_price: roundPriceForJournal(input.fillPrice),
       pnl_pct: Math.round(input.realizedPnlPct * 100) / 100,
       pnl_usd: Math.round(input.realizedPnlUsd * 100) / 100,
       closed_at: new Date().toISOString(),

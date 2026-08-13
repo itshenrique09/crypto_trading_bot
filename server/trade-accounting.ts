@@ -24,6 +24,26 @@ export const TRADE_COSTS: Required<TradeCostConfig> = {
   slippagePct: 0.0005,
 };
 
+/**
+ * Round a price for storage without destroying sub-cent assets.
+ *
+ * Prices used to be stored as `Math.round(p * 10000) / 10000` — harmless for
+ * BTC, catastrophic for PEPE, whose 0.0000027956 rounds to exactly 0. Nine rows
+ * in the paper history carry `exit_price: 0`, and LUNC lands 98% off.
+ *
+ * The P&L on those rows is right, because it is computed from the true price
+ * before this rounding — but the stored price is then unusable for auditing a
+ * trade or measuring slippage. On the LIVE ENTRY path it is worse than
+ * cosmetic: a zero entry price is divided by in every P&L calculation and is
+ * what the trailing stop derives the original risk from.
+ *
+ * Significant digits, not decimal places.
+ */
+export function roundPriceForJournal(price: number): number {
+  if (!Number.isFinite(price) || price === 0) return price;
+  return Number(price.toPrecision(8));
+}
+
 export interface PartialCloseResult {
   closedSizeUsd: number;
   remainingPositionSizeUsd: number;

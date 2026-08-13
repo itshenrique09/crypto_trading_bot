@@ -25,7 +25,7 @@ import { planLiveReconciliation } from "./live-reconciliation";
 import { buildAdapter, isExchangeId, venueSymbol, exitPriceFromFills, EXCHANGES, type ExchangeId, type ExchangePosition, type ExchangeFill, type ExchangeAdapter, type ResolvedExit } from "./exchange";
 import { buildLiveTp1JournalUpdate } from "./live-protection";
 import { validateLiveStartConnection } from "./live-start";
-import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting, TRADE_COSTS } from "./trade-accounting";
+import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting, roundPriceForJournal, TRADE_COSTS } from "./trade-accounting";
 import { simulateManagedExit } from "./trade-exits";
 import crypto from "crypto";
 import {
@@ -2053,7 +2053,7 @@ export async function registerRoutes(server: Server, app: Express) {
           const timeoutAccounting = finalizeTradeAccounting(accountingState, price, TRADE_COSTS);
           await updateJournalEntry(trade.id, {
             outcome:     timeoutAccounting.outcome,
-            exit_price:  Math.round(price * 10000) / 10000,
+            exit_price:  roundPriceForJournal(price),
             pnl_pct:     Math.round(timeoutAccounting.pnlPct * 100) / 100,
             pnl_usd:     timeoutAccounting.pnlUsd !== null ? Math.round(timeoutAccounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
@@ -2158,7 +2158,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
           await updateJournalEntry(trade.id, {
             outcome:     finalAccounting.outcome,
-            exit_price:  Math.round(exitPrice * 10000) / 10000,
+            exit_price:  roundPriceForJournal(exitPrice),
             pnl_pct:     Math.round(finalAccounting.pnlPct * 100) / 100,
             pnl_usd:     finalAccounting.pnlUsd !== null ? Math.round(finalAccounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
@@ -2728,7 +2728,7 @@ export async function registerRoutes(server: Server, app: Express) {
           id: trade.id,
           symbol: trade.symbol,
           strategy: trade.strategy || DEFAULT_STRATEGY,
-          currentPrice:   Math.round(currentPrice * 10000) / 10000,
+          currentPrice:   roundPriceForJournal(currentPrice),
           unrealizedPnl:  Math.round(accounting.totalOpenPnlPct * 100) / 100,
           unrealizedUsd:  accounting.totalOpenPnlUsd !== null ? Math.round(accounting.totalOpenPnlUsd * 100) / 100 : null,
           riskUsd:        trade.risk_usd ?? null,
@@ -2931,7 +2931,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
           await updateJournalEntry(trade.id, {
             outcome:   accounting.outcome,
-            exit_price: Math.round(lastPrice * 10000) / 10000,
+            exit_price: roundPriceForJournal(lastPrice),
             pnl_pct:   Math.round(accounting.pnlPct * 100) / 100,
             pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
@@ -2967,7 +2967,7 @@ export async function registerRoutes(server: Server, app: Express) {
           }, fill.price, TRADE_COSTS);
           await updateJournalEntry(trade.id, {
             outcome:     timeoutAccounting.outcome,
-            exit_price:  Math.round(fill.price * 10000) / 10000,
+            exit_price:  roundPriceForJournal(fill.price),
             pnl_pct:     Math.round(timeoutAccounting.pnlPct * 100) / 100,
             pnl_usd:     timeoutAccounting.pnlUsd !== null ? Math.round(timeoutAccounting.pnlUsd * 100) / 100 : undefined,
             remaining_position_size_usd: 0,
@@ -3085,7 +3085,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
               await updateJournalEntry(trade.id, {
                 outcome:   accounting.outcome,
-                exit_price: Math.round(trailFill.price * 10000) / 10000,
+                exit_price: roundPriceForJournal(trailFill.price),
                 pnl_pct:   Math.round(accounting.pnlPct * 100) / 100,
                 pnl_usd:   accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
                 remaining_position_size_usd: 0,
@@ -3436,7 +3436,7 @@ export async function registerRoutes(server: Server, app: Express) {
               await addJournalEntry({
                 symbol:            sym,
                 direction:         signal.direction,
-                entry_price:       Math.round(actualEntry * 10000) / 10000,
+                entry_price:       roundPriceForJournal(actualEntry),
                 stop_loss:         signal.stopLoss,
                 take_profit1:      signal.takeProfit1,
                 take_profit2:      signal.takeProfit2,
@@ -3590,7 +3590,7 @@ export async function registerRoutes(server: Server, app: Express) {
 
       await updateJournalEntry(id, {
         outcome:    accounting.outcome,
-        exit_price: Math.round(exitPrice * 10000) / 10000,
+        exit_price: roundPriceForJournal(exitPrice),
         pnl_pct:    Math.round(accounting.pnlPct * 100) / 100,
         pnl_usd:    accounting.pnlUsd !== null ? Math.round(accounting.pnlUsd * 100) / 100 : undefined,
         remaining_position_size_usd: 0,
