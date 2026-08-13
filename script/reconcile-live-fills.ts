@@ -14,7 +14,15 @@
 //
 // Read-only by default. Pass --apply to write the corrected rows.
 //   npx tsx script/reconcile-live-fills.ts
-//   npx tsx script/reconcile-live-fills.ts --apply
+//   pm2 stop all && npx tsx script/reconcile-live-fills.ts --apply && pm2 start all
+//
+// THE APP MUST BE STOPPED TO --apply. Storage is sql.js: the whole database
+// lives in the server's memory and every persist() dumps that entire image over
+// data.db. A script writing to the file while the server runs is not merged —
+// it is silently overwritten by the server's stale copy on its next write,
+// which happens within minutes (peak_price ticks alone). The corrections would
+// vanish with nothing reporting a failure. --apply therefore refuses to run
+// while the server is listening.
 //
 // Kraken's fill window is bounded: trades that closed long ago may no longer be
 // recoverable. Those are reported as unrecoverable rather than guessed at.
@@ -34,7 +42,37 @@ function fmt(n: number | null | undefined, digits = 2): string {
   return n == null || !Number.isFinite(n) ? "—" : n.toFixed(digits);
 }
 
+/**
+ * Refuse to write while the server is up.
+ *
+ * sql.js keeps the whole database in memory and persist() writes that entire
+ * image over data.db. Our edits would be reverted by the server's next write
+ * — silently, since neither process is aware of the other.
+ */
+async function assertServerStopped(): Promise<void> {
+  const port = process.env.PORT || "5000";
+  const reachable = await fetch(`http://localhost:${port}/api/live/status`, {
+    signal: AbortSignal.timeout(2000),
+  }).then(() => true).catch(() => false);
+
+  if (!reachable) return;
+
+  console.error(
+    `\nREFUSING TO WRITE: the bot is running on port ${port}.\n\n` +
+    `Storage is sql.js — the server holds the entire database in memory and\n` +
+    `overwrites data.db wholesale on its next write. Anything written here now\n` +
+    `would be silently reverted within minutes.\n\n` +
+    `Stop it, apply, start it again:\n\n` +
+    `  pm2 stop all\n` +
+    `  APP_PASSWORD="..." npx tsx script/reconcile-live-fills.ts --apply\n` +
+    `  pm2 start all\n`,
+  );
+  process.exit(1);
+}
+
 async function main() {
+  if (APPLY) await assertServerStopped();
+
   const client = await buildLiveAdapter();
   const exchange = client.id;
   if (!client.getFills) {
