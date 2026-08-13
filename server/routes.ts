@@ -2,17 +2,18 @@ import type { Express } from "express";
 import type { Server } from "http";
 import { z } from "zod";
 import {
-  getWatchlist, addToWatchlist, removeFromWatchlist,
-  getSignals,
-  getJournal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
+  getJournal, getAllJournalEntries, addJournalEntry, updateJournalEntry, deleteJournalEntry,
+  importJournalEntry, countJournalEntries,
+  addScanLogEntry, getRecentScanLog,
   getSetting, setSetting,
 } from "./storage";
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
 import { dropOpenCandle } from "./candles";
-import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, type MexcContractTicker } from "./mexc-market";
+import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, MEXC_CONTRACT_OVERRIDES, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
+import { getBackupStatus } from "./backup";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
 import { isRollingDrawdownBreached, strategiesToPause } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
@@ -50,6 +51,11 @@ const MIN_SL_DISTANCE_PCT = 0.006;
 // problem, not normal R-multiple variance, so it only trips on a real bleed.
 const ROLLING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const ROLLING_DRAWDOWN_MAX_LOSS_R = 6;
+const DAILY_DRAWDOWN_MAX_LOSS_R = 4;
+// Position cap is FIXED at 10 (capacity A/B Jul 2026: +55R and lower maxDD than
+// 6; 12 tested worse). The BTC-regime maxOpen is informational only.
+const FIXED_MAX_OPEN = 10;
+const MIN_RISK_REWARD = 1.5;
 // Per-strategy kill-switch: 4-trade floor (was 6). At ~3 min scans most of the
 // suite is low-frequency and never reached 6 closed trades in 7 days, leaving
 // the switch effectively dead for them; 4 keeps random-variance protection
@@ -143,12 +149,11 @@ async function priceMarketClose(
 // Default strategy ID — used as fallback when strategy field is missing (legacy entries)
 const DEFAULT_STRATEGY = "confluence-swing";
 
-// Top tradeable coins on MEXC (USDT pairs)
-const SCANNER_COINS = [
-  "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX",
-  "LINK", "DOT", "NEAR", "SUI", "ARB", "OP", "APT", "INJ",
-  "FIL", "ATOM", "LTC", "UNI", "SEI", "TIA", "PEPE", "SHIB",
-];
+// Scanner universe = union of every active strategy's preferred symbols,
+// so the Markets page shows exactly what the engine trades.
+const SCANNER_COINS = Array.from(
+  new Set(getAllStrategies().flatMap(s => s.preferredSymbols ?? [])),
+);
 
 // Simple EMA helper for trend filtering
 function emaArray(data: number[], period: number): number[] {
@@ -349,12 +354,6 @@ async function fetchMexcContractTickerMaps() {
   return buildMexcContractTickerMaps(tickers);
 }
 
-const insertWatchlistSchema = z.object({
-  symbol:  z.string().min(1),
-  name:    z.string().min(1),
-  addedAt: z.string(),
-});
-
 const insertJournalSchema = z.object({
   symbol:        z.string().min(1).max(20).toUpperCase(),
   direction:     z.enum(["LONG", "SHORT"]),
@@ -395,112 +394,262 @@ export async function registerRoutes(server: Server, app: Express) {
     res.json(getRuntimeInfo());
   });
 
+  // ── Server-Sent Events — push channel ─────────────────────────────
+  // The UI refreshes the moment an engine cycle finishes instead of waiting
+  // for the next poll. One-directional by design; EventSource reconnects
+  // automatically and inherits the browser's Basic-auth credentials in prod.
+  const sseClients = new Set<import("express").Response>();
 
-  // ── Market Scanner (MEXC data) ───────────────────────────────────
-  // Uses MEXC 24hr tickers for the coins we care about
+  function broadcast(type: "paper" | "live" | "scan" | "journal", data: unknown = {}) {
+    if (sseClients.size === 0) return;
+    const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    sseClients.forEach(client => client.write(payload));
+  }
+
+  // Scan bursts write ~100 events in seconds — coalesce them into one push.
+  const pendingBroadcasts = new Map<string, NodeJS.Timeout>();
+  function broadcastDebounced(type: "paper" | "live" | "scan" | "journal", delayMs = 1500) {
+    if (pendingBroadcasts.has(type)) return;
+    pendingBroadcasts.set(type, setTimeout(() => {
+      pendingBroadcasts.delete(type);
+      broadcast(type);
+    }, delayMs));
+  }
+
+  app.get("/api/events", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+    res.write(": connected\n\n");
+    sseClients.add(res);
+    const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
+  });
+
+  // ── Health — for uptime monitors / pm2 checks ──────────────────────
+  // 200 = supervisable; 503 = wake somebody up (DB broken, or the live
+  // engine is running but stuck in an error state with real money exposed).
+  let healthMarketCache: { at: number; ok: boolean; note: string } | null = null;
+
+  app.get("/api/health", async (_req, res) => {
+    let dbOk = true;
+    let journalRows = 0;
+    try {
+      journalRows = await countJournalEntries();
+    } catch (err: any) {
+      dbOk = false;
+    }
+
+    if (!healthMarketCache || Date.now() - healthMarketCache.at > 60_000) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        const ping = await fetch(`${MEXC_CONTRACT_BASE}/api/v1/contract/ping`, { signal: controller.signal });
+        clearTimeout(timer);
+        healthMarketCache = {
+          at: Date.now(),
+          ok: ping.ok,
+          note: ping.ok ? "MEXC futures reachable" : `MEXC ping HTTP ${ping.status}`,
+        };
+      } catch (err: any) {
+        healthMarketCache = { at: Date.now(), ok: false, note: `MEXC unreachable: ${err?.message ?? err}` };
+      }
+    }
+
+    const liveStuck = liveEngineStatus.running && !!liveEngineStatus.error;
+    const ok = dbOk && !liveStuck;
+    res.status(ok ? 200 : 503).json({
+      status: ok ? "ok" : "degraded",
+      reasons: [
+        ...(dbOk ? [] : ["database unreachable"]),
+        ...(liveStuck ? [`live engine error: ${liveEngineStatus.error}`] : []),
+        ...(healthMarketCache.ok ? [] : [healthMarketCache.note]),
+      ],
+      uptimeSeconds: Math.floor(process.uptime()),
+      db: { ok: dbOk, journalRows },
+      marketData: { ok: healthMarketCache.ok, note: healthMarketCache.note, checkedAt: new Date(healthMarketCache.at).toISOString() },
+      engines: {
+        paper: { running: paperStatus.running, lastScan: paperStatus.lastScan },
+        live: {
+          running: liveEngineStatus.running,
+          error: liveEngineStatus.error,
+          unmanagedPositions: liveEngineStatus.unmanagedPositions,
+          lastScan: liveEngineStatus.lastScan,
+        },
+      },
+      backups: getBackupStatus(),
+      build: getRuntimeInfo(),
+    });
+  });
+
+
+  // ── Market Scanner (MEXC futures data — the venue data the engine trades on) ──
+  // One contract-ticker call covers price / 24h change / high-low / volume /
+  // funding for the whole universe; 1h klines (with Binance fallback) fill in
+  // 1h + 7d change and the sparkline. Cached for 30s.
+  const COIN_NAMES: Record<string, string> = {
+    BTC: "Bitcoin", ETH: "Ethereum", SOL: "Solana", BNB: "BNB",
+    XRP: "XRP", DOGE: "Dogecoin", ADA: "Cardano", AVAX: "Avalanche",
+    LINK: "Chainlink", DOT: "Polkadot", NEAR: "NEAR", SUI: "Sui",
+    ARB: "Arbitrum", OP: "Optimism", APT: "Aptos", INJ: "Injective",
+    FIL: "Filecoin", ATOM: "Cosmos", LTC: "Litecoin", UNI: "Uniswap",
+    SEI: "Sei", TIA: "Celestia", PEPE: "Pepe", SHIB: "Shiba Inu",
+    ICP: "Internet Computer", AAVE: "Aave", BCH: "Bitcoin Cash",
+    ETC: "Ethereum Classic", SAND: "The Sandbox", LUNC: "Terra Classic",
+    HBAR: "Hedera", FET: "Fetch.ai", RENDER: "Render", ONDO: "Ondo",
+    ENA: "Ethena", WLD: "Worldcoin", CRV: "Curve", GALA: "Gala",
+    RUNE: "THORChain", GRT: "The Graph", IMX: "Immutable", POL: "Polygon",
+    VET: "VeChain",
+  };
+  let marketCache: { at: number; data: unknown[] } | null = null;
+
   app.get("/api/market", async (_req, res) => {
     try {
-      // Fetch all 24h tickers from MEXC + funding rates (futures) in parallel
-      const MEXC_FUTURES = "https://contract.mexc.com/api/v1/contract";
-      const [allTickers, fundingData] = await Promise.all([
-        fetchJSON(`${MEXC_BASE}/ticker/24hr`),
-        fetchJSON(`${MEXC_FUTURES}/funding_rate`).catch(() => ({ data: [] })),
-      ]);
-      // Build funding rate map: symbol → rate (e.g. "BTC_USDT" → 0.0001)
-      const fundingMap: Record<string, number> = {};
-      const fList: Array<{ symbol: string; fundingRate: string }> = fundingData?.data ?? [];
-      for (const f of fList) {
-        const sym = f.symbol?.replace("_USDT", "") ?? "";
-        if (sym) fundingMap[sym] = parseFloat(f.fundingRate) || 0;
+      if (marketCache && Date.now() - marketCache.at < 30_000) {
+        return res.json(marketCache.data);
       }
-      type MexcTicker = { symbol: string; lastPrice: string; quoteVolume: string; priceChangePercent: string; highPrice: string; lowPrice: string; openPrice: string };
-      const allTickersList: MexcTicker[] = allTickers;
-      const tickerMap: Record<string, MexcTicker> = {};
-      for (const t of allTickersList) {
-        tickerMap[t.symbol] = t;
+      const MEXC_FUTURES = "https://contract.mexc.com/api/v1/contract";
+      const tickerRes = await fetchJSON(`${MEXC_FUTURES}/ticker`) as { data?: unknown[] };
+      type FutTicker = {
+        symbol?: string; lastPrice?: number; riseFallRate?: number;
+        high24Price?: number; lower24Price?: number; amount24?: number;
+        fundingRate?: number; bid1?: number; ask1?: number;
+      };
+      const tickerMap: Record<string, FutTicker> = {};
+      for (const raw of tickerRes.data ?? []) {
+        const t = raw as FutTicker;
+        const sym = t.symbol?.toUpperCase();
+        if (sym?.endsWith("_USDT")) tickerMap[sym.slice(0, -5)] = t;
+      }
+      // FIL trades as FILECOIN_USDT on MEXC futures
+      for (const [bot, contract] of Object.entries(MEXC_CONTRACT_OVERRIDES)) {
+        const t = tickerMap[contract.replace("_USDT", "")];
+        if (t) tickerMap[bot] = t;
       }
 
       const results = SCANNER_COINS.map(sym => {
-        const pair = `${sym}USDT`;
-        const t = tickerMap[pair];
-        if (!t) return null;
-
-        const price = parseFloat(t.lastPrice);
-        const volume24h = parseFloat(t.quoteVolume); // in USDT
-        const change24h = parseFloat(t.priceChangePercent) * 100;
-        const high24h = parseFloat(t.highPrice);
-        const low24h = parseFloat(t.lowPrice);
-        const open = parseFloat(t.openPrice);
-
-        // Estimate 1h change from price vs high/low range position
-        // (MEXC doesn't give 1h change directly, we'll get it from klines)
+        const t = tickerMap[sym];
+        const price = Number(t?.lastPrice);
+        if (!t || !Number.isFinite(price) || price <= 0) return null;
+        const bid = Number(t.bid1);
+        const ask = Number(t.ask1);
+        const spreadPct = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask >= bid
+          ? (ask - bid) / price
+          : null;
         return {
           symbol: sym,
-          name: sym, // We'll enrich with names below
+          name: COIN_NAMES[sym] ?? sym,
           price,
-          change1h: null as number | null, // filled by kline data
-          change24h: Math.round(change24h * 100) / 100,
-          change7d: null as number | null,
-          marketCap: 0, // MEXC doesn't provide this
-          volume24h: Math.round(volume24h),
+          change1h: null as number | null,   // filled from klines below
+          change24h: Math.round((Number(t.riseFallRate) || 0) * 10000) / 100,
+          change7d: null as number | null,   // filled from klines below
+          marketCap: 0,
+          volume24h: Math.round(Number(t.amount24) || 0),
           sparkline: [] as number[],
           image: "",
-          high24h,
-          low24h,
+          high24h: Number(t.high24Price) || price,
+          low24h: Number(t.lower24Price) || price,
           rank: 0,
-          fundingRate: fundingMap[sym] ?? null,
+          fundingRate: Number.isFinite(Number(t.fundingRate)) ? Number(t.fundingRate) : null,
+          spreadPct,
         };
-      }).filter(Boolean) as any[];
+      }).filter((r): r is NonNullable<typeof r> => r !== null);
 
-      // Sort by volume (most active first)
-      results.sort((a: any, b: any) => b.volume24h - a.volume24h);
+      results.sort((a, b) => b.volume24h - a.volume24h);
+      results.forEach((r, i) => { r.rank = i + 1; });
 
-      // Assign ranks by volume
-      results.forEach((r: any, i: number) => { r.rank = i + 1; });
-
-      // Fetch 1h klines for top coins to get 1h change & 7d sparkline
-      // Do this for top 15 only to keep it fast
-      const top = results.slice(0, 15);
-      const klinePromises = top.map(async (coin: any) => {
-        try {
-          // 1h candles, last 168 (7 days) — for sparkline + 1h change
-          const pair = `${coin.symbol}USDT`;
-          const klines: any[][] = await fetchJSON(
-            `${MEXC_BASE}/klines?symbol=${pair}&interval=1h&limit=168`
-          );
-          if (klines.length > 1) {
-            // 1h change: last close vs previous close
-            const lastClose = parseFloat(klines[klines.length - 1][4]);
-            const prevClose = parseFloat(klines[klines.length - 2][4]);
-            coin.change1h = Math.round(((lastClose - prevClose) / prevClose) * 10000) / 100;
-
-            // 7d change
-            const firstClose = parseFloat(klines[0][4]);
-            coin.change7d = Math.round(((lastClose - firstClose) / firstClose) * 10000) / 100;
-
-            // Sparkline (hourly closes, downsample to ~50 points)
-            const step = Math.max(1, Math.floor(klines.length / 50));
-            coin.sparkline = klines.filter((_: any[], i: number) => i % step === 0).map((k: any[]) => parseFloat(k[4]));
+      // 1h/7d change + sparkline for every coin, batched to be polite upstream
+      const BATCH = 10;
+      for (let i = 0; i < results.length; i += BATCH) {
+        await Promise.all(results.slice(i, i + BATCH).map(async coin => {
+          try {
+            const klines = await fetchStrategyKlines(coin.symbol, "1h", 170);
+            if (klines.length > 2) {
+              const last = klines[klines.length - 1].close;
+              const prev = klines[klines.length - 2].close;
+              const first = klines[0].close;
+              coin.change1h = Math.round(((last - prev) / prev) * 10000) / 100;
+              coin.change7d = Math.round(((last - first) / first) * 10000) / 100;
+              const step = Math.max(1, Math.floor(klines.length / 50));
+              coin.sparkline = klines.filter((_, j) => j % step === 0).map(k => k.close);
+            }
+          } catch (err: any) {
+            console.error(`[market] kline enrich failed for ${coin.symbol}:`, err?.message ?? err);
           }
-        } catch (err) { console.error("[klines] fetch failed:", err); }
-      });
-      await Promise.all(klinePromises);
+        }));
+      }
 
-      // Coin names
-      const COIN_NAMES: Record<string, string> = {
-        BTC: "Bitcoin", ETH: "Ethereum", SOL: "Solana", BNB: "BNB",
-        XRP: "XRP", DOGE: "Dogecoin", ADA: "Cardano", AVAX: "Avalanche",
-        LINK: "Chainlink", DOT: "Polkadot", NEAR: "NEAR", SUI: "Sui",
-        ARB: "Arbitrum", OP: "Optimism", APT: "Aptos", INJ: "Injective",
-        FIL: "Filecoin", ATOM: "Cosmos", LTC: "Litecoin", UNI: "Uniswap",
-        SEI: "Sei", TIA: "Celestia", PEPE: "Pepe", SHIB: "Shiba Inu",
-      };
-      results.forEach((r: any) => { r.name = COIN_NAMES[r.symbol] || r.symbol; });
-
+      marketCache = { at: Date.now(), data: results };
       res.json(results);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ── Generic OHLCV endpoint — powers the chart page ────────────────
+  // Reports which venue actually served the data (MEXC futures first, Binance
+  // spot fallback) so the UI never has to guess at the source.
+  const CANDLE_INTERVALS = new Set(["5m", "15m", "30m", "1h", "4h", "8h", "1d", "1w"]);
+  app.get("/api/candles/:symbol", async (req, res) => {
+    try {
+      const symbol = validateSymbol(req.params.symbol);
+      if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
+      const interval = String(req.query.interval ?? "1h");
+      if (!CANDLE_INTERVALS.has(interval)) {
+        return res.status(400).json({ error: `Invalid interval. Use one of: ${Array.from(CANDLE_INTERVALS).join(", ")}` });
+      }
+      const limit = Math.min(Math.max(Number(req.query.limit) || 400, 50), 1000);
+      let candles: OHLCV[];
+      let source: "mexc-futures" | "binance-spot";
+      try {
+        candles = await fetchMexcFuturesKlines(symbol, interval, limit);
+        source = "mexc-futures";
+      } catch {
+        candles = await fetchBinanceKlines(symbol, interval, limit);
+        source = "binance-spot";
+      }
+      res.json({ symbol, interval, source, candles });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Engine configuration — the REAL constants the engines run with ─
+  // Single source of truth for the UI; values are the same identifiers the
+  // scan/check loops use, so the display can never drift from the code.
+  app.get("/api/engine/config", (_req, res) => {
+    res.json({
+      riskGates: {
+        minVolumeUsdt: MIN_VOLUME_USDT,
+        maxSpreadPct: MAX_SPREAD_PCT,
+        fundingLongMax: FUNDING_LONG_MAX,
+        fundingShortMin: FUNDING_SHORT_MIN,
+        minSlDistancePct: MIN_SL_DISTANCE_PCT,
+        minRiskReward: MIN_RISK_REWARD,
+      },
+      portfolio: {
+        maxOpenPositions: FIXED_MAX_OPEN,
+        maxPerCorrelationGroup: MAX_PER_GROUP,
+        onePositionPerSymbol: true,
+        dailyDrawdownHaltR: DAILY_DRAWDOWN_MAX_LOSS_R,
+        rollingWindowDays: ROLLING_WINDOW_MS / 86_400_000,
+        rollingDrawdownHaltR: ROLLING_DRAWDOWN_MAX_LOSS_R,
+        killSwitchMinTrades: KILL_SWITCH_MIN_TRADES,
+        killSwitchMaxNetR: KILL_SWITCH_MAX_NET_R,
+      },
+      exits: {
+        tp1PartialClosePct: TP1_PARTIAL_CLOSE_PCT,
+        maxHoldHoursByInterval: MAX_HOLD_HOURS_BY_INTERVAL,
+      },
+      scan: {
+        checkEverySeconds: 30,
+        scanEveryMinutes: 3,
+      },
+    });
   });
 
   // ── Coin Detail ─────────────────────────────────────────────────
@@ -659,82 +808,46 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // ── Multi-strategy signals for a coin ─────────────────────────────
-  // Swing + RSI Div → 1H candles; SMC + B&R → 4H candles
+  // Runs the ACTIVE strategy registry (the same code the engines trade with)
+  // against fresh candles, so the UI always reflects the real strategy set.
   app.get("/api/signals/:symbol", async (req, res) => {
     try {
       const symbol = validateSymbol(req.params.symbol);
       if (!symbol) return res.status(400).json({ error: "Invalid symbol" });
-      const [candles1h, candles4h] = await Promise.all([
-        fetchStrategyKlines(symbol, "1h", 260),  // 260 → EMA200 reliable, covers DIV_RANGE
-        fetchStrategyKlines(symbol, "4h", 400),  // 400 → EMA200 seed ~2% (reliable)
-      ]);
-      if (candles4h.length < 150) {
-        return res.status(400).json({ error: "Not enough data" });
-      }
 
-      const ind = analyzeIndicators(candles1h.length >= 250 ? candles1h : candles4h);
-      const swingSig  = generateSignal(candles1h.length >= 250 ? candles1h : candles4h, ind);
-      const smcSig    = smcSignal(candles4h);
-      const brSig     = breakRetestSignal(candles4h);
-      const rsiDivSig = candles1h.length >= 250 ? rsiDivergenceSignal(candles1h) : null;
+      const strategies = getAllStrategies();
+      const intervals = Array.from(new Set(strategies.map(s => s.interval)));
+      const candlesByInterval: Record<string, OHLCV[]> = {};
+      await Promise.all(intervals.map(async interval => {
+        const need = Math.max(...strategies.filter(s => s.interval === interval).map(s => s.minCandles));
+        candlesByInterval[interval] = await fetchStrategyKlines(symbol, interval, need + 20);
+      }));
+
+      const anyCandles = Object.values(candlesByInterval).find(c => c.length > 0);
+      if (!anyCandles) return res.status(400).json({ error: "Not enough data" });
 
       res.json({
         symbol: symbol.toUpperCase(),
-        currentPrice: candles4h[candles4h.length - 1].close,
-        strategies: [
-          {
-            id: "confluence-swing",
-            name: "Confluence Swing",
-            interval: "1h",
-            signal: swingSig.type,
-            score: Math.round(swingSig.confluenceScore * 10) / 10,
-            confidence: swingSig.confidence,
-            reason: swingSig.reason,
-            entry: swingSig.entry,
-            stopLoss: swingSig.stopLoss,
-            takeProfit: swingSig.takeProfit1,
-            trend: swingSig.trend,
-          },
-          {
-            id: "smc",
-            name: "SMC",
-            interval: "4h",
-            signal: smcSig.type === "NONE" ? "HOLD" : smcSig.type === "LONG" ? "BUY" : "SELL",
-            score: smcSig.confidence / 10,
-            confidence: smcSig.confidence,
-            reason: smcSig.reason || "No signal",
-            entry: smcSig.entry || undefined,
-            stopLoss: smcSig.stopLoss || undefined,
-            takeProfit: smcSig.takeProfit || undefined,
-            structure: smcSig.structure,
-            obZone: smcSig.obZone,
-          },
-          {
-            id: "break-retest",
-            name: "Break & Retest",
-            interval: "4h",
-            signal: brSig.type === "NONE" ? "HOLD" : brSig.type === "LONG" ? "BUY" : "SELL",
-            score: brSig.confidence / 10,
-            confidence: brSig.confidence,
-            reason: brSig.reason || "No signal",
-            entry: brSig.entry || undefined,
-            stopLoss: brSig.stopLoss || undefined,
-            takeProfit: brSig.takeProfit || undefined,
-            level: brSig.level,
-          },
-          ...(rsiDivSig ? [{
-            id: "rsi-divergence",
-            name: "RSI Divergence",
-            interval: "1h",
-            signal: rsiDivSig.type === "NONE" ? "HOLD" : rsiDivSig.type === "LONG" ? "BUY" : "SELL",
-            score: rsiDivSig.confidence / 10,
-            confidence: rsiDivSig.confidence,
-            reason: rsiDivSig.reason || "No signal",
-            entry: rsiDivSig.entry || undefined,
-            stopLoss: rsiDivSig.stopLoss || undefined,
-            takeProfit: rsiDivSig.takeProfit || undefined,
-          }] : []),
-        ],
+        currentPrice: anyCandles[anyCandles.length - 1].close,
+        strategies: strategies.map(s => {
+          const candles = candlesByInterval[s.interval] ?? [];
+          const enough = candles.length >= s.minCandles;
+          const sig = enough ? s.analyze(candles) : null;
+          return {
+            id: s.id,
+            name: s.name,
+            interval: s.interval,
+            inUniverse: s.preferredSymbols?.includes(symbol) ?? true,
+            signal: sig ? (sig.direction === "LONG" ? "BUY" : "SELL") : "HOLD",
+            score: sig ? Math.round(sig.confluenceScore * 10) / 10 : 0,
+            confidence: sig?.confidence ?? 0,
+            reason: sig?.reason ?? (enough ? "No setup on the latest candle" : "Not enough candle history"),
+            entry: sig?.entry,
+            stopLoss: sig?.stopLoss,
+            takeProfit: sig?.takeProfit1,
+            takeProfit2: sig?.takeProfit2,
+          };
+        }),
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1522,6 +1635,101 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // Full journal export — ALL rows (the list endpoint caps at 200), optional
+  // ?mode=paper|live filter. Sent as a download-friendly JSON envelope.
+  app.get("/api/journal/export", async (req, res) => {
+    try {
+      const rawMode = req.query.mode;
+      const mode = rawMode === "paper" || rawMode === "live" ? rawMode : undefined;
+      if (rawMode !== undefined && !mode) {
+        return res.status(400).json({ error: "mode must be 'paper' or 'live'" });
+      }
+      const trades = await getAllJournalEntries(mode);
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="trades-${mode ?? "all"}-${stamp}.json"`,
+      );
+      res.json({
+        app: "cryptotrader-pro",
+        exportedAt: new Date().toISOString(),
+        mode: mode ?? "all",
+        count: trades.length,
+        trades,
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Restore from an export file. Accepts the export envelope or a bare array.
+  // IDs are re-assigned; duplicates (same symbol+mode+created_at) are skipped,
+  // so importing the same file twice is safe.
+  const importTradeSchema = z.object({
+    symbol: z.string().min(1).max(20),
+    direction: z.enum(["LONG", "SHORT"]),
+    entry_price: z.number().positive(),
+    stop_loss: z.number().positive(),
+    take_profit1: z.number().positive(),
+    take_profit2: z.number().nullish(),
+    confluence_score: z.number().nullish(),
+    mode: z.enum(["signal", "auto", "paper", "live"]),
+    strategy: z.string().nullish(),
+    followed: z.string().nullish(),
+    outcome: z.enum(["open", "win", "loss", "breakeven"]),
+    exit_price: z.number().nullish(),
+    pnl_pct: z.number().nullish(),
+    pnl_usd: z.number().nullish(),
+    risk_usd: z.number().nullish(),
+    position_size_usd: z.number().nullish(),
+    remaining_position_size_usd: z.number().nullish(),
+    realized_pnl_usd: z.number().nullish(),
+    notes: z.string().nullish(),
+    created_at: z.string().min(1),
+    closed_at: z.string().nullish(),
+    tp1_hit: z.number().nullish(),
+    peak_price: z.number().nullish(),
+  });
+
+  app.post("/api/journal/import", async (req, res) => {
+    try {
+      const body = req.body as { trades?: unknown } | unknown[];
+      const rows: unknown[] = Array.isArray(body)
+        ? body
+        : Array.isArray((body as { trades?: unknown })?.trades)
+          ? (body as { trades: unknown[] }).trades
+          : [];
+      if (rows.length === 0) {
+        return res.status(400).json({ error: "Sem trades no ficheiro — esperado um array ou { trades: [...] }" });
+      }
+      if (rows.length > 10_000) {
+        return res.status(400).json({ error: "Ficheiro demasiado grande (máximo 10000 trades)" });
+      }
+
+      let imported = 0, skipped = 0, invalid = 0;
+      for (const raw of rows) {
+        const parsed = importTradeSchema.safeParse(raw);
+        if (!parsed.success) { invalid++; continue; }
+        const d = parsed.data;
+        const inserted = await importJournalEntry({
+          symbol: d.symbol, direction: d.direction, entry_price: d.entry_price,
+          stop_loss: d.stop_loss, take_profit1: d.take_profit1,
+          take_profit2: d.take_profit2 ?? null, confluence_score: d.confluence_score ?? null,
+          mode: d.mode, strategy: d.strategy ?? "v2-swing", followed: d.followed ?? "yes",
+          outcome: d.outcome, exit_price: d.exit_price ?? null, pnl_pct: d.pnl_pct ?? null,
+          pnl_usd: d.pnl_usd ?? null, risk_usd: d.risk_usd ?? null,
+          position_size_usd: d.position_size_usd ?? null,
+          remaining_position_size_usd: d.remaining_position_size_usd ?? null,
+          realized_pnl_usd: d.realized_pnl_usd ?? 0, notes: d.notes ?? "",
+          created_at: d.created_at, closed_at: d.closed_at ?? null,
+          tp1_hit: d.tp1_hit ?? 0, peak_price: d.peak_price ?? null,
+        });
+        if (inserted) imported++;
+        else skipped++;
+      }
+      broadcast("journal");
+      res.json({ imported, skipped, invalid, total: rows.length });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   app.post("/api/journal", async (req, res) => {
     try {
       const parsed = insertJournalSchema.safeParse(req.body);
@@ -1579,6 +1787,9 @@ export async function registerRoutes(server: Server, app: Express) {
     const all = getAllStrategies();
     res.json(all.map(s => ({
       id: s.id, name: s.name, description: s.description, interval: s.interval,
+      preferredSymbols: s.preferredSymbols ?? [],
+      minCandles: s.minCandles,
+      cooldownHours: s.cooldownHours ?? null,
       paperEnabled: true,
       liveEnabled:  true,
       enabled: true,
@@ -1715,6 +1926,28 @@ export async function registerRoutes(server: Server, app: Express) {
   function logScan(ev: ScanEvent) {
     scanLog.unshift(ev);
     if (scanLog.length > 500) scanLog.pop();
+    // Persist so the decision feed survives restarts; fire-and-forget keeps
+    // the scan loop synchronous. Coalesced SSE push for the UI.
+    void addScanLogEntry(ev).catch(err => console.error("[scan-log] persist failed:", err));
+    broadcastDebounced("scan");
+  }
+  // Hydrate the in-memory ring from the persisted log (newest first).
+  try {
+    const persisted = await getRecentScanLog(500);
+    for (const row of persisted) {
+      scanLog.push({
+        time: row.time,
+        symbol: row.symbol,
+        strategy: row.strategy,
+        result: row.result as ScanEvent["result"],
+        reason: row.reason,
+        signal: row.signal ?? undefined,
+        confidence: row.confidence ?? undefined,
+      });
+    }
+    if (persisted.length > 0) console.log(`[scan-log] restored ${persisted.length} events from disk`);
+  } catch (err) {
+    console.error("[scan-log] restore failed:", err);
   }
 
   // Dynamic coin list from MEXC (cached 5 min)
@@ -2014,7 +2247,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart);
       const daily1R     = currentBalance * baseRiskPct / 100;
       const dailyPnlUsd = todayTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (dailyPnlUsd < -4 * daily1R) return;  // Daily drawdown limit: -4R
+      if (dailyPnlUsd < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R) return;  // Daily drawdown limit
 
       // NOTE (Jul 2026): the -8R MONTHLY guard was removed after the full-pipeline
       // harness (script/validate-pipeline.ts) showed it fired on normal variance
@@ -2058,7 +2291,7 @@ export async function registerRoutes(server: Server, app: Express) {
       // vs 28.4%) — more concurrent diversification smooths the equity curve.
       // 12 was identical to 10 (saturation); 2-per-symbol was worse. At 2% risk,
       // 10 concurrent = 20% max at-risk, spread across ≥5 correlation groups.
-      const effectiveMaxOpen = 10;
+      const effectiveMaxOpen = FIXED_MAX_OPEN;
       const dirPolicy = { long: true, short: true, sizeMultiplier: 1.0, reason: "directional overlay retired Jul 2026 — pipeline A/B: blocking cost ~27R/yr" };
 
       // ── POSITION SIZING — fixed fractional (Kelly retired Jul 2026) ──
@@ -2323,7 +2556,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SL too tight ${(slDistPctSig*100).toFixed(2)}% < ${(MIN_SL_DISTANCE_PCT*100).toFixed(2)}% — fees would dominate`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
-              if (risk <= 0 || reward / risk < 1.5) {
+              if (risk <= 0 || reward / risk < MIN_RISK_REWARD) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
@@ -2370,15 +2603,19 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err) { console.error("[paper-scan] scan failed:", err); }
   }
 
+  // Each engine cycle pushes an SSE event so the UI updates immediately.
+  const runPaperCheck = () => paperCheck().finally(() => broadcast("paper"));
+  const runPaperScan = () => paperScan().finally(() => broadcast("paper"));
+
   function startPaperEngine() {
     if (paperStatus.running) return;
     paperStatus.running = true;
     // Run immediately
-    paperCheck();
-    paperScan();
+    runPaperCheck();
+    runPaperScan();
     // Then on intervals: check every 30s, scan every 3min
-    paperCheckInterval = setInterval(paperCheck, 30 * 1000);
-    paperScanInterval = setInterval(paperScan, 3 * 60 * 1000);
+    paperCheckInterval = setInterval(runPaperCheck, 30 * 1000);
+    paperScanInterval = setInterval(runPaperScan, 3 * 60 * 1000);
   }
 
   function stopPaperEngine() {
@@ -2559,47 +2796,12 @@ export async function registerRoutes(server: Server, app: Express) {
     try {
       await paperCheck();
       await paperScan();
+      broadcast("paper");
       res.json({ ok: true });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // ── Watchlist CRUD ───────────────────────────────────────────────
-  app.get("/api/watchlist", async (_req, res) => {
-    try {
-      res.json(await getWatchlist());
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post("/api/watchlist", async (req, res) => {
-    try {
-      const parsed = insertWatchlistSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: parsed.error });
-      res.json(await addToWatchlist(parsed.data));
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.delete("/api/watchlist/:id", async (req, res) => {
-    try {
-      await removeFromWatchlist(Number(req.params.id));
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // ── Signals History ──────────────────────────────────────────────
-  app.get("/api/signals", async (_req, res) => {
-    try {
-      res.json(await getSignals());
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // ── Live Trading Engine ───────────────────────────────────────────
   //
   // Mirror of the paper engine but places real orders on a real venue.
@@ -2625,6 +2827,9 @@ export async function registerRoutes(server: Server, app: Express) {
     account:   null as { equity: number; available: number; usedMargin?: number; unrealizedPnl?: number } | null,
     positions: [] as Array<ExchangePosition & { protection?: { stop?: number; takeProfit?: number } }>,
     snapshotAt: null as string | null,
+    // Kill-switch state, refreshed each liveScan — parity with paper's
+    // intelligence.pausedStrategies so the UI can show both engines equally.
+    pausedStrategies: [] as string[],
   };
 
   async function liveCheck() {
@@ -2964,7 +3169,7 @@ export async function registerRoutes(server: Server, app: Express) {
       }
       // Jul 2026 pipeline A/B: dynamic regime cap and directional overlay retired;
       // cap raised to 10 (mirrors paper scan — see the REGIME BRAIN note there).
-      const effectiveMaxOpen = 10;
+      const effectiveMaxOpen = FIXED_MAX_OPEN;
 
       // Cap concurrent live positions
       if (openLive.length >= effectiveMaxOpen || liveEngineStatus.openPositions >= effectiveMaxOpen) {
@@ -2990,7 +3195,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (todayPnl < -4 * daily1R) return;  // Daily DD limit: -4R
+      if (todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R) return;  // Daily DD limit
 
       // Monthly -8R guard removed Jul 2026 — same rationale as paper scan.
 
@@ -3008,6 +3213,7 @@ export async function registerRoutes(server: Server, app: Express) {
         strategies.map(s => s.id),
         { windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R },
       );
+      liveEngineStatus.pausedStrategies = Array.from(pausedStrategiesLive);
 
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
       const openSymbolExposures = openLive.map(e => ({
@@ -3171,7 +3377,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `SL too tight ${(slDistPctSig*100).toFixed(2)}% < ${(MIN_SL_DISTANCE_PCT*100).toFixed(2)}% — fees would dominate`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
-              if (risk <= 0 || reward / risk < 1.5) continue;
+              if (risk <= 0 || reward / risk < MIN_RISK_REWARD) continue;
 
               // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
               const riskPctUsed = baseRiskPct * riskMultiplier;
@@ -3265,9 +3471,11 @@ export async function registerRoutes(server: Server, app: Express) {
   function startLiveEngine() {
     if (liveEngineStatus.running) return;
     liveEngineStatus.running = true;
-    liveCheck();
-    liveCheckInterval = setInterval(liveCheck, 30 * 1000);
-    liveScanInterval  = setInterval(liveScan, 3 * 60 * 1000);
+    const runLiveCheck = () => liveCheck().finally(() => broadcast("live"));
+    const runLiveScan = () => liveScan().finally(() => broadcast("live"));
+    runLiveCheck();
+    liveCheckInterval = setInterval(runLiveCheck, 30 * 1000);
+    liveScanInterval  = setInterval(runLiveScan, 3 * 60 * 1000);
   }
 
   function stopLiveEngine() {

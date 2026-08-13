@@ -1,42 +1,6 @@
 import { getDb, persist } from "./db";
 import type { Database } from "sql.js";
 
-export interface Watchlist {
-  id: number;
-  symbol: string;
-  name: string;
-  added_at: string;
-}
-
-export interface Signal {
-  id: number;
-  symbol: string;
-  type: string;
-  price: number;
-  confidence: number;
-  reason: string;
-  indicators: string;
-  timestamp: string;
-  status: string;
-}
-
-export interface InsertWatchlist {
-  symbol: string;
-  name: string;
-  addedAt: string;
-}
-
-export interface InsertSignal {
-  symbol: string;
-  type: string;
-  price: number;
-  confidence: number;
-  reason: string;
-  indicators: string;
-  timestamp: string;
-  status: string;
-}
-
 // Helper: convert sql.js query result to array of objects
 function rowsToObjects<T>(db: Database, sql: string, params: any[] = []): T[] {
   const stmt = db.prepare(sql);
@@ -47,66 +11,6 @@ function rowsToObjects<T>(db: Database, sql: string, params: any[] = []): T[] {
   }
   stmt.free();
   return rows;
-}
-
-export async function getWatchlist(): Promise<Watchlist[]> {
-  const db = await getDb();
-  return rowsToObjects<Watchlist>(db, "SELECT * FROM watchlist ORDER BY id DESC");
-}
-
-export async function addToWatchlist(item: InsertWatchlist): Promise<Watchlist> {
-  const db = await getDb();
-  db.run(
-    "INSERT INTO watchlist (symbol, name, added_at) VALUES (?, ?, ?)",
-    [item.symbol, item.name, item.addedAt]
-  );
-  persist(db);
-  const rows = rowsToObjects<Watchlist>(
-    db,
-    "SELECT * FROM watchlist ORDER BY id DESC LIMIT 1"
-  );
-  return rows[0];
-}
-
-export async function removeFromWatchlist(id: number): Promise<void> {
-  const db = await getDb();
-  db.run("DELETE FROM watchlist WHERE id = ?", [id]);
-  persist(db);
-}
-
-export async function getSignals(): Promise<Signal[]> {
-  const db = await getDb();
-  return rowsToObjects<Signal>(db, "SELECT * FROM signals ORDER BY timestamp DESC LIMIT 100");
-}
-
-export async function addSignal(signal: InsertSignal): Promise<Signal> {
-  const db = await getDb();
-  db.run(
-    `INSERT INTO signals (symbol, type, price, confidence, reason, indicators, timestamp, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      signal.symbol,
-      signal.type,
-      signal.price,
-      signal.confidence,
-      signal.reason,
-      signal.indicators,
-      signal.timestamp,
-      signal.status,
-    ]
-  );
-  persist(db);
-  const rows = rowsToObjects<Signal>(
-    db,
-    "SELECT * FROM signals ORDER BY id DESC LIMIT 1"
-  );
-  return rows[0];
-}
-
-export async function updateSignalStatus(id: number, status: string): Promise<void> {
-  const db = await getDb();
-  db.run("UPDATE signals SET status = ? WHERE id = ?", [status, id]);
-  persist(db);
 }
 
 // ── Journal ────────────────────────────────────────────────────────
@@ -160,6 +64,99 @@ export interface InsertJournal {
 export async function getJournal(limit = 200): Promise<JournalEntry[]> {
   const db = await getDb();
   return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY created_at DESC LIMIT ?", [limit]);
+}
+
+/** Full journal dump for exports/backups — no row limit, optional mode filter. */
+export async function getAllJournalEntries(mode?: string): Promise<JournalEntry[]> {
+  const db = await getDb();
+  if (mode) {
+    return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal WHERE mode = ? ORDER BY created_at DESC", [mode]);
+  }
+  return rowsToObjects<JournalEntry>(db, "SELECT * FROM journal ORDER BY created_at DESC");
+}
+
+/**
+ * Restore one exported journal row. IDs are NOT preserved (autoincrement
+ * assigns a fresh one) so backups from a different database can never
+ * collide; duplicates are detected by the natural key symbol+mode+created_at.
+ * Returns false when the row already exists (skipped).
+ */
+export async function importJournalEntry(row: Omit<JournalEntry, "id">): Promise<boolean> {
+  const db = await getDb();
+  const existing = rowsToObjects<{ id: number }>(
+    db,
+    "SELECT id FROM journal WHERE symbol = ? AND mode = ? AND created_at = ? LIMIT 1",
+    [row.symbol, row.mode, row.created_at],
+  );
+  if (existing.length > 0) return false;
+  db.run(
+    `INSERT INTO journal (
+       symbol, direction, entry_price, stop_loss, take_profit1, take_profit2,
+       confluence_score, mode, strategy, followed, outcome, exit_price, pnl_pct,
+       notes, created_at, closed_at, position_size_usd, remaining_position_size_usd,
+       realized_pnl_usd, risk_usd, pnl_usd, peak_price, tp1_hit
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.symbol, row.direction, row.entry_price, row.stop_loss, row.take_profit1,
+      row.take_profit2 ?? null, row.confluence_score ?? null, row.mode,
+      row.strategy || "v2-swing", row.followed || "yes", row.outcome || "open",
+      row.exit_price ?? null, row.pnl_pct ?? null, row.notes || "", row.created_at,
+      row.closed_at ?? null, row.position_size_usd ?? null,
+      row.remaining_position_size_usd ?? null, row.realized_pnl_usd ?? 0,
+      row.risk_usd ?? null, row.pnl_usd ?? null, row.peak_price ?? null,
+      row.tp1_hit ?? 0,
+    ],
+  );
+  persist(db);
+  return true;
+}
+
+// ── Scan log (persisted ring — survives restarts) ────────────────────
+
+export interface ScanLogRow {
+  id: number;
+  time: string;
+  symbol: string;
+  strategy: string;
+  result: string;
+  reason: string;
+  signal: string | null;
+  confidence: number | null;
+}
+
+const SCAN_LOG_KEEP = 2000;
+let scanLogInsertsSincePrune = 0;
+
+export async function addScanLogEntry(e: {
+  time: string; symbol: string; strategy: string; result: string;
+  reason: string; signal?: string; confidence?: number;
+}): Promise<void> {
+  const db = await getDb();
+  db.run(
+    "INSERT INTO scan_log (time, symbol, strategy, result, reason, signal, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [e.time, e.symbol, e.strategy, e.result, e.reason, e.signal ?? null, e.confidence ?? null],
+  );
+  // Prune occasionally, not on every insert — a scan cycle writes ~100 rows.
+  if (++scanLogInsertsSincePrune >= 500) {
+    scanLogInsertsSincePrune = 0;
+    db.run(
+      "DELETE FROM scan_log WHERE id NOT IN (SELECT id FROM scan_log ORDER BY id DESC LIMIT ?)",
+      [SCAN_LOG_KEEP],
+    );
+  }
+  persist(db);
+}
+
+export async function getRecentScanLog(limit = 500): Promise<ScanLogRow[]> {
+  const db = await getDb();
+  return rowsToObjects<ScanLogRow>(db, "SELECT * FROM scan_log ORDER BY id DESC LIMIT ?", [limit]);
+}
+
+/** Cheap DB liveness probe for /api/health. */
+export async function countJournalEntries(): Promise<number> {
+  const db = await getDb();
+  const rows = rowsToObjects<{ n: number }>(db, "SELECT COUNT(*) AS n FROM journal");
+  return rows[0]?.n ?? 0;
 }
 
 export async function addJournalEntry(entry: InsertJournal): Promise<JournalEntry> {

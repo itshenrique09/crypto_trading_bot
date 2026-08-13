@@ -1,312 +1,152 @@
 # Setup, Desenvolvimento e Estrutura de Ficheiros
 
+*(atualizado Ago 2026 — reflete o sistema atual: engines paper/live, UI v2, Kraken/MEXC)*
+
 ---
 
 ## Requisitos
 
-- **Node.js 18, 20 ou 22 LTS** (recomendado: v20)
+- **Node.js 20 LTS ou superior** (o projeto corre em produção com v24)
 - **npm** (incluído com o Node.js)
-- Sistema operativo: Windows, macOS ou Linux
-
-> ⚠️ Node.js v24 funciona mas ainda é experimental. Para produção usa v20 LTS.
+- Sistema operativo: Windows, macOS ou Linux (sql.js é WASM — sem compilação nativa)
 
 ---
 
 ## Instalação e Arranque
 
 ```bash
-# 1. Entrar na pasta do projeto
-cd trading-bot
-
-# 2. Instalar dependências (só uma vez)
 npm install
-
-# 3. Modo desenvolvimento (hot reload)
-npm run dev
+npm run dev        # servidor + cliente (Vite middleware, HMR) — porta 5000
 ```
 
-Abre **http://localhost:5000** no browser.
+Se a porta 5000 estiver ocupada na tua máquina:
+
+```bash
+npx cross-env PORT=5001 NODE_ENV=development tsx server/index.ts
+```
+
+Abre **http://localhost:5000** (ou a porta escolhida). A base de dados `data.db` é criada automaticamente; o paper engine arranca sozinho se o modo persistido for `paper`.
+
+> Nota: `tsx` não faz watch do código do servidor — alterações em `server/*` exigem reiniciar o processo. O cliente tem HMR via Vite.
 
 ---
 
-## Scripts Disponíveis
+## Scripts
 
 | Comando | O que faz |
 |---------|-----------|
-| `npm run dev` | Inicia servidor de desenvolvimento com hot reload |
-| `npm run build` | Build de produção (frontend + backend) |
-| `npm start` | Corre o build de produção |
-| `npm run check` | Verifica tipos TypeScript |
+| `npm run dev` | Servidor de desenvolvimento (Express + Vite middleware, HMR no cliente) |
+| `npm run check` | `tsc --noEmit` — verifica tipos em todo o projeto |
+| `npm test` | `node --test server/*.test.ts` — suite completa (156 testes) |
+| `npm run build` | Build de produção (Vite → `dist/public`, esbuild → `dist/index.cjs`) |
+| `npm start` | Corre o build de produção (exige `APP_PASSWORD`) |
+
+**Depois de editar TypeScript, corre sempre `npm run check`.** Depois de mexer no servidor, corre `npm test`.
 
 ---
 
-## Estrutura Completa de Ficheiros
+## Estrutura de Ficheiros
 
 ```
 trading-bot/
 │
-├── client/                          ← Frontend (React + Vite)
-│   ├── index.html                   ← HTML base com fontes Google
+├── client/                            ← Frontend (React 18 + Vite, hash routing)
+│   ├── index.html                     ← Fontes: Inter + JetBrains Mono
+│   ├── public/favicon.svg
 │   └── src/
-│       ├── main.tsx                 ← Entry point React
-│       ├── App.tsx                  ← Router principal
-│       ├── index.css                ← Tema dark terminal (Tailwind vars)
-│       │
+│       ├── main.tsx / App.tsx         ← Entry + rotas (/live /paper /markets /markets/:s /activity /settings)
+│       ├── index.css                  ← Design tokens (dark-only): --card --accent --up --down --warn …
 │       ├── pages/
-│       │   ├── Dashboard.tsx        ← Página principal (tabela de mercado)
-│       │   ├── AnalysisPage.tsx     ← Página de análise completa
-│       │   └── not-found.tsx        ← Página 404
-│       │
+│       │   ├── live.tsx               ← Conta/posições da exchange, guards, histórico live
+│       │   ├── paper.tsx              ← Balance simulado, guards, performance por estratégia, histórico paper
+│       │   ├── markets.tsx            ← Universo de 41 moedas com gates reais (✓/✗)
+│       │   ├── symbol.tsx             ← Gráfico profissional + sinais do registry + gates por símbolo
+│       │   ├── activity.tsx           ← Feed de decisões do scanner, estratégias, parâmetros, funding carry
+│       │   ├── settings.tsx           ← Chaves API, capital, trailing, backups, sistema
+│       │   └── not-found.tsx
 │       ├── components/
-│       │   ├── PriceChart.tsx       ← Gráfico de preço (Recharts)
-│       │   ├── ConfluenceMeter.tsx  ← Medidor de confluência visual
-│       │   ├── MiniSparkline.tsx    ← Sparklines na tabela
-│       │   └── ui/                  ← Componentes shadcn/ui
-│       │       ├── card.tsx
-│       │       ├── badge.tsx
-│       │       ├── button.tsx
-│       │       ├── skeleton.tsx
-│       │       └── ... (30+ componentes)
-│       │
-│       ├── hooks/
-│       │   ├── use-toast.ts         ← Toast notifications
-│       │   └── use-mobile.tsx       ← Detecção mobile
-│       │
+│       │   ├── AppShell.tsx           ← Sidebar agrupada + topbar (equity, indicador SSE)
+│       │   ├── ui-kit.tsx             ← Primitivas: Page, Panel, StatCard, Segmented, Th/Td, badges…
+│       │   ├── CandleChart.tsx        ← Wrapper lightweight-charts (CHART_COLORS = paleta única)
+│       │   ├── TradeChartModal.tsx    ← Gráfico de um trade (entry/SL/TP/exit marcados)
+│       │   ├── Sparkline.tsx / ConfirmButton.tsx
+│       │   ├── mode/                  ← Partilhados pelos dashboards de modo
+│       │   │   ├── GuardsPanel.tsx    ← Halts diário/rolling + kill-switch (fórmulas do engine)
+│       │   │   ├── PositionsTable.tsx ← Variantes live (proteção do venue) e paper (marks simulados)
+│       │   │   ├── HistorySection.tsx ← Histórico filtrável + export/import JSON
+│       │   │   └── EquityCurve.tsx    ← Curva R acumulado por modo
+│       │   └── ui/                    ← shadcn mínimos: alert-dialog, button, skeleton, toast(er)
+│       ├── hooks/use-toast.ts
 │       └── lib/
-│           ├── queryClient.ts       ← TanStack Query setup
-│           └── utils.ts             ← Helpers (formatPrice, getChangeColor, etc.)
+│           ├── api.ts                 ← TODOS os hooks de dados (endpoints + cadências num só sítio)
+│           ├── sse.ts                 ← Ligação /api/events → invalidação de queries
+│           ├── types.ts               ← Tipos da API + STRATEGY_COLORS
+│           ├── format.ts              ← fmtPrice/fmtUsd/fmtR/rMetrics… (fonte única de formatação)
+│           ├── queryClient.ts         ← fetch helpers + TanStack Query defaults
+│           └── utils.ts               ← cn()
 │
-├── server/                          ← Backend (Express + Node.js)
-│   ├── index.ts                     ← Entry point do servidor
-│   ├── routes.ts                    ← Todas as API routes
-│   ├── analysis.ts                  ← Motor de análise técnica (core)
-│   ├── storage.ts                   ← CRUD watchlist e sinais
-│   ├── db.ts                        ← Setup sql.js (SQLite via WASM)
-│   ├── vite.ts                      ← Integração Vite em desenvolvimento
-│   └── static.ts                    ← Serve ficheiros estáticos em produção
+├── server/                            ← Backend (Express 5)
+│   ├── index.ts                       ← Entry: auth Basic (prod), body limit 5mb, backup loop
+│   ├── routes.ts                      ← Engines paper/live + toda a API + SSE (~3600 linhas)
+│   ├── strategies/                    ← registry.ts + estratégias ativas (a fonte de verdade do trading)
+│   ├── analysis.ts                    ← Indicadores (referência: 02-analysis-engine.md)
+│   ├── exchange.ts                    ← ExchangeAdapter + KrakenAdapter/MexcAdapter
+│   ├── kraken-client.ts               ← Kraken Futures REST (contas, posições, ordens, fills)
+│   ├── mexc-client.ts / mexc-market.ts← MEXC futures privado / parsing público
+│   ├── db.ts / storage.ts             ← sql.js + schema + CRUD (journal, scan_log, settings…)
+│   ├── backup.ts                      ← Backup diário de data.db com rotação
+│   ├── portfolio-guards.ts            ← Halts rolling + kill-switch (puros, partilhados pelos 2 engines)
+│   ├── trade-accounting.ts / trade-exits.ts / trailing-stop.ts
+│   ├── live-credentials.ts            ← Encriptação AES-256 das chaves (KDF = sha256(APP_PASSWORD))
+│   ├── live-reconciliation.ts         ← Journal ↔ posições do venue
+│   ├── btc-regime-gate.ts / exposure-guards.ts / funding-carry.ts
+│   ├── candles.ts / runtime-info.ts / auth-config.ts
+│   ├── vite.ts / static.ts            ← Dev middleware / estáticos em produção
+│   └── *.test.ts                      ← 156 testes (node:test)
 │
-├── shared/
-│   └── schema.ts                    ← Tipos partilhados (Watchlist, Signal)
-│
-├── script/
-│   └── build.ts                     ← Script de build (esbuild + vite)
-│
-├── docs/                            ← Esta documentação
-│   ├── 01-overview.md
-│   ├── 02-analysis-engine.md
-│   ├── 03-signals-risk.md
-│   └── 04-setup-dev.md
-│
-├── package.json                     ← Dependências e scripts
-├── tsconfig.json                    ← Configuração TypeScript
-├── tailwind.config.ts               ← Configuração Tailwind
-├── vite.config.ts                   ← Configuração Vite
-├── postcss.config.js                ← PostCSS
-├── components.json                  ← Configuração shadcn/ui
-└── data.db                          ← Base de dados SQLite (criada automaticamente)
+├── script/                            ← Validação e investigação (validate-pipeline.ts = o árbitro)
+├── backups/                           ← Backups diários de data.db (gitignored, rotação 7)
+├── cryptotrader-docs/                 ← Esta pasta (02 = referência de indicadores; archive/ = histórico)
+├── README.md / API.md / STRATEGIES.md ← Documentação principal
+├── ecosystem.config.cjs               ← Config pm2 para VPS
+└── data.db                            ← SQLite (journal + settings + chaves encriptadas)
 ```
 
 ---
 
-## API Endpoints
+## API
 
-Todos os endpoints estão em `server/routes.ts`.
+A referência completa (42+ endpoints, SSE, health, shapes de resposta) está em [`API.md`](../API.md). Regras rápidas:
 
-### `GET /api/market`
-Retorna as top 25 criptos com preços, variações e sparklines.
-
-```json
-[
-  {
-    "symbol": "BTC",
-    "name": "Bitcoin",
-    "price": 67371,
-    "change1h": 0.02,
-    "change24h": 0.72,
-    "change7d": 1.02,
-    "marketCap": 1350000000000,
-    "volume24h": 22000000000,
-    "sparkline": [65000, 65500, ...],
-    "rank": 1
-  }
-]
-```
-
-### `GET /api/coin/:symbol`
-Detalhes de uma coin específica + candles para o gráfico.
-
-```json
-{
-  "symbol": "BTC",
-  "price": 67371,
-  "marketCap": 1350000000000,
-  "change24h": 0.72,
-  "ath": 108786,
-  "candles": [
-    { "time": 1710000000, "open": 65000, "high": 66000, "low": 64500, "close": 65800, "volume": 25000000000 }
-  ]
-}
-```
-
-### `GET /api/analyze/:symbol`
-Análise técnica completa. O endpoint mais importante.
-
-```json
-{
-  "symbol": "BTC",
-  "currentPrice": 67371,
-  "indicators": {
-    "rsi": 63.1,
-    "macd": { "line": 114.67, "signal": 101.0, "histogram": 13.67 },
-    "ema9": 67289, "ema21": 67177, "ema50": 67089, "ema200": 67491,
-    "ichimoku": { "priceVsCloud": "above", "cloudColor": "green", "tkCross": "none" },
-    "bollingerBands": { "upper": 67501, "middle": 67151, "lower": 66802, "percentB": 0.814 },
-    "atr": 197.83,
-    "atrPercent": 0.29,
-    "orderBlocks": [{ "type": "bullish", "high": 67128, "low": 67090, "strength": 75 }],
-    "fairValueGaps": [{ "type": "bullish", "high": 66734, "low": 66643, "filled": false }],
-    "support": 66686,
-    "resistance": 67487,
-    "fibLevels": [{ "level": "61.8%", "price": 66789 }]
-  },
-  "signal": {
-    "type": "STRONG_BUY",
-    "confluenceScore": 6,
-    "confidence": 75,
-    "reason": "Short-term EMAs bullish | Price above green Ichimoku Cloud | MACD strong bullish momentum",
-    "entry": 67371,
-    "stopLoss": 67074,
-    "takeProfit1": 67668,
-    "takeProfit2": 67965,
-    "takeProfit3": 68262,
-    "riskRewardRatio": 3,
-    "positionSizePct": 1.5,
-    "trend": "strong_up",
-    "volatility": "low",
-    "marketPhase": "accumulation"
-  }
-}
-```
-
-### `GET /api/watchlist`
-Lista de coins na watchlist.
-
-### `POST /api/watchlist`
-Adiciona uma coin à watchlist.
-```json
-{ "symbol": "ETH", "name": "Ethereum", "addedAt": "2026-04-05T00:00:00Z" }
-```
-
-### `DELETE /api/watchlist/:id`
-Remove uma coin da watchlist.
-
-### `GET /api/signals`
-Histórico de sinais gerados.
+- Fechar posições **live** só via `POST /api/live/close/:id` (nunca PATCH direto ao journal).
+- Constantes do engine vêm de `GET /api/engine/config` — a UI nunca as hardcoda.
+- O cliente recebe push via SSE (`/api/events`); polling é apenas fallback.
 
 ---
 
 ## Base de Dados
 
-Usa **sql.js** — SQLite compilado para WebAssembly. Vantagem: funciona em qualquer plataforma sem compilação nativa (resolve o problema do `better-sqlite3` no Windows).
+**sql.js** (SQLite em WASM): a BD vive em memória e é reescrita para `data.db` a cada escrita (fila debounced). Tabelas: `journal` (todos os trades, discriminados por `mode`), `bot_settings` (modo, capital, trailing, **chaves encriptadas**), `scan_log` (feed de decisões, últimos ~2000), `funding_carry_log`, `watchlist` (não usada), `signals` (morta).
 
-O ficheiro `data.db` é criado automaticamente na raiz do projeto quando o servidor arranca pela primeira vez.
-
-### Tabelas
-
-```sql
-CREATE TABLE watchlist (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  symbol   TEXT NOT NULL,
-  name     TEXT NOT NULL,
-  added_at TEXT NOT NULL
-);
-
-CREATE TABLE signals (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  symbol     TEXT NOT NULL,
-  type       TEXT NOT NULL,   -- STRONG_BUY, BUY, HOLD, SELL, STRONG_SELL
-  price      REAL NOT NULL,
-  confidence REAL NOT NULL,
-  reason     TEXT NOT NULL,
-  indicators TEXT NOT NULL,   -- JSON string
-  timestamp  TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'active'
-);
-```
+Backups: diários em `./backups/`, últimos 7, escrita atómica a partir da memória. Restaurar = parar servidor, substituir `data.db`, arrancar.
 
 ---
 
-## Como Adicionar uma Nova Coin
-
-As coins disponíveis para análise estão mapeadas em `server/routes.ts`:
-
-```ts
-const SYMBOL_MAP: Record<string, string> = {
-  BTC: "bitcoin",
-  ETH: "ethereum",
-  SOL: "solana",
-  // adicionar aqui...
-  NOVO: "id-no-coingecko",
-};
-```
-
-O ID da CoinGecko pode ser encontrado em [coingecko.com](https://coingecko.com) no URL de cada coin.
-
----
-
-## Personalizar o Scoring
-
-O sistema de scoring está em `server/analysis.ts` na função `generateSignal()`. Para ajustar os pesos:
-
-```ts
-// Exemplo: aumentar o peso do RSI
-if (indicators.rsi < 25) {
-  score += 2.5;  // era 1.5
-```
-
-Para adicionar um novo indicador ao score, calcula-o em `analyzeIndicators()` e adiciona a lógica de scoring em `generateSignal()`.
-
----
-
-## Build de Produção
+## Produção (VPS)
 
 ```bash
 npm run build
+APP_PASSWORD=... PORT=5000 npm start     # ou: pm2 start ecosystem.config.cjs
 ```
 
-Gera:
-```
-dist/
-├── public/          ← Frontend compilado (servido como estático)
-│   ├── index.html
-│   └── assets/
-│       ├── index-xxx.js
-│       └── index-xxx.css
-├── index.cjs        ← Backend compilado (esbuild)
-└── sql-wasm.wasm    ← SQLite WASM (necessário para o backend)
-```
-
-Para correr em produção:
-```bash
-node dist/index.cjs
-```
+- `APP_PASSWORD` é obrigatório em produção (Basic auth `admin:<password>`); é também a chave de encriptação das API keys — mudá-lo invalida as chaves guardadas.
+- Aponta um monitor de uptime a `GET /api/health` (200 = ok, 503 = atenção).
+- Copia `./backups/` para fora da máquina periodicamente.
 
 ---
 
-## Variáveis de Ambiente
+## Regras de Desenvolvimento
 
-O projeto não precisa de variáveis de ambiente — usa apenas a CoinGecko API gratuita (sem chave).
-
-Se no futuro quiseres adicionar uma API key (para remover rate limits):
-
-```bash
-# .env
-COINGECKO_API_KEY=tua_chave_aqui
-```
-
-E no código:
-```ts
-const headers = process.env.COINGECKO_API_KEY
-  ? { 'x-cg-demo-api-key': process.env.COINGECKO_API_KEY }
-  : {};
-```
+- **Paper e live nunca podem divergir** — qualquer alteração a gates/saídas aplica-se aos dois engines (helpers puros em `portfolio-guards.ts`, `trade-exits.ts`, `trailing-stop.ts` existem para isso).
+- **Estratégias e universos estão CONGELADOS** — mudanças exigem hipótese prévia + A/B com `script/validate-pipeline.ts` + 90 dias de validação paper (ver README → Change policy).
+- UI: usar as primitivas de `ui-kit.tsx` e os tokens de `index.css`; grids responsivas com classe de colunas base; tabelas dentro de `overflow-x-auto`; toda a data com `SourceTag` da fonte real.

@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { getRequiredAuthPassword } from "./auth-config";
+import { startBackupLoop } from "./backup";
 
 const app = express();
 const httpServer = createServer(app);
@@ -15,6 +16,8 @@ declare module "http" {
 
 app.use(
   express.json({
+    // Journal-import files grow with trade history; default 100kb is too small.
+    limit: "5mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
@@ -80,6 +83,9 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
+
+  // Daily data.db backup (journal + encrypted keys) with 7-day rotation.
+  startBackupLoop();
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

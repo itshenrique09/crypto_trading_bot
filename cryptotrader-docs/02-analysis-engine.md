@@ -2,7 +2,14 @@
 
 **Ficheiro:** `server/analysis.ts`
 
-O coração do bot. Implementa 8 grupos de indicadores independentes, todos calculados do zero em TypeScript puro — sem bibliotecas externas de indicadores.
+> **Âmbito (atualizado Ago 2026):** este documento é uma referência das implementações
+> de indicadores em `analysis.ts`. O trading real é decidido pelas **estratégias do
+> registry** (`server/strategies/` — ver `STRATEGIES.md`), que usam partes destes
+> indicadores mas têm lógica de entrada/saída própria e validada. O sistema de
+> "confluence scoring" descrito no fim continua acessível em `GET /api/analyze/:symbol`
+> para investigação, mas **não é o que os engines negoceiam**.
+
+Implementa 8 grupos de indicadores independentes, todos calculados do zero em TypeScript puro — sem bibliotecas externas de indicadores.
 
 ---
 

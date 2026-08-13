@@ -4,11 +4,13 @@ This is an automated crypto futures trading bot. See README.md for architecture 
 
 ## Project Context
 
-- **Stack**: Node.js + Express (server), React + Vite (client), SQLite, Binance API (candles), MEXC Futures API (execution)
+- **Stack**: Node.js + Express 5 (server), React 18 + Vite (client), SQLite via sql.js (`data.db`), MEXC Futures public API (candles/tickers/funding, Binance spot fallback), Kraken Futures API (default live venue; MEXC alternative — unavailable to EEA since Jul 2026)
 - **Active strategies**: Liquidity Sweep (1H), RSI Divergence (1H), Break & Retest (4H) — frozen 2026-07-02, validated by the full-pipeline harness (Confluence Swing and SMC retired; see `server/strategies/registry.ts`)
-- **Paper engine**: running, scanning 24 coins every 3 min
-- **Live engine**: ready to activate with MEXC API keys
-- **Key files**: `server/routes.ts` (engine + API), `server/strategies/` (signal logic), `client/src/pages/` (UI)
+- **Paper engine**: running, scanning the 41-coin universe (union of strategy preferredSymbols) every 3 min; position management every 30s
+- **Live engine**: Kraken Futures by default; keys configured at runtime via Settings (AES-256 encrypted in `bot_settings`, KDF = sha256(APP_PASSWORD) — changing the password bricks stored keys)
+- **Key files**: `server/routes.ts` (engines + API, ~3600 lines), `server/strategies/` (signal logic), `client/src/pages/` (UI: live, paper, markets, symbol, activity, settings), `client/src/components/ui-kit.tsx` + `client/src/index.css` (design system), `client/src/lib/api.ts` (all data hooks)
+- **API reference**: `API.md` — includes SSE (`/api/events`), health (`/api/health`), engine config (`/api/engine/config`), journal export/import
+- **Port note**: default 5000; on this machine BUnity.API occupies localhost:5000 — dev runs with `PORT=5001`
 - **Validation policy**: any strategy/gate/universe change MUST be A/B-tested with `script/validate-pipeline.ts` (full-pipeline portfolio sim, ALL+2026 windows) — never with raw per-strategy backtests on a recent window, and never applied without a pre-stated hypothesis. `script/validate-universe.ts` is frozen (selection-bias methodology).
 
 ## Active MCPs
@@ -99,12 +101,16 @@ This is a **trading bot dashboard** — the aesthetic should feel:
 4. **Complexity matches vision**: A simple status badge needs 3 lines. A full chart component needs proper abstraction.
 5. **Production-grade**: No `TODO`, no hardcoded test data, no placeholder text in final output.
 
-### Component patterns used in this project
-- Cards: `bg-zinc-900 border border-zinc-800 rounded-xl p-4`
-- Badges: strategy-specific colors from `STRATEGY_COLORS` in `client/src/lib/types.ts`
-- Tables: `text-sm text-zinc-300` rows, `text-zinc-500` headers
-- Buttons: primary = green-600, destructive = red-600, secondary = zinc-700
-- Live data: always show loading skeleton, never empty flash
+### Design system (v2 — use these, never raw zinc/gray classes)
+- **Tokens** live in `client/src/index.css` (`--background/--card/--card-2/--border/--accent/--up/--down/--warn`) and map to Tailwind classes: `bg-card`, `border-border`, `text-up`, `text-down`, `text-warn`, `text-accent`, `bg-card-2`.
+- **Primitives** in `client/src/components/ui-kit.tsx`: `Page` (uniform container), `PageHeader`, `Panel` (card with header), `StatCard`, `Segmented` (the ONE segmented control), `Pnl`, `DirectionBadge`, `ModeBadge`, `SourceTag`, `EmptyState`, `Th`/`Td` (table cells). Build pages from these — do not hand-roll variants.
+- **Numbers**: always `num` class (JetBrains Mono + tabular-nums); UI text is Inter. Numeric table columns right-aligned (`<Td right>`).
+- **Mode identity**: live = `warn` (amber, "dinheiro real"), paper = `accent` (violet, "simulado"). Never mix paper and live data in one panel.
+- **Data provenance**: every data panel gets a `SourceTag` naming the real source (Kraken Futures / MEXC Futures / Binance Spot / simulação). No invented values — engine constants come from `GET /api/engine/config`.
+- **Charts**: `client/src/components/CandleChart.tsx` (lightweight-charts wrapper, `CHART_COLORS` is the single chart palette). Equity curves use recharts with the mode color.
+- **Data access**: all queries/mutations go through hooks in `client/src/lib/api.ts` (poll cadences + SSE invalidation in `client/src/lib/sse.ts`). Mutations use `useAction` — errors surface as toasts automatically.
+- **Layout**: responsive grids MUST have a base column class (`grid grid-cols-1 gap-4 xl:grid-cols-3`) — a bare `grid` lets the implicit column grow to min-content and overflow. Wrap every table in `overflow-x-auto`.
+- Live data: always show loading skeleton, never empty flash.
 
 ---
 

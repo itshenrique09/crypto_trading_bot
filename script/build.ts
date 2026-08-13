@@ -5,13 +5,10 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { execFileSync } from "child_process";
 
+// Server deps bundled INTO dist/index.cjs; everything else stays external.
 const allowlist = [
   "express",
-  "express-session",
-  "memorystore",
-  "ws",
   "zod",
-  "zod-validation-error",
   "sql.js",
 ];
 

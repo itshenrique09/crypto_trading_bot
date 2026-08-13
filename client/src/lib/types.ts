@@ -1,3 +1,5 @@
+// ── Journal ──────────────────────────────────────────────────────────
+
 export interface JournalEntry {
   id: number;
   symbol: string;
@@ -44,15 +46,80 @@ export interface PaperPrice {
   slProgress: number;
 }
 
-export interface StrategyInfo {
-  id: string;
-  name: string;
-  description: string;
-  interval: string;
-  enabled: boolean;       // legacy alias = paperEnabled
-  paperEnabled?: boolean;
-  liveEnabled?: boolean;
+// ── Engines ──────────────────────────────────────────────────────────
+
+export interface PaperStatus {
+  running: boolean;
+  lastCheck: string | null;
+  lastScan: string | null;
+  coinsScanned: number;
+  intelligence: {
+    btcRegime: string;
+    btcRegimeReason: string;
+    maxOpen: number;
+    direction: { long: boolean; short: boolean; sizeMultiplier: number; reason: string };
+    pausedStrategies: string[];
+    updatedAt: string;
+  } | null;
+  openTrades: number;
+  totalPaperTrades: number;
+  strategyCounts: Record<string, { open: number; total: number }>;
+  capital: {
+    initial: number;
+    balance: number;
+    totalPnlUsd: number;
+    riskPct: number;
+    leverage: number;
+    oneR: number;
+    todayPnlUsd: number;
+    todayR: number;
+  };
 }
+
+export interface LivePosition {
+  botSymbol: string;
+  direction: "LONG" | "SHORT";
+  size: number;
+  entryPrice: number;
+  unrealizedPnl: number;
+  markPrice?: number;
+  notionalUsd?: number;
+  unrealizedFunding?: number | null;
+  protection?: { stop?: number; takeProfit?: number };
+}
+
+export interface LiveStatus {
+  running: boolean;
+  lastCheck: string | null;
+  lastScan: string | null;
+  balance: number | null;
+  openPositions: number;
+  unmanagedPositions: number;
+  error: string | null;
+  account: {
+    equity: number;
+    available: number;
+    usedMargin?: number;
+    unrealizedPnl?: number;
+  } | null;
+  positions: LivePosition[];
+  snapshotAt: string | null;
+  /** Kill-switch state from the last liveScan (empty while engine stopped). */
+  pausedStrategies: string[];
+  hasKeys: boolean;
+  exchange: "kraken" | "mexc";
+  exchanges: { id: string; name: string; note: string }[];
+  configured: { kraken: boolean; mexc: boolean };
+  riskPct: number;
+  leverage: number;
+  openTrades: number;
+  totalLiveTrades: number;
+  closedLiveTrades: number;
+  totalPnlUsd: number;
+  todayPnlUsd: number;
+}
+
+// ── Market data ──────────────────────────────────────────────────────
 
 export interface CoinData {
   symbol: string;
@@ -69,28 +136,127 @@ export interface CoinData {
   low24h: number;
   rank: number;
   fundingRate: number | null;
+  /** Bid/ask spread as a fraction of price (MEXC futures book). */
+  spreadPct: number | null;
 }
 
+export interface OHLCV {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface CandlesResponse {
+  symbol: string;
+  interval: string;
+  /** Which venue actually served the data. */
+  source: "mexc-futures" | "binance-spot";
+  candles: OHLCV[];
+}
+
+// ── Strategies / signals ─────────────────────────────────────────────
+
+export interface StrategyInfo {
+  id: string;
+  name: string;
+  description: string;
+  interval: string;
+  preferredSymbols: string[];
+  minCandles: number;
+  cooldownHours: number | null;
+  enabled: boolean;
+  paperEnabled?: boolean;
+  liveEnabled?: boolean;
+}
+
+export interface EngineConfig {
+  riskGates: {
+    minVolumeUsdt: number;
+    maxSpreadPct: number;
+    fundingLongMax: number;
+    fundingShortMin: number;
+    minSlDistancePct: number;
+    minRiskReward: number;
+  };
+  portfolio: {
+    maxOpenPositions: number;
+    maxPerCorrelationGroup: number;
+    onePositionPerSymbol: boolean;
+    dailyDrawdownHaltR: number;
+    rollingWindowDays: number;
+    rollingDrawdownHaltR: number;
+    killSwitchMinTrades: number;
+    killSwitchMaxNetR: number;
+  };
+  exits: {
+    tp1PartialClosePct: number;
+    maxHoldHoursByInterval: Record<string, number>;
+  };
+  scan: {
+    checkEverySeconds: number;
+    scanEveryMinutes: number;
+  };
+}
+
+export interface StrategySignal {
+  id: string;
+  name: string;
+  interval: string;
+  inUniverse: boolean;
+  signal: "BUY" | "SELL" | "HOLD";
+  score: number;
+  confidence: number;
+  reason: string;
+  entry?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  takeProfit2?: number;
+}
+
+export interface SignalsResponse {
+  symbol: string;
+  currentPrice: number;
+  strategies: StrategySignal[];
+}
+
+export interface ScanLogEntry {
+  time: string;
+  symbol: string;
+  strategy: string;
+  result: "opened" | "filtered" | "no_signal";
+  reason: string;
+  signal?: string;
+  confidence?: number;
+}
+
+// ── Strategy colours (active registry + neutral legacy fallback) ─────
+
 export const STRATEGY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  "confluence-swing": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "v2-swing":         { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },  // legacy alias
-  "smc":              { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
-  "break-retest":     { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
-  "rsi-divergence":   { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
-  "liquidity-sweep":  { bg: "bg-rose-500/10", text: "text-rose-400", border: "border-rose-500/30" },
-  "bollinger-mr":     { bg: "bg-sky-500/10", text: "text-sky-400", border: "border-sky-500/30" },
+  "liquidity-sweep": { bg: "bg-violet-500/10", text: "text-violet-400", border: "border-violet-500/30" },
+  "rsi-divergence":  { bg: "bg-cyan-500/10",   text: "text-cyan-400",   border: "border-cyan-500/30" },
+  "break-retest":    { bg: "bg-amber-500/10",  text: "text-amber-400",  border: "border-amber-500/30" },
 };
 
 export function getStratColor(id: string) {
-  return STRATEGY_COLORS[id] || { bg: "bg-gray-500/10", text: "text-gray-400", border: "border-gray-500/30" };
+  return STRATEGY_COLORS[id] || { bg: "bg-zinc-500/10", text: "text-zinc-400", border: "border-zinc-500/30" };
 }
 
 const LEGACY_NAMES: Record<string, string> = {
   "v2-swing": "Confluence Swing",
+  "confluence-swing": "Confluence Swing",
+  "smc": "SMC",
+  "bollinger-mr": "Bollinger MR",
   "mean-reversion": "Mean Reversion",
   "breakout": "Breakout",
 };
 
+/** Old journal rows carry legacy strategy ids — collapse aliases before grouping/filtering. */
+export function canonicalStratId(id: string): string {
+  return id === "v2-swing" ? "confluence-swing" : id;
+}
 
 export function getStratName(id: string, strategies?: { id: string; name: string }[]): string {
   const found = strategies?.find(s => s.id === id);

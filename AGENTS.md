@@ -4,11 +4,12 @@ This is an automated crypto futures trading bot. See README.md for architecture 
 
 ## Project Context
 
-- **Stack**: Node.js + Express (server), React + Vite (client), SQLite, Binance API (candles), MEXC Futures API (execution)
+- **Stack**: Node.js + Express 5 (server), React 18 + Vite (client), SQLite via sql.js (`data.db`), MEXC Futures public API (candles/tickers/funding, Binance spot fallback), Kraken Futures API (default live venue; MEXC alternative — unavailable to EEA since Jul 2026)
 - **Active strategies**: Liquidity Sweep (1H), RSI Divergence (1H), Break & Retest (4H) — frozen 2026-07-02; validate any change with `script/validate-pipeline.ts` (full-pipeline A/B), see registry.ts for retirements
-- **Paper engine**: running, scanning 24 coins every 3 min
-- **Live engine**: ready to activate with MEXC API keys
-- **Key files**: `server/routes.ts` (engine + API), `server/strategies/` (signal logic), `client/src/pages/` (UI)
+- **Paper engine**: running, scanning the 41-coin universe (union of strategy preferredSymbols) every 3 min; position management every 30s
+- **Live engine**: Kraken Futures by default; keys configured at runtime via Settings (AES-256 encrypted in `bot_settings`, KDF = sha256(APP_PASSWORD))
+- **Key files**: `server/routes.ts` (engines + API), `server/strategies/` (signal logic), `client/src/pages/` (UI: live, paper, markets, symbol, activity, settings), `client/src/components/ui-kit.tsx` + `client/src/index.css` (design system), `client/src/lib/api.ts` (data hooks)
+- **API reference**: `API.md` — includes SSE (`/api/events`), health (`/api/health`), engine config (`/api/engine/config`), journal export/import
 
 ## Active MCPs
 
@@ -98,12 +99,15 @@ This is a **trading bot dashboard** — the aesthetic should feel:
 4. **Complexity matches vision**: A simple status badge needs 3 lines. A full chart component needs proper abstraction.
 5. **Production-grade**: No `TODO`, no hardcoded test data, no placeholder text in final output.
 
-### Component patterns used in this project
-- Cards: `bg-zinc-900 border border-zinc-800 rounded-xl p-4`
-- Badges: strategy-specific colors from `STRATEGY_COLORS` in `client/src/lib/types.ts`
-- Tables: `text-sm text-zinc-300` rows, `text-zinc-500` headers
-- Buttons: primary = green-600, destructive = red-600, secondary = zinc-700
-- Live data: always show loading skeleton, never empty flash
+### Design system (v2 — use these, never raw zinc/gray classes)
+- **Tokens** in `client/src/index.css` → Tailwind classes: `bg-card`, `bg-card-2`, `border-border`, `text-up`, `text-down`, `text-warn`, `text-accent`.
+- **Primitives** in `client/src/components/ui-kit.tsx`: `Page`, `PageHeader`, `Panel`, `StatCard`, `Segmented`, `Pnl`, `DirectionBadge`, `ModeBadge`, `SourceTag`, `EmptyState`, `Th`/`Td`. Build pages from these — do not hand-roll variants.
+- **Numbers**: `num` class (JetBrains Mono, tabular-nums); numeric table columns right-aligned.
+- **Mode identity**: live = `warn` amber ("dinheiro real"), paper = `accent` violet ("simulado"). Never mix paper and live data in one panel.
+- **Data provenance**: every panel gets a `SourceTag` naming its real source; engine constants come from `GET /api/engine/config` — never hardcode them in the UI.
+- **Data access**: hooks in `client/src/lib/api.ts` (+ SSE invalidation in `lib/sse.ts`); mutations via `useAction` (auto toast on error).
+- **Layout**: responsive grids MUST have a base column class (`grid grid-cols-1 … xl:grid-cols-3`); wrap every table in `overflow-x-auto`.
+- Live data: always show loading skeleton, never empty flash.
 
 ---
 

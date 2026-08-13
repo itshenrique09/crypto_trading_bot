@@ -30,23 +30,6 @@ export async function getDb(): Promise<Database> {
 
   // Create tables
   _db.run(`
-    CREATE TABLE IF NOT EXISTS watchlist (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      symbol TEXT NOT NULL,
-      name TEXT NOT NULL,
-      added_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS signals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      symbol TEXT NOT NULL,
-      type TEXT NOT NULL,
-      price REAL NOT NULL,
-      confidence REAL NOT NULL,
-      reason TEXT NOT NULL,
-      indicators TEXT NOT NULL,
-      timestamp TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active'
-    );
     CREATE TABLE IF NOT EXISTS journal (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       symbol TEXT NOT NULL,
@@ -80,7 +63,22 @@ export async function getDb(): Promise<Database> {
       pnl_usd REAL,
       note TEXT DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS scan_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      time TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      strategy TEXT NOT NULL,
+      result TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      signal TEXT,
+      confidence REAL
+    );
   `);
+
+  // Removed features (Aug 2026): the CoinGecko-era watchlist (UI bookmark
+  // list nothing used; verified empty before removal) and the signals table
+  // (never written by any code path).
+  _db.run("DROP TABLE IF EXISTS watchlist; DROP TABLE IF EXISTS signals;");
 
   // Migrations — safe to run multiple times (catch = column already exists)
   const migrations = [
@@ -103,9 +101,9 @@ export async function getDb(): Promise<Database> {
     "CREATE INDEX IF NOT EXISTS idx_journal_strategy     ON journal(strategy)",
     "CREATE INDEX IF NOT EXISTS idx_journal_outcome      ON journal(outcome)",
     "CREATE INDEX IF NOT EXISTS idx_journal_mode_outcome ON journal(mode, outcome)",
-    "CREATE INDEX IF NOT EXISTS idx_signals_timestamp    ON signals(timestamp DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_signals_symbol       ON signals(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_carry_log_time       ON funding_carry_log(time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_scan_log_id          ON scan_log(id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_journal_natural_key  ON journal(symbol, mode, created_at)",
   ];
   for (const sql of indices) {
     _db.run(sql);

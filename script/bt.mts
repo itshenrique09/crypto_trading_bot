@@ -24,7 +24,6 @@ import {
 } from "../server/analysis.ts";
 import { simulateManagedExit } from "../server/trade-exits.ts";
 import { isConfluenceBacktestEligible, confluenceBacktestDirection } from "../server/confluence-backtest.ts";
-import { bollingerMeanReversionStrategy } from "../server/strategies/bollinger-mean-reversion.ts";
 import { detectRegime, isStrategyAllowedInRegime, shouldRequireMacroDownForShort } from "../server/regime-detector.ts";
 import { classifyBtcRegime, directionPolicyForRegime, type BtcTrend } from "../server/btc-regime-gate.ts";
 
@@ -115,10 +114,8 @@ const STRATS: Record<string, StratCfg> = {
     id: "liquidity-sweep", interval: "1h", WINDOW: 220, FORWARD: 200, COOLDOWN: 12, tp1ClosePct: 0.6,
     sig: (w) => { const s = liquiditySweepSignal(w); if (s.type === "NONE") return null; return { dir: s.type, entry: s.entry, sl: s.stopLoss, tp1: s.takeProfit, tp2: s.takeProfit2, conf: s.confidence }; },
   },
-  bb: {
-    id: "bollinger-mr", interval: "1h", WINDOW: 250, FORWARD: 200, COOLDOWN: 8, tp1ClosePct: 0.6,
-    sig: (w) => { const s = bollingerMeanReversionStrategy.analyze(w); if (!s) return null; return { dir: s.direction, entry: s.entry, sl: s.stopLoss, tp1: s.takeProfit1, tp2: s.takeProfit2 ?? s.takeProfit1, conf: s.confidence }; },
-  },
+  // "bb" (bollinger-mr) removed Aug 2026 with the retired strategy file —
+  // recover both via git history if ever needed.
 };
 
 // ── BTC directional overlay (historical) ──

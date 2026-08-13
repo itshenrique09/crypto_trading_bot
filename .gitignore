@@ -16,3 +16,6 @@ vite.config.ts.*
 
 # Backtest harness candle cache
 script/.cache/
+
+# Daily database backups (local only)
+backups/

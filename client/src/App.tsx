@@ -1,30 +1,42 @@
-import { Switch, Route, Router } from "wouter";
+import { Switch, Route, Router, Redirect } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "./lib/queryClient";
 import { Toaster } from "@/components/ui/toaster";
-import AppLayout from "@/components/AppLayout";
-import Dashboard from "./pages/Dashboard";
-import PaperTradingPage from "./pages/PaperTradingPage";
-import ScannerPage from "./pages/ScannerPage";
-import AnalysisPage from "./pages/AnalysisPage";
-import ComparePage from "./pages/ComparePage";
+import AppShell from "@/components/AppShell";
+import LivePage from "./pages/live";
+import PaperPage from "./pages/paper";
+import MarketsPage from "./pages/markets";
+import SymbolPage from "./pages/symbol";
+import ActivityPage from "./pages/activity";
+import SettingsPage from "./pages/settings";
 import NotFound from "./pages/not-found";
+
+function LegacySymbolRedirect({ params }: { params: { symbol: string } }) {
+  return <Redirect to={`/markets/${params.symbol}`} replace />;
+}
 
 function AppRouter() {
   return (
     <Router hook={useHashLocation}>
-      <AppLayout>
+      <AppShell>
         <Switch>
-          <Route path="/" component={Dashboard} />
-          <Route path="/paper" component={PaperTradingPage} />
-          <Route path="/market" component={ScannerPage} />
-          <Route path="/market/:symbol" component={AnalysisPage} />
-          <Route path="/analyze/:symbol" component={AnalysisPage} />
-          <Route path="/compare" component={ComparePage} />
+          <Route path="/">{() => <Redirect to="/paper" replace />}</Route>
+          <Route path="/live" component={LivePage} />
+          <Route path="/paper" component={PaperPage} />
+          <Route path="/markets" component={MarketsPage} />
+          <Route path="/markets/:symbol" component={SymbolPage} />
+          <Route path="/activity" component={ActivityPage} />
+          <Route path="/settings" component={SettingsPage} />
+          {/* Legacy routes from previous UI versions */}
+          <Route path="/market">{() => <Redirect to="/markets" replace />}</Route>
+          <Route path="/market/:symbol" component={LegacySymbolRedirect} />
+          <Route path="/analyze/:symbol" component={LegacySymbolRedirect} />
+          <Route path="/journal">{() => <Redirect to="/paper" replace />}</Route>
+          <Route path="/compare">{() => <Redirect to="/paper" replace />}</Route>
           <Route component={NotFound} />
         </Switch>
-      </AppLayout>
+      </AppShell>
     </Router>
   );
 }
