@@ -418,14 +418,19 @@ export class KrakenClient {
    * engine has to guess — and when a stop or take-profit fires on the venue,
    * guessing means the journal records profit the account never earned.
    *
-   * `since` filters server-side via `lastFillTime`. Kraken returns a bounded
-   * recent window, so this is for reconciling trades that closed minutes-to-days
-   * ago, not for rebuilding history from scratch.
+   * `since` is applied HERE, not by the venue. Kraken's `lastFillTime` is not a
+   * "from" filter — it pages BACKWARDS, returning fills recorded BEFORE that
+   * time. Probing the live account made this unmistakable: no parameter gave 24
+   * fills, `lastFillTime` set a week back gave 0. Passing a start time would
+   * therefore have returned nothing, every exit would have quietly fallen back
+   * to a ticker estimate, and the fix would have looked like it was working.
+   *
+   * Kraken caps the response at its recent window, so this reconciles trades
+   * that closed minutes-to-days ago, not full history.
    */
   async getFills(since?: Date): Promise<KrakenFill[]> {
-    const data = await this.request<any>("GET", "/fills", {
-      lastFillTime: since ? since.toISOString() : undefined,
-    });
+    const data = await this.request<any>("GET", "/fills");
+    const cutoffMs = since ? since.getTime() : -Infinity;
     const list: any[] = data?.fills ?? [];
     return list
       .map(f => ({
@@ -437,7 +442,7 @@ export class KrakenClient {
         timeMs:   new Date(f.fillTime ?? 0).getTime(),
         fillType: String(f.fillType ?? ""),
       }))
-      .filter(f => f.size > 0 && f.price > 0 && Number.isFinite(f.timeMs))
+      .filter(f => f.size > 0 && f.price > 0 && Number.isFinite(f.timeMs) && f.timeMs >= cutoffMs)
       .sort((a, b) => a.timeMs - b.timeMs);
   }
 

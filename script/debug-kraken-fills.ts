@@ -82,8 +82,11 @@ async function main() {
     console.log("Fix: drop lastFillTime — the client already filters by symbol and time.");
   } else if (withRaw && !withEnc) {
     console.log("VERDICT: Kraken signs the UNENCODED query string. Fix the signature, keep the param.");
-  } else if (withEnc || noParams) {
-    console.log("VERDICT: /fills works. Compare which variants passed above.");
+  } else if (noParams && (withEnc || withRaw)) {
+    console.log("VERDICT: /fills authenticates fine either way — check the ROW COUNTS above.");
+    console.log("If the parameterless call returned fills and the others returned zero, then");
+    console.log("lastFillTime pages BACKWARDS (fills BEFORE that time), and must never be used");
+    console.log("as a 'since' filter. Filter client-side instead.");
   } else {
     console.log("VERDICT: no variant worked. The key most likely lacks the permission that");
     console.log("covers fill history — check the key's General API access on Kraken.");

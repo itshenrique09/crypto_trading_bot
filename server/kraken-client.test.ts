@@ -11,8 +11,62 @@ import {
   closeSide,
   computeAuthent,
   selectPosition,
+  KrakenClient,
   type KrakenPosition,
 } from "./kraken-client";
+
+// Valid base64 — computeAuthent decodes the secret before keying the HMAC.
+const FAKE_SECRET = Buffer.from("not-a-real-secret").toString("base64");
+
+/** Run `fn` with fetch stubbed, capturing the URLs requested. */
+async function withStubbedFetch(body: unknown, fn: (urls: string[]) => Promise<void>): Promise<void> {
+  const urls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any) => {
+    urls.push(String(url));
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) } as any;
+  }) as any;
+  try { await fn(urls); } finally { globalThis.fetch = realFetch; }
+}
+
+const FILLS_RESPONSE = {
+  result: "success",
+  fills: [
+    { fill_id: "sei",  symbol: "PF_SEIUSD", side: "buy",  size: 1853, price: 0.03968, fillTime: "2026-08-12T22:00:28.000Z", fillType: "taker" },
+    { fill_id: "fet",  symbol: "PF_FETUSD", side: "buy",  size: 242,  price: 0.13491, fillTime: "2026-08-13T03:45:50.000Z", fillType: "taker" },
+    { fill_id: "old",  symbol: "PF_ADAUSD", side: "sell", size: 10,   price: 1.0,     fillTime: "2026-07-01T00:00:00.000Z", fillType: "maker" },
+    { fill_id: "junk", symbol: "PF_XBTUSD", side: "buy",  size: 0,    price: 0,       fillTime: "2026-08-12T10:00:00.000Z", fillType: "taker" },
+  ],
+};
+
+test("getFills never sends lastFillTime — it pages BACKWARDS on Kraken", async () => {
+  // The bug this guards: lastFillTime returns fills recorded BEFORE the given
+  // time, so using it as a "since" filter returned zero rows on an account
+  // with 24 fills. Every exit would have fallen back to a ticker estimate
+  // while the feature looked like it worked.
+  await withStubbedFetch(FILLS_RESPONSE, async urls => {
+    await new KrakenClient("key", FAKE_SECRET).getFills(new Date("2026-08-01T00:00:00.000Z"));
+    assert.equal(urls.length, 1);
+    assert.ok(!urls[0].includes("lastFillTime"), `must not send lastFillTime — got ${urls[0]}`);
+    assert.ok(urls[0].endsWith("/derivatives/api/v3/fills"), urls[0]);
+  });
+});
+
+test("getFills applies `since` locally, drops empty fills, and sorts oldest first", async () => {
+  await withStubbedFetch(FILLS_RESPONSE, async () => {
+    const fills = await new KrakenClient("key", FAKE_SECRET).getFills(new Date("2026-08-01T00:00:00.000Z"));
+    assert.deepEqual(fills.map(f => f.fillId), ["sei", "fet"]);   // July fill excluded, zero-size dropped
+    assert.equal(fills[0].price, 0.03968);
+    assert.equal(fills[1].symbol, "PF_FETUSD");
+  });
+});
+
+test("getFills without `since` returns the whole recent window", async () => {
+  await withStubbedFetch(FILLS_RESPONSE, async () => {
+    const fills = await new KrakenClient("key", FAKE_SECRET).getFills();
+    assert.deepEqual(fills.map(f => f.fillId), ["old", "sei", "fet"]);
+  });
+});
 
 test("toKrakenSymbol builds PF_<BASE>USD and maps BTC to Kraken's XBT ticker", () => {
   assert.equal(toKrakenSymbol("SOL"), "PF_SOLUSD");
