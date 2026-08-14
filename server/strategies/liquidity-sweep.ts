@@ -75,7 +75,21 @@ export const liquiditySweepStrategy: Strategy = {
   //   2 passed the screen but have NO tradeable MEXC futures contract
   //   (script/check-mexc-symbols.ts): TON (none) and BONK (only 1000BONK_USDT,
   //   1000× price scale — unsafe alias). Excluded so backtest = paper = live.
-  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "LUNC", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC", "FET", "RENDER", "ONDO", "ENA", "WLD", "CRV", "GALA", "RUNE", "GRT", "IMX", "POL", "VET", "ADA"],
+  // ── LUNC removed Aug 14 2026 — venue availability, NOT performance ────────
+  //   Execution moved to Kraken (MEXC closed to PT residents). Kraken lists 40
+  //   of these 41 symbols; LUNC is the one absent. Paper kept trading it, so
+  //   the benchmark measured trades live could never take — and in the first
+  //   42 days of paper LUNC went 4 for 4 for +8.8R, NINETEEN PERCENT of all
+  //   paper profit, on a sample far too small to be anything but luck. The
+  //   number the live engine is judged against was inflated by a coin it
+  //   cannot buy.
+  //   Full-pipeline A/B (validate-pipeline.ts, report 2026-08-11), the honest
+  //   cost of removal:
+  //     ALL   PF 1.93→1.90  sumR +703.1→+676.3 (−26.8R, −3.8%)  maxDD 31.2→30.9%
+  //     2026  PF 1.91→1.87  sumR +466.1→+447.5 (−18.6R, −4.0%)
+  //   Same principle as TON/BONK above: backtest = paper = live, or the
+  //   comparison between them means nothing.
+  preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC", "FET", "RENDER", "ONDO", "ENA", "WLD", "CRV", "GALA", "RUNE", "GRT", "IMX", "POL", "VET", "ADA"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
   analyze(candles: OHLCV[]): StrategySignal | null {
