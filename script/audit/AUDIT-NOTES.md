@@ -281,6 +281,63 @@ integração real teria de decidir); MAX_HOLD do engine não tem entrada "1d" (f
 exit TP1/trail é o de produção — um TSMOM "puro" (sem TP) não é expressável sem mexer no engine, portanto
 isto testa a variante implementável.
 
+## Fase 7 — Margem como parâmetro de desenho — PRÉ-REGISTO (2026-08-14)
+
+Contexto: o fix 2a43fe2 (checkMarginCapacity) fez os motores recusar posições sem margem, mas deixou
+deliberadamente o harness sem modelo de margem — o +939R assume concorrência ilimitada. Pergunta do
+utilizador: "e se eu quiser subir o live para 1% ou 2%?" — a resposta certa é um A/B margin-aware, não
+um número fixo no paper.
+
+Modelo no fork (extensão OPCIONAL à lib; desligada = paridade intacta): notional por posição =
+riskUsd ÷ slDistPct do candidato; recusa quando openNotional + novo > equity × leverage (espelha
+checkMarginCapacity; simplificação declarada: notional cheio até ao fecho — ignora a redução do TP1
+parcial, ligeiramente conservador). Capacidade em nº de posições é invariante ao compounding (numerador
+e denominador escalam com o balance).
+
+Braços: risco% ∈ {0.5, 1, 2} × leverage ∈ {5, 7, 10} (10× = máx. Kraken retail), maxOpen 10, exit e floor
+de produção. Métrica: sumR ALL+2026 vs sem-margem (+939.0/+678.9) + nº de recusas por margem.
+Hipóteses: 0.5% ≈ sem perda a qualquer lev; 1% perde pouco a 7-10×; 2% perde muito a 5-7× (capacidade
+3.7-5.1 posições < maxOpen 10). Decisão final = utilizador escolhe o triplo (risco, lev, maxOpen); regra
+operacional derivada: **paper espelha SEMPRE o triplo pretendido para o live**.
+
+### Aplicado pós-Fase 7 (2026-08-14, autorizado: "faz da melhor maneira / paper realista")
+
+1. **Custos reais Kraken em todo o lado**: taker 0.02%→0.05% em `TRADE_COSTS` (bookkeeping dos dois engines)
+   E em `trade-exits.ts` (simulador de backtest) — mantém o invariante backtest=paper=live. Testes 164/164 ✓.
+2. **Relatório oficial re-gerado com os custos reais** (baseline committed = verdade do código):
+   - ENGINE (floor 60, com RSI): ALL T=1479 +766.6R exp +0.52 | 2026 T=974 +544.3R exp +0.56
+   - **TRIAGE sem RSI = ESTADO SHIPPED: ALL T=1551 +845.7R exp +0.55 | 2026 T=1101 +649.9R exp +0.59**
+   - Custo dos fees reais vs 0.02%: ≈ −0.05R/trade a floor 60 (−115R ALL) — maior que os −0.03 medidos
+     a floor 68 (P1.4), coerente: stops mais apertados em mais trades.
+   - A pausa da RSI vale AINDA MAIS com fees reais: +79R ALL / +106R 2026.
+   - **ALVO DA JANELA DE 90 DIAS (paper realista): exp 2026 ≈ +0.59R/trade, ~34 trades/semana.**
+3. **Gauge de margem**: /api/paper/status expõe openNotionalUsd/capacityUsd; Definições mostram "Margem
+   agora: X% usada" + hint de capacidade EM DIRETO nos sliders (paper e live): capacidade ≈ lev × 1.47% ÷
+   risco%, com aviso âmbar quando < maxOpen 10.
+4. **Config recomendada** (utilizador aplica na instância real): paper = triplo pretendido do live =
+   **1% / 10×** (custo de margem −1.2R ≈ zero); live fica 0.5%/7× até a janela confirmar; 2%/trade fora
+   do menu na Kraken retail (−262R mesmo a 10×).
+
+### Resultados Fase 7 (2026-08-14; paridade s/margem: T=1614/+939.0 ✓)
+
+| risco | lev | sumR ALL (Δ) | sumR 2026 (Δ) | recusas |
+|---|---|---|---|---|
+| 0.5% | 5× | +939.0 (−0.1) | +678.9 (−0.1) | 19 |
+| 0.5% | 7-10× | +940.9 (+1.9) | +680.8 (+1.9) | 0 |
+| 1% | 5× | +660.7 (**−278.4**) | +414.9 (−264.0) | 566 |
+| 1% | 7× | +886.9 (−52.1) | +628.0 (−50.9) | 240 |
+| **1%** | **10×** | **+937.8 (−1.2)** | **+677.7 (−1.2)** | **18** |
+| 2% | 5× | +501.4 (**−437.6**) | +315.2 (−363.7) | 2011 |
+| 2% | 7× | +656.4 (−282.6) | +400.2 (−278.8) | 1100 |
+| 2% | 10× | +676.6 (**−262.4**) | +430.9 (−248.0) | 526 |
+
+**Conclusões:** (a) 0.5% não perde nada a qualquer lev; (b) **1% é viável com 10× (custo −1.2R ≈ zero)**,
+proibitivo a 5×; (c) **2% não tem config viável na Kraken retail** — mesmo a 10× deixa −262R ALL (−28%)
+na mesa (10 posições a 2% exigiriam ~14×). Config atual do paper (2%/5×) é o pior quadrante da tabela.
+Regra operacional: paper espelha o TRIPLO PRETENDIDO do live. Caminho de escala validado:
+live 0.5%/7× hoje → (1%, 10×) quando a janela de 90d confirmar; 2%/trade fica fora do menu — a escala
+acima disso vem de capital/compounding, não de risco por trade.
+
 ### Resultados Fase 6 (2026-08-14; log: phase6-run.log) — **REJEITADO pelos critérios pré-registados**
 
 | Critério | Resultado | Passa? |

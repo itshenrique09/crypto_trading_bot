@@ -489,6 +489,15 @@ export interface SimOutput {
   blocks: Record<string, number>;
 }
 
+export interface SimOptions {
+  /** When set, mirror the engines' checkMarginCapacity: refuse an entry when
+   *  openNotional + newNotional > balance × leverage. Notional = riskUsd ÷
+   *  slDistPct. Simplification (declared): full notional is held until close —
+   *  the TP1 partial reduction is ignored, which is slightly conservative.
+   *  Undefined = no margin model (parity with the official harness). */
+  marginLeverage?: number;
+}
+
 export function simulateEngineCurrent(
   candidates: AuditCandidate[],
   exits: ResolvedExitFull[],
@@ -496,6 +505,7 @@ export function simulateEngineCurrent(
   strategies: Strategy[],
   startCapital: number,
   baseRiskPct: number,
+  simOpts: SimOptions = {},
 ): SimOutput {
   const cands = [...candidates].sort((a, b) => a.tsSec - b.tsSec || a.symbol.localeCompare(b.symbol));
   const cooldownH = new Map(strategies.map(s => [s.id, s.cooldownHours ?? 0]));
@@ -503,7 +513,8 @@ export function simulateEngineCurrent(
   let balance = startCapital;
   let peakBalance = startCapital;
   let maxDD = 0;
-  interface OpenPos { strategy: string; group?: string; exitTsSec: number; trade: AuditTrade }
+  let openNotionalUsd = 0;
+  interface OpenPos { strategy: string; group?: string; exitTsSec: number; notionalUsd: number; trade: AuditTrade }
   const openBySymbol = new Map<string, OpenPos[]>();
   const totalOpenCount = () => { let n = 0; for (const v of openBySymbol.values()) n += v.length; return n; };
   const lastClosedAt = new Map<string, number>();
@@ -543,6 +554,7 @@ export function simulateEngineCurrent(
       else openBySymbol.delete(sym);
       for (const pos of due) {
         balance += pos.trade.pnlUsd;
+        openNotionalUsd = Math.max(0, openNotionalUsd - pos.notionalUsd);
         peakBalance = Math.max(peakBalance, balance);
         maxDD = Math.max(maxDD, peakBalance > 0 ? (peakBalance - balance) / peakBalance : 0);
         lastClosedAt.set(`${sym}:${pos.strategy}`, pos.exitTsSec * 1000);
@@ -614,6 +626,13 @@ export function simulateEngineCurrent(
     const riskUsd = balance * kellyPct / 100;
     if (riskUsd <= 0) { block("zeroRisk"); continue; }
 
+    // margin capacity (mirror of routes.ts checkMarginCapacity, optional)
+    const notionalUsd = c.slDistPct > 0 ? riskUsd / c.slDistPct : 0;
+    if (simOpts.marginLeverage != null) {
+      const capacity = Math.max(0, balance) * Math.max(1, simOpts.marginLeverage);
+      if (openNotionalUsd + notionalUsd > capacity) { block("margin"); continue; }
+    }
+
     const exit = exits[c.idx];
     const trade: AuditTrade = {
       symbol: c.symbol, strategy: c.stratId, dir: c.dir, interval: c.interval,
@@ -626,8 +645,9 @@ export function simulateEngineCurrent(
       entry: c.entry, stopLoss: c.stopLoss, takeProfit1: c.takeProfit1, takeProfit2: c.takeProfit2 ?? null,
     };
     const list = openBySymbol.get(c.symbol) ?? [];
-    list.push({ strategy: c.stratId, group, exitTsSec: exit.exitTsSec, trade });
+    list.push({ strategy: c.stratId, group, exitTsSec: exit.exitTsSec, notionalUsd, trade });
     openBySymbol.set(c.symbol, list);
+    openNotionalUsd += notionalUsd;
   }
 
   closeDue(Number.MAX_SAFE_INTEGER);
