@@ -2,6 +2,8 @@ import type { Strategy, StrategySignal } from "./types";
 import { liquiditySweepSignal, type OHLCV } from "../analysis";
 
 // ═══ PARAMETER FREEZE — 2026-07-02 (exits re-validated 2026-07-07) ═══════
+// Amended 2026-08-14: confidence floor 68→60 via pre-registered full-pipeline
+// A/B (Aug 2026 audit) — see the note above the floor check in analyze().
 // Universe and parameters below are FROZEN as validated by the full-pipeline
 // portfolio harness (script/validate-pipeline.ts, shipped config: 41-coin
 // MEXC-verified universe, group cap 3, r_multiple 2R trailing:
@@ -97,8 +99,15 @@ export const liquiditySweepStrategy: Strategy = {
 
     if (sig.type === "NONE") return null;
 
-    // Minimum 68% confidence — requires either EQL/EQH pool or strong wick + volume
-    if (sig.confidence < 68) return null;
+    // Minimum 60% confidence — lowered from 68 on 2026-08-14 via the audit's
+    // pre-registered official A/B (script/audit/AUDIT-NOTES.md + report copy in
+    // script/audit/validate-pipeline-report-LS-floor60.md): vs the shipped
+    // config it adds ~385 trades/yr at flat-to-better expectancy — sumR +35%
+    // ALL / +47% 2026, PF 1.97/2.07 — at the cost of sim maxDD 28.4%→42.7%
+    // (risk accepted by the user; live runs 0.5% risk/trade). RAISING the floor
+    // destroys edge (68→72 cost −248R ALL): confidence is informative above 68,
+    // not below. 90-day paper confirmation window runs from 2026-08-14.
+    if (sig.confidence < 60) return null;
 
     return {
       direction: sig.type,

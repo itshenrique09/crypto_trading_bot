@@ -680,6 +680,11 @@ async function main() {
     //    venues' public instrument APIs. Does the edge survive the missing coins?
     { label: "VENUE Kraken (−LUNC)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, excludeSymbols: ["LUNC"] },
     { label: "VENUE OKX (−LUNC,FET,RUNE,VET)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, excludeSymbols: ["LUNC", "FET", "RUNE", "VET"] },
+    // ── strategy triage (Aug 2026 audit, phase 2) ── RSI Divergence's marginal
+    // portfolio contribution measured NEGATIVE in both windows (it displaces
+    // higher-expectancy LS entries on ATOM/INJ via one-position-per-symbol).
+    // This row keeps the with/without comparison in every future report.
+    { label: "TRIAGE minus rsi-divergence", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, strategies: ["liquidity-sweep", "break-retest"] },
     { label: "BASELINE (all gates)", skip: new Set() },
     ...ALL_GATES.map(g => ({ label: `minus ${g}`, skip: new Set<GateId>([g]) })),
     { label: "LEAN (only exposure+cooldown+maxOpen6, opinion filters off)", skip: new Set<GateId>(ALL_OFF) },
