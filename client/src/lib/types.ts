@@ -167,9 +167,23 @@ export interface StrategyInfo {
   preferredSymbols: string[];
   minCandles: number;
   cooldownHours: number | null;
+  /** Manual pause switch — false blocks NEW entries on both engines. */
   enabled: boolean;
   paperEnabled?: boolean;
   liveEnabled?: boolean;
+  /** Automatic drawdown kill-switch state per engine (read-only). */
+  killSwitchPaused?: { paper: boolean; live: boolean };
+}
+
+export interface UniverseSymbol {
+  symbol: string;
+  strategies: string[];
+  /** false = operational blocklist (blocks NEW entries on both modes/engines). */
+  enabled: boolean;
+}
+
+export interface UniverseResponse {
+  symbols: UniverseSymbol[];
 }
 
 export interface EngineConfig {

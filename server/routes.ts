@@ -1780,28 +1780,96 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // ── Strategy Management ──────────────────────────────────────────
-  // Selection is automatic (regime brain) — no per-mode enabled list is read.
+  // Signal selection among ENABLED strategies stays automatic (regime brain +
+  // per-strategy kill-switch), but each strategy can be manually paused from
+  // the Settings UI (Aug 2026) — PER MODE, so paper can keep testing what live
+  // has paused. Pausing blocks NEW entries only — open positions keep being
+  // managed until they close.
 
   app.get("/api/strategies", async (_req, res) => {
-    // Every strategy is always eligible — the regime brain governs which fire.
-    const all = getAllStrategies();
-    res.json(all.map(s => ({
-      id: s.id, name: s.name, description: s.description, interval: s.interval,
-      preferredSymbols: s.preferredSymbols ?? [],
-      minCandles: s.minCandles,
-      cooldownHours: s.cooldownHours ?? null,
-      paperEnabled: true,
-      liveEnabled:  true,
-      enabled: true,
-    })));
+    try {
+      const [dPaper, dLive] = await Promise.all([
+        getDisabledStrategyIds("paper"),
+        getDisabledStrategyIds("live"),
+      ]);
+      const all = getAllStrategies();
+      res.json(all.map(s => ({
+        id: s.id, name: s.name, description: s.description, interval: s.interval,
+        preferredSymbols: s.preferredSymbols ?? [],
+        minCandles: s.minCandles,
+        cooldownHours: s.cooldownHours ?? null,
+        // `enabled` kept for backward compat = enabled somewhere.
+        enabled: !dPaper.has(s.id) || !dLive.has(s.id),
+        paperEnabled: !dPaper.has(s.id),
+        liveEnabled:  !dLive.has(s.id),
+        killSwitchPaused: {
+          paper: paperStatus.intelligence?.pausedStrategies.includes(s.id) ?? false,
+          live:  liveEngineStatus.pausedStrategies.includes(s.id),
+        },
+      })));
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  // Deprecated: per-strategy toggling is gone (selection is automatic via the
-  // regime brain). Kept as a no-op so any stale client calls don't 404.
   app.put("/api/strategies/:id/toggle", async (req, res) => {
-    const { id } = req.params;
-    const { mode } = req.body as { enabled?: boolean; mode?: "paper" | "live" };
-    res.json({ id, enabled: true, mode: mode === "live" ? "live" : "paper", note: "deprecated: strategy selection is automatic" });
+    try {
+      const { id } = req.params;
+      const { enabled, mode } = (req.body ?? {}) as { enabled?: boolean; mode?: "paper" | "live" | "both" };
+      if (typeof enabled !== "boolean") return res.status(400).json({ error: "Body must include enabled: boolean" });
+      if (mode !== undefined && !["paper", "live", "both"].includes(mode)) {
+        return res.status(400).json({ error: "mode must be 'paper', 'live' or 'both'" });
+      }
+      if (!getAllStrategies().some(s => s.id === id)) return res.status(404).json({ error: `Unknown strategy: ${id}` });
+      const modes: Array<"paper" | "live"> = mode === "paper" ? ["paper"] : mode === "live" ? ["live"] : ["paper", "live"];
+      for (const m of modes) {
+        const disabled = await getDisabledStrategyIds(m);
+        if (enabled) disabled.delete(id); else disabled.add(id);
+        await setSetting(DISABLED_STRATEGIES_KEYS[m], JSON.stringify(Array.from(disabled)));
+        broadcast(m);
+      }
+      const [dPaper, dLive] = await Promise.all([
+        getDisabledStrategyIds("paper"),
+        getDisabledStrategyIds("live"),
+      ]);
+      console.log(`[strategies] ${id} ${enabled ? "reactivated" : "paused"} on ${modes.join("+")} — paper=${!dPaper.has(id)} live=${!dLive.has(id)}`);
+      res.json({ id, mode: mode ?? "both", paperEnabled: !dPaper.has(id), liveEnabled: !dLive.has(id) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Universe (per-symbol operational blocklist) ──────────────────
+  // See getDisabledSymbols() for why this is one list across both modes.
+
+  app.get("/api/universe", async (_req, res) => {
+    try {
+      const disabled = await getDisabledSymbols();
+      const bySymbol = new Map<string, string[]>();
+      for (const s of getAllStrategies()) {
+        for (const sym of s.preferredSymbols ?? []) {
+          bySymbol.set(sym, [...(bySymbol.get(sym) ?? []), s.id]);
+        }
+      }
+      res.json({
+        symbols: Array.from(bySymbol.entries())
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([symbol, stratIds]) => ({ symbol, strategies: stratIds, enabled: !disabled.has(symbol) })),
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.put("/api/universe/:symbol/toggle", async (req, res) => {
+    try {
+      const symbol = String(req.params.symbol ?? "").toUpperCase();
+      const { enabled } = (req.body ?? {}) as { enabled?: boolean };
+      if (typeof enabled !== "boolean") return res.status(400).json({ error: "Body must include enabled: boolean" });
+      const universe = new Set(getAllStrategies().flatMap(s => s.preferredSymbols ?? []));
+      if (!universe.has(symbol)) return res.status(404).json({ error: `Symbol not in the validated universe: ${symbol}` });
+      const disabled = await getDisabledSymbols();
+      if (enabled) disabled.delete(symbol); else disabled.add(symbol);
+      await setSetting(DISABLED_SYMBOLS_KEY, JSON.stringify(Array.from(disabled)));
+      console.log(`[universe] ${symbol} ${enabled ? "reactivated" : "blocked"} (operational) — new entries ${enabled ? "allowed" : "blocked"} on paper+live`);
+      broadcast("paper");
+      broadcast("live");
+      res.json({ symbol, enabled, disabled: Array.from(disabled) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // Per-strategy stats
@@ -1974,12 +2042,58 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   }
 
-  // Strategy selection is fully automatic: every strategy is eligible on every
-  // scan, and the regime brain (per-symbol ADX regime + BTC directional overlay)
-  // plus the per-strategy drawdown kill-switch decide which actually fire. There
-  // are no manual per-strategy toggles. `mode` is kept for signature parity.
-  async function getEnabledStrategies(_mode: "paper" | "live"): Promise<Strategy[]> {
-    return getAllStrategies();
+  // Signal selection among enabled strategies is automatic (regime brain +
+  // per-strategy kill-switch), but a strategy can be manually paused from the
+  // Settings UI — PER MODE, so paper can keep testing a strategy that live has
+  // paused (paper is the evidence-gathering ground; the engines' LOGIC stays in
+  // sync, only the pause lists diverge). Pausing blocks NEW entries only — the
+  // 30s check loops keep managing whatever is already open.
+  const DISABLED_STRATEGIES_KEYS = {
+    paper: "disabled_strategies_paper",
+    live: "disabled_strategies_live",
+  } as const;
+  // Single-list key from the first iteration of this feature (2026-08-14) —
+  // read as a fallback so an existing value migrates transparently.
+  const LEGACY_DISABLED_STRATEGIES_KEY = "disabled_strategies";
+  // Audit 2026-08-14 (script/audit/AUDIT-REPORT.md, phase 2): RSI Divergence's
+  // marginal portfolio contribution measured NEGATIVE in both harness windows
+  // (−18.3R ALL / −26.8R 2026) — it displaces higher-expectancy Liquidity Sweep
+  // entries on ATOM/INJ via the one-position-per-symbol guard. Paused by
+  // default on BOTH modes; one click in Settings re-enables it per mode.
+  const DEFAULT_DISABLED_STRATEGIES = ["rsi-divergence"];
+  async function getDisabledStrategyIds(mode: "paper" | "live"): Promise<Set<string>> {
+    const raw = (await getSetting(DISABLED_STRATEGIES_KEYS[mode]))
+      ?? (await getSetting(LEGACY_DISABLED_STRATEGIES_KEY));
+    if (raw == null) return new Set(DEFAULT_DISABLED_STRATEGIES);
+    try {
+      const arr = JSON.parse(raw);
+      return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
+    } catch {
+      return new Set(DEFAULT_DISABLED_STRATEGIES);
+    }
+  }
+  async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
+    const disabled = await getDisabledStrategyIds(mode);
+    return getAllStrategies().filter(s => !disabled.has(s.id));
+  }
+
+  // Manual per-symbol blocklist — an OPERATIONAL kill switch (venue delisting,
+  // liquidity death, exchange trouble), NOT a performance tuner: per-coin
+  // samples (~27 trades/coin in the harness) are far too small to justify
+  // performance-based toggling, and the universe was validated as a SET.
+  // ONE list for BOTH modes on purpose — the LUNC lesson (Aug 2026): paper
+  // benchmarking a coin live cannot trade corrupts the paper↔live comparison.
+  // Blocks NEW entries only; open positions keep being managed until close.
+  const DISABLED_SYMBOLS_KEY = "disabled_symbols";
+  async function getDisabledSymbols(): Promise<Set<string>> {
+    const raw = await getSetting(DISABLED_SYMBOLS_KEY);
+    if (raw == null) return new Set();
+    try {
+      const arr = JSON.parse(raw);
+      return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string").map(s => s.toUpperCase()) : []);
+    } catch {
+      return new Set();
+    }
   }
 
   // Server-side paper trading loop
@@ -2226,7 +2340,8 @@ export async function registerRoutes(server: Server, app: Express) {
       for (const strat of strategies) {
         for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
       }
-      const coins = Array.from(preferredSet);
+      const disabledSymbols = await getDisabledSymbols();
+      const coins = Array.from(preferredSet).filter(s => !disabledSymbols.has(s));
       paperStatus.coinsScanned = coins.length;
 
       const journal = await getJournal(10_000);
@@ -3145,7 +3260,8 @@ export async function registerRoutes(server: Server, app: Express) {
       for (const strat of strategies) {
         for (const sym of strat.preferredSymbols ?? []) preferredSet.add(sym);
       }
-      const coins = Array.from(preferredSet);
+      const disabledSymbols = await getDisabledSymbols();
+      const coins = Array.from(preferredSet).filter(s => !disabledSymbols.has(s));
 
       const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live");

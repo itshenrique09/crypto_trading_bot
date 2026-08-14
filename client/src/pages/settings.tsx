@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff, KeyRound, Wallet, Info, Route } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Wallet, Info, Route, Power } from "lucide-react";
 import {
   useFeatureFlags, useHealth, useLiveStatus, usePaperStatus, useRuntime, useAction,
+  useStrategies, useToggleStrategy, useUniverse, useToggleSymbol,
 } from "@/lib/api";
 import { apiRequest } from "@/lib/queryClient";
 import { ago, fmtUsd } from "@/lib/format";
+import { getStratColor } from "@/lib/types";
 import { Page, PageHeader, Panel, SourceTag } from "@/components/ui-kit";
 
 const KEEP = "__keep__";
@@ -21,6 +23,34 @@ function Field({ label, children, hint }: { label: string; children: React.React
 
 const inputCls =
   "h-9 w-full rounded-md border border-border bg-card-2 px-3 text-xs outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-accent/50";
+
+function Toggle({ checked, onChange, disabled, label, tone = "accent" }: {
+  checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string;
+  /** Mode identity: paper = accent (violeta), live = warn (âmbar). */
+  tone?: "accent" | "warn";
+}) {
+  const on = tone === "warn" ? "bg-warn" : "bg-accent";
+  const knobOn = tone === "warn" ? "bg-background" : "bg-accent-foreground";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      disabled={disabled}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
+        checked ? on : "border border-border bg-card-2"
+      }`}
+    >
+      <span
+        className={`absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition-[left] ${
+          checked ? `left-[18px] ${knobOn}` : "left-[3px] bg-muted-foreground"
+        }`}
+      />
+    </button>
+  );
+}
 
 function RangeField({
   label, value, onChange, min, max, step, format,
@@ -53,6 +83,10 @@ export default function SettingsPage() {
   const { data: flags } = useFeatureFlags();
   const { data: runtime } = useRuntime();
   const { data: health } = useHealth();
+  const { data: strategies } = useStrategies();
+  const toggleStrategy = useToggleStrategy();
+  const { data: universe } = useUniverse();
+  const toggleSymbol = useToggleSymbol();
 
   // ── Live config ─────────────────────────────────────────────────
   const [exchange, setExchange] = useState("kraken");
@@ -132,7 +166,7 @@ export default function SettingsPage() {
 
   return (
     <Page>
-      <PageHeader title="Definições" subtitle="Exchange, capital, saídas e sistema" />
+      <PageHeader title="Definições" subtitle="Exchange, capital, saídas, estratégias e sistema" />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* ── Live exchange ─────────────────────────────────────── */}
@@ -285,6 +319,123 @@ export default function SettingsPage() {
           </Panel>
         </div>
       </div>
+
+      {/* ── Strategies ─────────────────────────────────────────── */}
+      <Panel
+        title={<span className="flex items-center gap-1.5"><Power className="h-3.5 w-3.5 text-accent" /> Estratégias</span>}
+        aside={<SourceTag>interruptores por modo</SourceTag>}
+      >
+        <div className="divide-y divide-border">
+          {!strategies && [0, 1, 2].map(i => (
+            <div key={i} className="flex items-center gap-3 py-3">
+              <div className="h-4 w-40 animate-pulse rounded bg-card-2" />
+              <div className="ml-auto h-5 w-9 animate-pulse rounded-full bg-card-2" />
+            </div>
+          ))}
+          {strategies?.map(s => {
+            const color = getStratColor(s.id);
+            const paperOn = s.paperEnabled ?? s.enabled;
+            const liveOn = s.liveEnabled ?? s.enabled;
+            const ksPaper = s.killSwitchPaused?.paper ?? false;
+            const ksLive = s.killSwitchPaused?.live ?? false;
+            return (
+              <div key={s.id} className="flex flex-wrap items-center gap-x-5 gap-y-1 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${color.bg} ${color.text} ${color.border}`}>
+                      {s.name}
+                    </span>
+                    <span className="num text-[10px] text-muted-foreground">{s.interval}</span>
+                    <span className="num text-[10px] text-muted-foreground">{s.preferredSymbols.length} moedas</span>
+                    {s.cooldownHours != null && (
+                      <span className="num text-[10px] text-muted-foreground">cooldown {s.cooldownHours}h</span>
+                    )}
+                    {!paperOn && !liveOn && (
+                      <span className="rounded bg-card-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">pausada</span>
+                    )}
+                    {(ksPaper || ksLive) && (
+                      <span className="rounded bg-down/10 px-1.5 py-0.5 text-[10px] text-down">
+                        kill-switch{ksPaper && ksLive ? "" : ksPaper ? " (paper)" : " (live)"}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 truncate text-[10px] text-muted-foreground/70">{s.description}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] ${paperOn ? "text-accent" : "text-muted-foreground"}`}>Paper</span>
+                  <Toggle
+                    tone="accent"
+                    checked={paperOn}
+                    disabled={toggleStrategy.isPending}
+                    label={`${paperOn ? "Pausar" : "Ligar"} ${s.name} no paper`}
+                    onChange={enabled => toggleStrategy.mutate({ id: s.id, enabled, mode: "paper" })}
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] ${liveOn ? "text-warn" : "text-muted-foreground"}`}>Live</span>
+                  <Toggle
+                    tone="warn"
+                    checked={liveOn}
+                    disabled={toggleStrategy.isPending}
+                    label={`${liveOn ? "Pausar" : "Ligar"} ${s.name} no live`}
+                    onChange={enabled => toggleStrategy.mutate({ id: s.id, enabled, mode: "live" })}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="mt-2 border-t border-border pt-2 text-[10px] leading-relaxed text-muted-foreground/70">
+          Interruptores independentes por modo: podes testar uma estratégia no <span className="text-accent">paper</span> mantendo-a
+          pausada no <span className="text-warn">live</span> (dinheiro real). Pausar bloqueia apenas{" "}
+          <span className="text-foreground">novas entradas</span> — posições abertas continuam a ser geridas (TP1, trailing,
+          stops) até fecharem. A RSI Divergence começa pausada nos dois modos por decisão da auditoria de Ago 2026
+          (contribuição marginal negativa no portfólio: −18R ALL / −27R 2026 — canibaliza entradas do Liquidity Sweep em
+          ATOM/INJ); se quiseres continuar a acumular evidência, liga-a só no paper. O kill-switch automático (−3R/7d)
+          é independente destes interruptores.
+        </p>
+      </Panel>
+
+      {/* ── Universe blocklist ─────────────────────────────────── */}
+      <Panel
+        title={<span className="flex items-center gap-1.5"><Power className="h-3.5 w-3.5 text-down" /> Universo — kill operacional por moeda</span>}
+        aside={universe && (
+          <SourceTag>
+            {universe.symbols.filter(s => s.enabled).length}/{universe.symbols.length} ativas
+          </SourceTag>
+        )}
+      >
+        {!universe && <div className="h-16 animate-pulse rounded bg-card-2" />}
+        {universe && (
+          <div className="flex flex-wrap gap-1.5">
+            {universe.symbols.map(s => (
+              <button
+                key={s.symbol}
+                type="button"
+                onClick={() => toggleSymbol.mutate({ symbol: s.symbol, enabled: !s.enabled })}
+                disabled={toggleSymbol.isPending}
+                title={`${s.symbol} — ${s.strategies.join(", ")} — ${s.enabled ? "clica para bloquear novas entradas" : "bloqueada; clica para reativar"}`}
+                className={`num rounded border px-2 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                  s.enabled
+                    ? "border-border bg-card-2 text-foreground hover:border-down/50"
+                    : "border-down/40 bg-down/10 text-down line-through"
+                }`}
+              >
+                {s.symbol}
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="mt-3 border-t border-border pt-2 text-[10px] leading-relaxed text-muted-foreground/70">
+          Interruptor <span className="text-foreground">operacional</span> — para delistings, morte de liquidez ou
+          problemas na exchange. Bloqueia novas entradas nos <span className="text-foreground">dois modos</span> de
+          propósito (lição LUNC: o paper medir uma moeda que o live não pode negociar corrompe a comparação).
+          Posições abertas continuam geridas até fechar. <span className="text-down">Não uses isto para tuning de
+          performance</span> — as amostras por moeda (~27 trades/ano) são pequenas demais para essa decisão; o
+          universo foi validado como conjunto e mudanças de composição passam pelo screen de duas metades + A/B
+          do pipeline (auditoria, Fase 5).
+        </p>
+      </Panel>
 
       {/* ── System ─────────────────────────────────────────────── */}
       <Panel title={<span className="flex items-center gap-1.5"><Info className="h-3.5 w-3.5" /> Sistema</span>}>

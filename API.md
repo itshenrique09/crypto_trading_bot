@@ -96,10 +96,18 @@ The **real constants the engines run with** — same identifiers the scan/check 
 ```
 
 ### `GET /api/strategies`
-Active registry: `[{ id, name, description, interval, preferredSymbols: string[], minCandles, cooldownHours, enabled: true, paperEnabled: true, liveEnabled: true }]`. The enabled flags are always `true` — selection is automatic.
+Active registry: `[{ id, name, description, interval, preferredSymbols: string[], minCandles, cooldownHours, enabled, paperEnabled, liveEnabled, killSwitchPaused: { paper, live } }]`.
+`paperEnabled`/`liveEnabled` are the **manual pause switches per mode** (Settings UI; persisted in `bot_settings.disabled_strategies_paper` / `disabled_strategies_live`, with the legacy single-list `disabled_strategies` read as fallback) — paper can keep testing a strategy that live has paused. `enabled` = enabled on at least one mode (backward compat). `killSwitchPaused` is the automatic −3R/7d drawdown kill-switch state per engine (read-only, self-healing). Signal selection among enabled strategies stays automatic.
+Default: `rsi-divergence` starts paused on both modes (Aug 2026 audit — negative marginal portfolio contribution in both harness windows).
 
-### `PUT /api/strategies/:id/toggle` *(deprecated no-op)*
-Kept so stale clients don't 404.
+### `PUT /api/strategies/:id/toggle`
+Body `{ enabled: boolean, mode?: "paper" | "live" | "both" }` (default `both`). Pausing blocks **new entries only** — open positions keep being managed until they close. Returns `{ id, mode, paperEnabled, liveEnabled }` and pushes the affected mode's SSE event(s).
+
+### `GET /api/universe`
+`{ symbols: [{ symbol, strategies: string[], enabled }] }` — the validated 40-coin universe with the **operational per-symbol blocklist** state. One list for BOTH modes on purpose (the LUNC lesson: paper benchmarking a coin live cannot trade corrupts the comparison). For delistings/liquidity emergencies — not a performance tuner (per-coin samples are too small; composition changes go through the two-halves screen + pipeline A/B).
+
+### `PUT /api/universe/:symbol/toggle`
+Body `{ enabled: boolean }`. Symbol must belong to the validated universe. Blocks **new entries only**, both engines. Returns `{ symbol, enabled, disabled: string[] }`.
 
 ---
 

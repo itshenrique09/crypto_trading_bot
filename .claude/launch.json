@@ -4,8 +4,8 @@
     {
       "name": "trading-bot",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["cross-env", "NODE_ENV=development", "tsx", "server/index.ts"],
-      "port": 5000
+      "runtimeArgs": ["cross-env", "NODE_ENV=development", "PORT=5001", "tsx", "server/index.ts"],
+      "port": 5001
     }
   ]
 }

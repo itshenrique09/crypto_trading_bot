@@ -6,7 +6,9 @@ This is an automated crypto futures trading bot. See README.md for architecture 
 
 - **Stack**: Node.js + Express 5 (server), React 18 + Vite (client), SQLite via sql.js (`data.db`), MEXC Futures public API (candles/tickers/funding, Binance spot fallback), Kraken Futures API (default live venue; MEXC alternative — unavailable to EEA since Jul 2026)
 - **Active strategies**: Liquidity Sweep (1H), RSI Divergence (1H), Break & Retest (4H) — frozen 2026-07-02, validated by the full-pipeline harness (Confluence Swing and SMC retired; see `server/strategies/registry.ts`)
-- **Paper engine**: running, scanning the 41-coin universe (union of strategy preferredSymbols) every 3 min; position management every 30s
+- **Paper engine**: running, scanning the 40-coin universe (union of strategy preferredSymbols; LUNC dropped Aug 2026) every 3 min; position management every 30s
+- **Strategy pause switches**: per-strategy AND per-mode manual pause in Settings (`bot_settings.disabled_strategies_paper` / `disabled_strategies_live`; blocks new entries only — open positions stay managed). Engine LOGIC stays in sync across modes; only the pause lists may diverge (paper as testing ground). `rsi-divergence` paused on both by default since the Aug 2026 audit
+- **Symbol blocklist**: operational per-coin kill in Settings (`bot_settings.disabled_symbols`, ONE list for both modes — LUNC lesson); for delistings/liquidity emergencies, never for performance tuning
 - **Live engine**: Kraken Futures by default; keys configured at runtime via Settings (AES-256 encrypted in `bot_settings`, KDF = sha256(APP_PASSWORD) — changing the password bricks stored keys)
 - **Key files**: `server/routes.ts` (engines + API, ~3600 lines), `server/strategies/` (signal logic), `client/src/pages/` (UI: live, paper, markets, symbol, activity, settings), `client/src/components/ui-kit.tsx` + `client/src/index.css` (design system), `client/src/lib/api.ts` (all data hooks)
 - **API reference**: `API.md` — includes SSE (`/api/events`), health (`/api/health`), engine config (`/api/engine/config`), journal export/import

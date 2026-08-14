@@ -7,6 +7,7 @@ import { toast } from "@/hooks/use-toast";
 import type {
   CandlesResponse, CoinData, EngineConfig, JournalEntry, LiveStatus,
   PaperPrice, PaperStatus, ScanLogEntry, SignalsResponse, StrategyInfo,
+  UniverseResponse,
 } from "./types";
 
 // ── Poll cadence (single source of truth) ────────────────────────────
@@ -98,6 +99,22 @@ export function useAction<TVars = void>(
 }
 
 const ENGINE_KEYS = ["/api/paper/status", "/api/live/status", "/api/journal"];
+
+export const useUniverse = () => useApi<UniverseResponse>("/api/universe", { staleTime: 5 * 60_000 });
+
+/** Operational per-symbol blocklist — one list for both modes; blocks new entries only. */
+export const useToggleSymbol = () => useAction(
+  ({ symbol, enabled }: { symbol: string; enabled: boolean }) =>
+    apiRequest("PUT", `/api/universe/${symbol}/toggle`, { enabled }),
+  { invalidates: ["/api/universe", "/api/paper/status", "/api/live/status"] },
+);
+
+/** Manual strategy pause/start — per mode (paper testa, live pausa); blocks new entries only. */
+export const useToggleStrategy = () => useAction(
+  ({ id, enabled, mode }: { id: string; enabled: boolean; mode: "paper" | "live" | "both" }) =>
+    apiRequest("PUT", `/api/strategies/${id}/toggle`, { enabled, mode }),
+  { invalidates: ["/api/strategies", "/api/paper/status", "/api/live/status"] },
+);
 
 export const usePaperStart = () => useAction(() => apiRequest("POST", "/api/paper/start"), { invalidates: ENGINE_KEYS, successMessage: "Paper engine iniciado" });
 export const usePaperStop = () => useAction(() => apiRequest("POST", "/api/paper/stop"), { invalidates: ENGINE_KEYS, successMessage: "Paper engine parado" });
