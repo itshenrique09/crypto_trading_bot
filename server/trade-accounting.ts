@@ -16,11 +16,17 @@ export interface TradeCostConfig {
  * these numbers, so a trade must never be booked against a different set —
  * that is how paper and live silently stop being comparable.
  *
+ * takerFeePct raised 0.02% → 0.05% on 2026-08-14 (audit P1.4): 0.05% is
+ * Kraken Futures' real taker tier, and the venue we execute on. Measured
+ * portfolio impact of the correction: −0.03R/trade (edge survives with room —
+ * see script/audit/AUDIT-NOTES.md P1.4). Keep trade-exits.ts defaults in sync.
+ *
  * NOTE: `slippagePct` is a MODEL. Measured live slippage belongs in the
- * journal via the venue's real fills (see exitPriceFromFills), not here.
+ * journal via the venue's real fills (see exitPriceFromFills), not here —
+ * script/audit/slippage-fill-vs-trigger.ts measures it once stops accumulate.
  */
 export const TRADE_COSTS: Required<TradeCostConfig> = {
-  takerFeePct: 0.0002,
+  takerFeePct: 0.0005,
   slippagePct: 0.0005,
 };
 

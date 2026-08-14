@@ -38,7 +38,10 @@ interface ExitFill {
 
 const DEFAULT_TP1_CLOSE_PCT = 0.6;
 const DEFAULT_TRAILING_PCT = 0.02;
-const DEFAULT_TAKER_FEE_PCT = 0.0002;
+// 0.05% = Kraken Futures taker (raised from MEXC's 0.02% on 2026-08-14, audit
+// P1.4) — kept value-identical to TRADE_COSTS in trade-accounting.ts so
+// backtest = paper = live bookkeeping.
+const DEFAULT_TAKER_FEE_PCT = 0.0005;
 const DEFAULT_SLIPPAGE_PCT = 0.0005;
 
 function clamp(value: number, min: number, max: number): number {

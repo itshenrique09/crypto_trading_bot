@@ -38,10 +38,11 @@ const BINANCE_BASE = "https://api.binance.com/api/v3";
 const MEXC_BASE = "https://api.mexc.com/api/v3";
 const MEXC_CONTRACT_BASE = "https://contract.mexc.com";
 const TP1_PARTIAL_CLOSE_PCT = 0.6;
-// Round-trip cost ≈ 2×(taker+slip) = 0.14%. A stop tighter than this floor lets
-// fees dominate the risk and produces garbage R math (e.g. a 0.21% stop turned a
-// −0.35% move into −1.66R in May 2026 paper data). Reject such signals outright
-// rather than widening the structural stop. 0.6% ≈ 4× round-trip → fee drag ≤ ~0.23R.
+// Round-trip cost ≈ 2×(taker+slip) = 0.20% (Kraken taker 0.05% since 2026-08-14,
+// audit P1.4). A stop tighter than this floor lets fees dominate the risk and
+// produces garbage R math (e.g. a 0.21% stop turned a −0.35% move into −1.66R in
+// May 2026 paper data). Reject such signals outright rather than widening the
+// structural stop. 0.6% = 3× round-trip → fee drag ≤ ~0.33R.
 const MIN_SL_DISTANCE_PCT = 0.006;
 
 // ── Drawdown-guard tuning (shared by paper + live engines) ──
@@ -2813,6 +2814,9 @@ export async function registerRoutes(server: Server, app: Express) {
         oneR:       Math.round(daily1R * 100) / 100,
         todayPnlUsd: Math.round(todayPnl * 100) / 100,
         todayR:     daily1R > 0 ? Math.round((todayPnl / daily1R) * 100) / 100 : 0,
+        // Margin visibility (checkMarginCapacity is the gate; this is the gauge)
+        openNotionalUsd: Math.round(openPaper.reduce((s, e) => s + (e.remaining_position_size_usd ?? e.position_size_usd ?? 0), 0) * 100) / 100,
+        capacityUsd: Math.round(Math.max(0, currentBalance) * Math.max(1, leverage) * 100) / 100,
       },
     });
   });

@@ -73,6 +73,10 @@ export interface PaperStatus {
     oneR: number;
     todayPnlUsd: number;
     todayR: number;
+    /** Notional currently held by open paper positions. */
+    openNotionalUsd?: number;
+    /** balance × leverage — what checkMarginCapacity gates against. */
+    capacityUsd?: number;
   };
 }
 

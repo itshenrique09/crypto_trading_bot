@@ -24,6 +24,25 @@ function Field({ label, children, hint }: { label: string; children: React.React
 const inputCls =
   "h-9 w-full rounded-md border border-border bg-card-2 px-3 text-xs outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-accent/50";
 
+// Mediana da distância do stop nas 1229 trades simuladas da auditoria (Ago 2026).
+// Só para o hint de capacidade — o gate real é checkMarginCapacity no engine.
+const MEDIAN_STOP_DIST = 0.0147;
+
+/** Capacidade ≈ alavancagem × stop% ÷ risco% — quantas posições cabem na margem. */
+function CapacityHint({ riskPct, leverage, maxOpen = 10 }: { riskPct: number; leverage: number; maxOpen?: number }) {
+  const cap = riskPct > 0 ? (leverage * MEDIAN_STOP_DIST) / (riskPct / 100) : Infinity;
+  const capped = Math.min(cap, 99);
+  const ok = cap >= maxOpen;
+  return (
+    <p className={`text-[10px] leading-relaxed ${ok ? "text-muted-foreground/70" : "text-warn"}`}>
+      Com estes valores a margem comporta <span className="num">{capped.toFixed(1)}</span> posições simultâneas
+      (stop mediano {(MEDIAN_STOP_DIST * 100).toFixed(1)}%) — {ok
+        ? `o máximo de ${maxOpen} é atingível.`
+        : `abaixo do máximo de ${maxOpen}: o engine vai recusar entradas por margem (visível na Atividade).`}
+    </p>
+  );
+}
+
 function Toggle({ checked, onChange, disabled, label, tone = "accent" }: {
   checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string;
   /** Mode identity: paper = accent (violeta), live = warn (âmbar). */
@@ -230,6 +249,7 @@ export default function SettingsPage() {
               <RangeField label="Risco por trade" value={liveRisk} onChange={setLiveRisk} min={0.25} max={3} step={0.25} format={v => `${v}%`} />
               <RangeField label="Alavancagem" value={liveLev} onChange={setLiveLev} min={1} max={20} step={1} format={v => `${v}×`} />
             </div>
+            <CapacityHint riskPct={liveRisk} leverage={liveLev} />
 
             <div className="flex items-center gap-2">
               <button
@@ -275,6 +295,13 @@ export default function SettingsPage() {
                 <RangeField label="Risco por trade" value={paperRisk} onChange={setPaperRisk} min={0.25} max={5} step={0.25} format={v => `${v}%`} />
                 <RangeField label="Alavancagem" value={paperLev} onChange={setPaperLev} min={1} max={20} step={1} format={v => `${v}×`} />
               </div>
+              <CapacityHint riskPct={paperRisk} leverage={paperLev} />
+              {paper?.capital?.capacityUsd != null && paper.capital.openNotionalUsd != null && paper.capital.capacityUsd > 0 && (
+                <p className="text-[10px] text-muted-foreground/70">
+                  Margem agora: <span className="num">{Math.round(100 * paper.capital.openNotionalUsd / paper.capital.capacityUsd)}%</span> usada
+                  (<span className="num">{Math.round(paper.capital.openNotionalUsd)}</span> de <span className="num">{Math.round(paper.capital.capacityUsd)}</span> USD de capacidade).
+                </p>
+              )}
               <button
                 onClick={() => savePaperCapital.mutate()}
                 disabled={savePaperCapital.isPending}
@@ -284,6 +311,8 @@ export default function SettingsPage() {
               </button>
               <p className="text-[10px] leading-relaxed text-muted-foreground/70">
                 Alterar o capital recalcula o balance simulado a partir do P&L histórico. O arranque do engine faz-se na página Paper.
+                Para o paper ser realista, espelha aqui o triplo risco/alavancagem que pretendes ter no live
+                (A/B de margem: auditoria Fase 7).
               </p>
             </div>
           </Panel>
