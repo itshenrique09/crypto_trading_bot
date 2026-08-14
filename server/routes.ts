@@ -15,7 +15,7 @@ import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval
 import { getRuntimeInfo } from "./runtime-info";
 import { getBackupStatus } from "./backup";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
-import { isRollingDrawdownBreached, strategiesToPause } from "./portfolio-guards";
+import { isRollingDrawdownBreached, strategiesToPause, checkMarginCapacity } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { startFundingCarryLoop, getFundingCarryReport } from "./funding-carry";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
@@ -2235,6 +2235,7 @@ export async function registerRoutes(server: Server, app: Express) {
       // ── CAPITAL MANAGEMENT ────────────────────────────────────────
       const initialCapital = parseFloat(await getSetting("paper_capital") || "1000");
       const baseRiskPct    = parseFloat(await getSetting("paper_risk_pct") || "2");
+      const paperLeverage  = parseInt(await getSetting("paper_leverage") || "5", 10) || 5;
 
       // Current balance = initial + sum of all closed P&L in USD
       const closedTrades  = paperTrades.filter(e => e.outcome !== "open");
@@ -2350,6 +2351,12 @@ export async function registerRoutes(server: Server, app: Express) {
         strategy: e.strategy,
         outcome: e.outcome,
       }));
+      // Notional already committed — the basis for the margin guard below.
+      // Tracked as a running total because several positions can open in one scan.
+      let openNotionalUsd = openTradesList.reduce(
+        (s, e) => s + (e.remaining_position_size_usd ?? e.position_size_usd ?? 0), 0,
+      );
+
       const totalOpen = openTradesList.length;
       if (totalOpen >= effectiveMaxOpen) {
         if (effectiveMaxOpen < 6) {
@@ -2569,6 +2576,22 @@ export async function registerRoutes(server: Server, app: Express) {
               const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
+              // ── MARGIN CAPACITY — the venue would refuse this, so paper must ──
+              // Sizing is risk ÷ stop-distance and never consults capital, so
+              // maxOpen positions can demand more margin than the account has.
+              // Without this the paper engine reports portfolios that could not
+              // exist, which is worse than reporting nothing.
+              const margin = checkMarginCapacity({
+                openNotionalUsd: openNotionalUsd,
+                newNotionalUsd: posSize,
+                equityUsd: currentBalance,
+                leverage: paperLeverage,
+              });
+              if (!margin.fits) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Margin: $${posSize.toFixed(0)} notional > $${margin.freeUsd.toFixed(0)} free (${margin.usedPct.toFixed(0)}% of ${paperLeverage}× capacity used)`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               await addJournalEntry({
                 symbol: sym,
                 direction: signal.direction,
@@ -2588,6 +2611,7 @@ export async function registerRoutes(server: Server, app: Express) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} risk=${riskPctUsed.toFixed(2)}%`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
+              openNotionalUsd += posSize;
               newOpens++;
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
@@ -3235,6 +3259,13 @@ export async function registerRoutes(server: Server, app: Express) {
       const volumeMap = marketMaps.amount24BySymbol;
       const spreadMap = marketMaps.spreadPctBySymbol;
 
+      // Notional already committed. The venue's own snapshot is ground truth
+      // here; the journal is only a fallback if the position list came back
+      // empty. Running total, since several can open in one scan.
+      let openNotionalUsd = liveEngineStatus.positions.length > 0
+        ? liveEngineStatus.positions.reduce((s, p) => s + (p.notionalUsd ?? 0), 0)
+        : openLive.reduce((s, e) => s + (e.remaining_position_size_usd ?? e.position_size_usd ?? 0), 0);
+
       // ── CORRELATION — count open live trades per group ──
       const tradableSymbols = marketMaps.availableSymbols;
       const openByGroup: Record<string, number> = {};
@@ -3388,6 +3419,21 @@ export async function registerRoutes(server: Server, app: Express) {
               const venueSym = venueSymbol(client.id, sym);
               const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
 
+              // ── MARGIN CAPACITY — check before sending, not after refusal ──
+              // Without this the venue rejects the order, the catch below logs
+              // a strategy error, and the signal is lost with no record of WHY.
+              // Checking here turns an opaque failure into a visible reason.
+              const liveMargin = checkMarginCapacity({
+                openNotionalUsd: openNotionalUsd,
+                newNotionalUsd: posSize,
+                equityUsd: currentBalance,
+                leverage,
+              });
+              if (!liveMargin.fits) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Margin: $${posSize.toFixed(0)} notional > $${liveMargin.freeUsd.toFixed(0)} free (${liveMargin.usedPct.toFixed(0)}% of ${leverage}× capacity used)`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               const order = await client.openPosition(sym, signal.direction, posSize, signal.entry, leverage);
 
               // ── Reconcile actual fill price ──────────────────────────
@@ -3452,6 +3498,7 @@ export async function registerRoutes(server: Server, app: Express) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
               openPairs.add(`${sym}:${strat.id}`);
               openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
+              openNotionalUsd += actualPosSize;
               newOpens++;
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
             } catch (err: any) {

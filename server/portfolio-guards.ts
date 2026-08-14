@@ -71,6 +71,57 @@ export function isRollingDrawdownBreached(
   return pnl < -Math.abs(opts.maxLossR) * oneR;
 }
 
+export interface MarginCapacityOpts {
+  /** Notional already open, in USD. */
+  openNotionalUsd: number;
+  /** Notional the candidate position would add. */
+  newNotionalUsd: number;
+  /** Account equity backing it all. */
+  equityUsd: number;
+  /** Leverage the venue is set to allow. */
+  leverage: number;
+}
+
+export interface MarginCapacityResult {
+  fits: boolean;
+  /** Total notional the account can carry: equity × leverage. */
+  capacityUsd: number;
+  /** Capacity not yet consumed. */
+  freeUsd: number;
+  /** Share of capacity already in use, 0–100+. */
+  usedPct: number;
+}
+
+/**
+ * Can the account actually post margin for one more position?
+ *
+ * Nothing modelled this — not the paper engine, not the live engine, not the
+ * backtest harness. Position size is risk ÷ stop-distance, which does not
+ * reference capital at all, so `maxOpen` positions can demand far more margin
+ * than exists. At 2% risk and the 0.6% minimum stop, ONE position is 3.3× the
+ * balance in notional and ten are 33×, against 7× configured. Paper opened them
+ * regardless and reported the results; live sent the order and let the venue
+ * reject it, losing the signal with nothing but an error line.
+ *
+ * Measured on 2026-08-14: paper held $8,735 of notional on $1,253 of equity —
+ * 99.6% of its 7× capacity — with only 4 of its 10 permitted positions open.
+ * Its `maxOpen 10` was never reachable, so every result it has ever reported
+ * assumed leverage the account could not provide.
+ */
+export function checkMarginCapacity(opts: MarginCapacityOpts): MarginCapacityResult {
+  const leverage = Math.max(1, opts.leverage);
+  const equity = Math.max(0, opts.equityUsd);
+  const capacityUsd = equity * leverage;
+  const openNotional = Math.max(0, opts.openNotionalUsd);
+  const freeUsd = Math.max(0, capacityUsd - openNotional);
+  return {
+    fits: opts.newNotionalUsd <= freeUsd,
+    capacityUsd,
+    freeUsd,
+    usedPct: capacityUsd > 0 ? (openNotional / capacityUsd) * 100 : 100,
+  };
+}
+
 export interface KillSwitchOpts {
   /** Rolling lookback window in milliseconds (e.g. 7 days). */
   windowMs: number;

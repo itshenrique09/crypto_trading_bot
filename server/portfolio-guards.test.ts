@@ -5,6 +5,7 @@ import {
   sumNetRSince,
   isRollingDrawdownBreached,
   strategiesToPause,
+  checkMarginCapacity,
   type ClosedTradeLite,
 } from "./portfolio-guards";
 
@@ -133,4 +134,51 @@ test("strategiesToPause auto-resumes as losses age out of the window", () => {
     risk_usd: 10,
   }));
   assert.equal(strategiesToPause(trades, ["rsi-divergence"], KILL_OPTS).size, 0);
+});
+
+// ── margin capacity ───────────────────────────────────────────────────────
+// Nothing modelled this before: position size is risk ÷ stop-distance and never
+// consults capital, so maxOpen positions could demand far more margin than the
+// account holds. Real state on 2026-08-14: paper carried $8,735 of notional on
+// $1,253 of equity at 7x — 99.6% of capacity — with 4 of its 10 permitted
+// positions open.
+
+test("margin capacity refuses a position the account cannot post margin for", () => {
+  const r = checkMarginCapacity({
+    openNotionalUsd: 8_735, newNotionalUsd: 2_900, equityUsd: 1_253.2, leverage: 7,
+  });
+  assert.equal(r.fits, false);
+  assert.ok(Math.abs(r.capacityUsd - 8_772.4) < 0.1);
+  assert.ok(r.usedPct > 99 && r.usedPct < 100);
+});
+
+test("margin capacity allows what fits, to the dollar", () => {
+  const base = { openNotionalUsd: 8_735, equityUsd: 1_253.2, leverage: 7 };
+  assert.equal(checkMarginCapacity({ ...base, newNotionalUsd: 37 }).fits, true);
+  assert.equal(checkMarginCapacity({ ...base, newNotionalUsd: 38 }).fits, false);
+});
+
+test("margin capacity: live's 0.5% risk fits ten positions where paper's 2% does not", () => {
+  // The configurations differ by 4x in risk and it decides whether maxOpen is
+  // reachable at all. Typical stop distance ~0.8%, so notional = risk / 0.008.
+  const ten = (equity: number, riskPct: number) => {
+    const notional = (equity * riskPct / 100) / 0.008;
+    return checkMarginCapacity({
+      openNotionalUsd: notional * 9, newNotionalUsd: notional, equityUsd: equity, leverage: 7,
+    });
+  };
+  assert.equal(ten(117, 0.5).fits, true);    // live: 6.25x needed, 7x available
+  assert.equal(ten(1_253, 2).fits, false);   // paper: 25x needed — impossible
+});
+
+test("margin capacity degrades safely on nonsense inputs", () => {
+  // A zero or negative equity must never read as unlimited room.
+  assert.equal(checkMarginCapacity({ openNotionalUsd: 0, newNotionalUsd: 1, equityUsd: 0, leverage: 7 }).fits, false);
+  assert.equal(checkMarginCapacity({ openNotionalUsd: 0, newNotionalUsd: 1, equityUsd: -50, leverage: 7 }).fits, false);
+  // leverage below 1x is treated as 1x rather than shrinking capacity to zero
+  assert.equal(checkMarginCapacity({ openNotionalUsd: 0, newNotionalUsd: 100, equityUsd: 100, leverage: 0 }).fits, true);
+  // already over capacity: free is clamped at zero, never negative
+  const over = checkMarginCapacity({ openNotionalUsd: 20_000, newNotionalUsd: 1, equityUsd: 1_000, leverage: 7 });
+  assert.equal(over.freeUsd, 0);
+  assert.equal(over.fits, false);
 });
