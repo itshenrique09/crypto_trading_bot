@@ -109,7 +109,9 @@ export default function ActivityPage() {
               hint={scanLog.length === 0 ? "O feed enche a cada ciclo de scan (memória do processo — limpa ao reiniciar)." : undefined}
             />
           ) : (
-            <div className="max-h-[560px] divide-y divide-border/40 overflow-auto">
+            <div className="max-h-[calc(100vh-14rem)] min-h-[280px] divide-y divide-border/40 overflow-auto">
+              {/* Scroll dentro do feed, altura adaptada ao viewport — o 560px
+                  fixo cortava a meio de uma row e desperdiçava o resto do ecrã. */}
               {entries.map((e, i) => {
                 const style = RESULT_STYLE[e.result] ?? RESULT_STYLE.no_signal;
                 const c = getStratColor(e.strategy);

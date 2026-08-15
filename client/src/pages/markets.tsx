@@ -83,9 +83,13 @@ export default function MarketsPage() {
           ) : coins.length === 0 ? (
             <EmptyState title="Nenhuma moeda encontrada" hint={search ? `Sem resultados para "${search}"` : undefined} />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead className="sticky top-12 z-10 border-b border-border bg-card">
+            <div className="max-h-[calc(100vh-13rem)] overflow-auto">
+              {/* Scroll VERTICAL dentro da tabela (não na página): o header fica
+                  sempre visível e a página mantém-se estável. border-separate é
+                  obrigatório — com border-collapse um thead sticky perde o fundo
+                  e as rows aparecem por trás (o bug do BTC atrás do header). */}
+              <table className="w-full border-separate border-spacing-0">
+                <thead className="sticky top-0 z-10 [&_th]:border-b [&_th]:border-border [&_th]:bg-card">
                   <tr>
                     <Th className="pl-4">#</Th>
                     <Th>Moeda</Th>
@@ -115,7 +119,7 @@ export default function MarketsPage() {
                       <tr
                         key={c.symbol}
                         onClick={() => navigate(`/markets/${c.symbol}`)}
-                        className="cursor-pointer border-b border-border/50 transition-colors last:border-0 hover:bg-card-2/60"
+                        className="cursor-pointer transition-colors hover:bg-card-2/60 [&>td]:border-b [&>td]:border-border/50 last:[&>td]:border-b-0"
                       >
                         <Td className="num pl-4 text-muted-foreground">{c.rank}</Td>
                         <Td>
