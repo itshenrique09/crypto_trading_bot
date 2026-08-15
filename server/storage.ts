@@ -188,6 +188,8 @@ export async function updateJournalEntry(
     notes?: string; closed_at?: string; pnl_usd?: number; peak_price?: number;
     tp1_hit?: number; stop_loss?: number; remaining_position_size_usd?: number;
     realized_pnl_usd?: number;
+    /** Repair-only (script/fix-live-risk.ts): true risk re-booked from the fill. */
+    risk_usd?: number;
   }
 ): Promise<void> {
   const db = await getDb();
@@ -205,6 +207,7 @@ export async function updateJournalEntry(
   if (updates.peak_price !== undefined) { sets.push("peak_price = ?");  vals.push(updates.peak_price); }
   if (updates.tp1_hit !== undefined)    { sets.push("tp1_hit = ?");     vals.push(updates.tp1_hit); }
   if (updates.stop_loss !== undefined)  { sets.push("stop_loss = ?");   vals.push(updates.stop_loss); }
+  if (updates.risk_usd !== undefined)   { sets.push("risk_usd = ?");    vals.push(updates.risk_usd); }
   if (sets.length === 0) return;
   vals.push(id);
   db.run(`UPDATE journal SET ${sets.join(", ")} WHERE id = ?`, vals);

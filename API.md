@@ -150,7 +150,7 @@ Row shape (all endpoints):
 |---|---|
 | `GET /api/journal` | Latest **200** rows, newest first (no filters — filter client-side or use export) |
 | `POST /api/journal` | Create entry (Zod-validated: SL/TP must sit on the correct side of entry) |
-| `PATCH /api/journal/:id` | Update whitelisted fields (`outcome, exit_price, pnl_pct, pnl_usd, closed_at, notes, followed, stop_loss, tp1_hit, peak_price, remaining_position_size_usd, realized_pnl_usd`) |
+| `PATCH /api/journal/:id` | Update whitelisted fields (`outcome, exit_price, pnl_pct, pnl_usd, closed_at, notes, followed, stop_loss, tp1_hit, peak_price, remaining_position_size_usd, realized_pnl_usd, risk_usd`) — `risk_usd` added Aug 2026 for the fill-risk repair (`script/fix-live-risk.ts`) |
 | `DELETE /api/journal/:id` | Delete row |
 | `POST /api/journal/from-signal` | Create a signal-mode entry from an analysis signal |
 | `GET /api/journal/stats` | Per-strategy aggregates — **paper trades and active strategies only** |

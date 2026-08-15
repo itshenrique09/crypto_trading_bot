@@ -3584,6 +3584,47 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // ── Right-size to the FILL ────────────────────────────────
+              // Sizing used the SIGNAL's stop distance, but market orders fill
+              // wherever the book is (measured entry drift up to ±167bps) while
+              // the stop stays at the signal's structural level — so the true €
+              // at risk moves with the fill. Audit 2026-08-15: a −118bps fill
+              // doubled the real risk and booked a −1R stop-out as −2.39R
+              // (RENDER). Trim the excess immediately so every trade risks what
+              // the risk% setting says; favourable drift (smaller real risk) is
+              // left alone. Runs BEFORE setProtection so the venue stop covers
+              // the trimmed size.
+              const slipBps = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
+              const fillStopDistPct = actualEntry > 0 ? Math.abs(actualEntry - signal.stopLoss) / actualEntry : slDistPct;
+              let realRiskUsd = actualVol * actualEntry * fillStopDistPct;
+              let resizeNote = "";
+              if (realRiskUsd > riskUsd * 1.10 && fillStopDistPct > 0) {
+                const trimFraction = 1 - riskUsd / realRiskUsd;
+                try {
+                  const pos = (await client.getPositions()).find(p =>
+                    p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
+                  const trimmed = pos ? await client.closePartial(pos, trimFraction) : null;
+                  if (trimmed && pos && trimmed.size >= pos.size) {
+                    // Venue lot rounding closed the whole (tiny) position —
+                    // book nothing: the round-trip cost is cents and a ghost
+                    // row would poison the R stats.
+                    logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Entry drift ${slipBps}bps: right-sizing would close the entire position (${pos.size} contracts) — entry aborted`, signal: signal.direction, confidence: signal.confidence });
+                    continue;
+                  }
+                  if (trimmed && trimmed.size > 0) {
+                    actualVol = Math.max(0, actualVol - trimmed.size);
+                    realRiskUsd = actualVol * actualEntry * fillStopDistPct;
+                    resizeNote = ` | right-sized −${(trimFraction * 100).toFixed(0)}% at fill (drift ${slipBps}bps widened the stop distance)`;
+                  }
+                } catch (trimErr: any) {
+                  console.error(`[live-scan] right-size failed for ${sym}: ${trimErr?.message ?? trimErr} — keeping full size, booking the real risk`);
+                }
+              }
+              // R math must divide by what is truly at risk, not the plan —
+              // booking the pre-order riskUsd made R lie in both directions
+              // (losses read −1.3R…−2.4R, winners were inflated the same way).
+              const bookedRiskUsd = realRiskUsd > 0 ? realRiskUsd : riskUsd;
+
               // Attach protective SL/TP. MEXC could carry these on the entry
               // order; Kraken needs separate reduce-only orders, so both go
               // through the adapter once the fill is confirmed.
@@ -3597,7 +3638,6 @@ export async function registerRoutes(server: Server, app: Express) {
 
               // Recompute position_size_usd at actual fill price
               const actualPosSize = actualVol > 0 ? actualVol * actualEntry : posSize;
-              const slipBps = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
 
               await addJournalEntry({
                 symbol:            sym,
@@ -3611,8 +3651,8 @@ export async function registerRoutes(server: Server, app: Express) {
                 strategy:          strat.id,
                 followed:          "yes",
                 position_size_usd: Math.round(actualPosSize * 100) / 100,
-                risk_usd:          Math.round(riskUsd * 100) / 100,
-                notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} size=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} | ${signal.reason}`,
+                risk_usd:          Math.round(bookedRiskUsd * 100) / 100,
+                notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} size=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% 1R=$${bookedRiskUsd.toFixed(2)} (planned $${riskUsd.toFixed(2)}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"}${resizeNote} | ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `LIVE ${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)}`, signal: signal.direction, confidence: signal.confidence });
