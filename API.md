@@ -214,8 +214,8 @@ Venue notes: Kraken Futures is the default (perpetuals `PF_<BASE>USD`, BTC→XBT
 | Method & path | Purpose |
 |---|---|
 | `GET /api/settings/mode` / `PUT` | Persisted mode `signal\|auto\|paper` (drives engine auto-start on boot; `live` is set internally by `/api/live/start` and rejected here) |
-| `GET /api/settings/feature-flags` | `{ regime_filter_enabled, short_macro_filter_enabled, btc_regime_gate_enabled (display-only, always true), trailing_mode: "r_multiple"\|"fixed_pct", trailing_r_multiple }` |
-| `PUT /api/settings/feature-flags` | Accepts **only** `trailing_mode` and `trailing_r_multiple` (0.5–5); applies to both engines |
+| `GET /api/settings/feature-flags` | `{ regime_filter_enabled, short_macro_filter_enabled, btc_regime_gate_enabled, trailing_mode, trailing_r_multiple }` — ALL display-only. Trailing frozen at `r_multiple 2R` since Aug 2026 (validated optimum; the engines ignore the old settings, so paper and live cannot silently diverge) |
+| `PUT /api/settings/feature-flags` | No-op kept so stale clients don't 404 — exits and intelligence are frozen by validation; changes go through the pipeline harness. Trailing is also reported in `GET /api/engine/config` → `exits.trailingMode/trailingRMultiple` |
 
 ---
 

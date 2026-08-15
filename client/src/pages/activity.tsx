@@ -184,6 +184,9 @@ export default function ActivityPage() {
                 <div className="flex justify-between"><span className="text-muted-foreground">Halt diário / rolling {config.portfolio.rollingWindowDays}d</span><span className="num">−{config.portfolio.dailyDrawdownHaltR}R / −{config.portfolio.rollingDrawdownHaltR}R</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Kill-switch</span><span className="num">≥{config.portfolio.killSwitchMinTrades} trades 7d, netR &lt; {config.portfolio.killSwitchMaxNetR}R</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">TP1 fecha</span><span className="num">{config.exits.tp1PartialClosePct * 100}% → SL a break-even</span></div>
+                {config.exits.trailingRMultiple != null && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Trailing do runner</span><span className="num">{config.exits.trailingMode === "fixed_pct" ? "2% fixo" : `r_multiple ${config.exits.trailingRMultiple}R`} · congelado</span></div>
+                )}
                 <div className="flex justify-between"><span className="text-muted-foreground">Max hold</span><span className="num">{Object.entries(config.exits.maxHoldHoursByInterval).map(([k, v]) => `${k}: ${v}h`).join(" · ")}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Volume / spread / R:R</span><span className="num">≥${fmtCompact(config.riskGates.minVolumeUsdt)} · ≤{(config.riskGates.maxSpreadPct * 100).toFixed(2)}% · ≥1:{config.riskGates.minRiskReward}</span></div>
               </div>

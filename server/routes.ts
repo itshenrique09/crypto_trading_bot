@@ -645,6 +645,8 @@ export async function registerRoutes(server: Server, app: Express) {
       exits: {
         tp1PartialClosePct: TP1_PARTIAL_CLOSE_PCT,
         maxHoldHoursByInterval: MAX_HOLD_HOURS_BY_INTERVAL,
+        trailingMode: "r_multiple",
+        trailingRMultiple: DEFAULT_R_MULTIPLE,
       },
       scan: {
         checkEverySeconds: 30,
@@ -1596,36 +1598,24 @@ export async function registerRoutes(server: Server, app: Express) {
 
   app.get("/api/settings/feature-flags", async (_req, res) => {
     try {
-      const [trailMode, trailR] = await Promise.all([
-        getSetting("trailing_mode"),
-        getSetting("trailing_r_multiple"),
-      ]);
       res.json({
         // Always-on intelligence — reported for UI display, not toggleable.
         regime_filter_enabled:      true,
         short_macro_filter_enabled: true,
         btc_regime_gate_enabled:    true,
-        // Default = r_multiple 2R since the Jul 2026 portfolio exit A/B (see paperCheck note).
-        trailing_mode:              trailMode === "fixed_pct" ? "fixed_pct" : "r_multiple",
-        trailing_r_multiple:        parseFloat(trailR || "2.0"),
+        // FROZEN at the validated optimum (Jul 2026 exit A/B + Aug 2026 audit
+        // grid). Reported read-only; the engines ignore the old settings.
+        trailing_mode:              "r_multiple",
+        trailing_r_multiple:        DEFAULT_R_MULTIPLE,
       });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  app.put("/api/settings/feature-flags", async (req, res) => {
-    try {
-      const body = req.body ?? {};
-      const updates: Record<string, string> = {};
-      // Intelligence flags are ignored — the brain is always on. Only trailing config is writable.
-      if (body.trailing_mode === "fixed_pct" || body.trailing_mode === "r_multiple") {
-        updates.trailing_mode = body.trailing_mode;
-      }
-      if (typeof body.trailing_r_multiple === "number" && body.trailing_r_multiple >= 0.5 && body.trailing_r_multiple <= 5) {
-        updates.trailing_r_multiple = String(body.trailing_r_multiple);
-      }
-      for (const [k, v] of Object.entries(updates)) await setSetting(k, v);
-      res.json({ ok: true, applied: Object.keys(updates) });
-    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  // Kept so stale clients don't 404 — everything here is frozen now: the
+  // intelligence is always on and the trailing config is a validated constant
+  // (changes go through the pipeline harness, not a setting).
+  app.put("/api/settings/feature-flags", async (_req, res) => {
+    res.json({ ok: true, applied: [], note: "exits and intelligence are frozen by validation — nothing is writable here" });
   });
 
   // ── Journal (Trade Log) ─────────────────────────────────────────
@@ -2137,10 +2127,15 @@ export async function registerRoutes(server: Server, app: Express) {
       // Confluence Swing) is moot — that strategy was cut. A fixed % trail is
       // too tight for wide-ATR entries and too loose for tight ones; scaling
       // the trail to each trade's own risk unit is the technically correct form.
-      // Opt back into "fixed_pct" via the trailing_mode setting if ever needed.
-      const trailingMode: TrailingMode =
-        (await getSetting("trailing_mode")) === "fixed_pct" ? "fixed_pct" : "r_multiple";
-      const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
+      // Trailing is FROZEN at the validated optimum — r_multiple 2R (Jul 2026
+      // exit A/B, re-confirmed by the Aug 2026 audit's 26-arm split×trail grid:
+      // 2.5R, 3R and fixed 2% all measured equal or worse). The old
+      // trailing_mode / trailing_r_multiple settings are ignored on purpose: a
+      // silent 3R override was sitting in the UI slider on 2026-08-15 — exits
+      // are validated constants, not knobs. Changes go through the pipeline
+      // harness, not a setting.
+      const trailingMode: TrailingMode = "r_multiple";
+      const trailingRMultiple = DEFAULT_R_MULTIPLE;
 
       for (const trade of openPaper) {
         const pair = `${trade.symbol}USDT`;
@@ -3004,9 +2999,10 @@ export async function registerRoutes(server: Server, app: Express) {
 
       // ── TRAILING STOP MODE — default r_multiple 2R (Jul 2026 pipeline A/B) ──
       // Mirrors paperCheck — see the rationale note there.
-      const trailingMode: TrailingMode =
-        (await getSetting("trailing_mode")) === "fixed_pct" ? "fixed_pct" : "r_multiple";
-      const trailingRMultiple = parseFloat((await getSetting("trailing_r_multiple")) || String(DEFAULT_R_MULTIPLE));
+      // FROZEN at r_multiple 2R — same rationale as paperCheck (validated
+      // optimum; settings ignored so paper and live cannot silently diverge).
+      const trailingMode: TrailingMode = "r_multiple";
+      const trailingRMultiple = DEFAULT_R_MULTIPLE;
 
       const journal = await getJournal(10_000);
       const liveTrades = journal.filter(e => e.mode === "live" && e.outcome === "open");

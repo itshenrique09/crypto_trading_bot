@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, KeyRound, Wallet, Info, Route, Power } from "lucide-react";
 import {
-  useFeatureFlags, useHealth, useLiveStatus, usePaperStatus, useRuntime, useAction,
+  useHealth, useLiveStatus, usePaperStatus, useRuntime, useAction,
   useStrategies, useToggleStrategy, useUniverse, useToggleSymbol,
 } from "@/lib/api";
 import { apiRequest } from "@/lib/queryClient";
@@ -99,7 +99,6 @@ function RangeField({
 export default function SettingsPage() {
   const { data: live } = useLiveStatus();
   const { data: paper } = usePaperStatus();
-  const { data: flags } = useFeatureFlags();
   const { data: runtime } = useRuntime();
   const { data: health } = useHealth();
   const { data: strategies } = useStrategies();
@@ -165,22 +164,6 @@ export default function SettingsPage() {
   const savePaperCapital = useAction(
     () => apiRequest("POST", "/api/paper/capital", { capital, riskPct: paperRisk, leverage: paperLev }),
     { invalidates: ["/api/paper/status"], successMessage: "Capital paper atualizado" },
-  );
-
-  // ── Trailing ────────────────────────────────────────────────────
-  const [trailMode, setTrailMode] = useState<"r_multiple" | "fixed_pct">("r_multiple");
-  const [trailR, setTrailR] = useState(2);
-
-  useEffect(() => {
-    if (flags) {
-      setTrailMode(flags.trailing_mode);
-      setTrailR(flags.trailing_r_multiple);
-    }
-  }, [flags?.trailing_mode, flags?.trailing_r_multiple]);
-
-  const saveTrailing = useAction(
-    () => apiRequest("PUT", "/api/settings/feature-flags", { trailing_mode: trailMode, trailing_r_multiple: trailR }),
-    { invalidates: ["/api/settings/feature-flags"], successMessage: "Trailing atualizado" },
   );
 
   return (
@@ -317,34 +300,15 @@ export default function SettingsPage() {
             </div>
           </Panel>
 
-          {/* ── Exits ────────────────────────────────────────────── */}
-          <Panel title={<span className="flex items-center gap-1.5"><Route className="h-3.5 w-3.5" /> Trailing do runner</span>}>
-            <div className="space-y-4">
-              <Field label="Modo (após TP1)">
-                <select
-                  value={trailMode}
-                  onChange={e => setTrailMode(e.target.value as typeof trailMode)}
-                  className={inputCls}
-                >
-                  <option value="r_multiple">R-multiple — trail a N× o risco original (validado no pipeline)</option>
-                  <option value="fixed_pct">Percentagem fixa — 2% do pico</option>
-                </select>
-              </Field>
-              {trailMode === "r_multiple" && (
-                <RangeField label="Distância do trail" value={trailR} onChange={setTrailR} min={0.5} max={5} step={0.5} format={v => `${v}R`} />
-              )}
-              <button
-                onClick={() => saveTrailing.mutate()}
-                disabled={saveTrailing.isPending}
-                className="rounded-md bg-accent px-4 py-2 text-xs font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50"
-              >
-                Guardar
-              </button>
-              <p className="text-[10px] leading-relaxed text-muted-foreground/70">
-                Aplica-se aos dois engines (paper e live mantêm-se em sincronia). Os restantes parâmetros do engine são
-                fixos por validação — vê-os na página Atividade.
-              </p>
-            </div>
+          {/* ── Exits (congeladas por validação — leitura na Atividade) ── */}
+          <Panel title={<span className="flex items-center gap-1.5"><Route className="h-3.5 w-3.5" /> Saídas (TP1 / trailing / SL)</span>}>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              As saídas são <span className="text-foreground">constantes validadas</span>, não botões: TP1 fecha 60% →
+              stop a break-even → trailing <span className="num">r_multiple 2R</span>. A auditoria de Ago 2026 testou
+              37 variantes (splits, trails, stops ATR, max-hold) e nenhuma bateu esta configuração — mexer aqui só por
+              instinto era a forma mais fácil de perder edge em silêncio, por isso o botão foi removido. Vê todos os
+              parâmetros na página Atividade; alterações exigem A/B no pipeline.
+            </p>
           </Panel>
         </div>
       </div>

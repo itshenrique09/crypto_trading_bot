@@ -212,6 +212,9 @@ export interface EngineConfig {
   exits: {
     tp1PartialClosePct: number;
     maxHoldHoursByInterval: Record<string, number>;
+    /** Frozen at the validated optimum — reported for display only. */
+    trailingMode?: "r_multiple" | "fixed_pct";
+    trailingRMultiple?: number;
   };
   scan: {
     checkEverySeconds: number;
