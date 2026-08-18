@@ -126,9 +126,24 @@ async function main() {
     // Re-price ONLY the portion this close actually covered. Feeding the full
     // size here while realizedPnlUsd already holds the TP1 proceeds books that
     // profit twice — which is how a trade that lost to slippage came out ahead.
-    const remainingUsd = resolved.fractionOfPosition != null
-      ? total * resolved.fractionOfPosition
-      : total;
+    //
+    // LEGACY right-sized rows (booked 2026-08-15..18, before the trim became a
+    // proper partial close): their position_size_usd is ALREADY the runner-only
+    // post-trim size, while fractionOfPosition is measured against the venue's
+    // PRE-trim entry — multiplying them under-sizes the close. For those rows
+    // the whole journal size is the runner. New rows carry "trim booked as
+    // partial close" in the notes and take the normal path.
+    // (TP1'd legacy rows are excluded: their runner share is neither `total`
+    // nor total×fraction — and their booked error is ~cents, not worth an
+    // approximate rewrite.)
+    const legacyTrimmed = /right-sized/.test(t.notes || "")
+      && !/trim booked as partial close/.test(t.notes || "")
+      && !(t.tp1_hit === 1);
+    const remainingUsd = legacyTrimmed
+      ? total
+      : resolved.fractionOfPosition != null
+        ? total * resolved.fractionOfPosition
+        : total;
 
     // A TP1 partial is left as executed: it filled at the time and its proceeds
     // are in realized_pnl_usd. Only the final exit is corrected here.

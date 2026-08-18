@@ -3594,6 +3594,16 @@ export async function registerRoutes(server: Server, app: Express) {
               const fillStopDistPct = actualEntry > 0 ? Math.abs(actualEntry - signal.stopLoss) / actualEntry : slDistPct;
               let realRiskUsd = actualVol * actualEntry * fillStopDistPct;
               let resizeNote = "";
+              // When the trim runs, the row is booked like a TP1 partial:
+              // position_size_usd keeps the PRE-trim original and the trimmed
+              // share flows through applyPartialClose into remaining/realized.
+              // Booking the post-trim size as if it were the original made the
+              // journal's remaining-fraction disagree with the venue's fill
+              // history, and exit pricing then blended the trim fill into the
+              // close (caught 2026-08-18: a −1R stop-out booked as −0.58R).
+              let preTrimPosSizeUsd: number | null = null;
+              let trimRemainingUsd: number | null = null;
+              let trimRealizedUsd = 0;
               if (realRiskUsd > riskUsd * 1.10 && fillStopDistPct > 0) {
                 const trimFraction = 1 - riskUsd / realRiskUsd;
                 try {
@@ -3608,9 +3618,24 @@ export async function registerRoutes(server: Server, app: Express) {
                     continue;
                   }
                   if (trimmed && trimmed.size > 0) {
+                    const preTrimVol = actualVol;
+                    preTrimPosSizeUsd = preTrimVol * actualEntry;
                     actualVol = Math.max(0, actualVol - trimmed.size);
                     realRiskUsd = actualVol * actualEntry * fillStopDistPct;
-                    resizeNote = ` | right-sized −${(trimFraction * 100).toFixed(0)}% at fill (drift ${slipBps}bps widened the stop distance)`;
+                    // The reduce-only market order executes seconds after the
+                    // entry fill — book it AT the entry fill (model costs from
+                    // TRADE_COSTS apply; price drift within those seconds is
+                    // noise the slippage tooling measures, not books).
+                    const trim = applyPartialClose({
+                      direction: signal.direction,
+                      entryPrice: actualEntry,
+                      positionSizeUsd: preTrimPosSizeUsd,
+                      remainingPositionSizeUsd: preTrimPosSizeUsd,
+                      realizedPnlUsd: 0,
+                    }, actualEntry, trimmed.size / preTrimVol, TRADE_COSTS);
+                    trimRemainingUsd = trim.remainingPositionSizeUsd;
+                    trimRealizedUsd = trim.realizedPnlUsd;
+                    resizeNote = ` | right-sized −${(trimFraction * 100).toFixed(0)}% at fill (drift ${slipBps}bps widened the stop distance; trim booked as partial close)`;
                   }
                 } catch (trimErr: any) {
                   console.error(`[live-scan] right-size failed for ${sym}: ${trimErr?.message ?? trimErr} — keeping full size, booking the real risk`);
@@ -3646,7 +3671,9 @@ export async function registerRoutes(server: Server, app: Express) {
                 mode:              "live",
                 strategy:          strat.id,
                 followed:          "yes",
-                position_size_usd: Math.round(actualPosSize * 100) / 100,
+                position_size_usd: Math.round((preTrimPosSizeUsd ?? actualPosSize) * 100) / 100,
+                remaining_position_size_usd: trimRemainingUsd != null ? Math.round(trimRemainingUsd * 100) / 100 : undefined,
+                realized_pnl_usd: trimRealizedUsd !== 0 ? Math.round(trimRealizedUsd * 10000) / 10000 : undefined,
                 risk_usd:          Math.round(bookedRiskUsd * 100) / 100,
                 notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} size=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% 1R=$${bookedRiskUsd.toFixed(2)} (planned $${riskUsd.toFixed(2)}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"}${resizeNote} | ${signal.reason}`,
               });
