@@ -233,6 +233,29 @@ test("exitPriceFromFills ignores other symbols and an earlier trade on the same 
   assert.equal(r.price, 0.0397);
 });
 
+test("exitPriceFromFills ignores a LATER trade's fills when closedAtMs bounds the window", () => {
+  // One-position-per-symbol means trades on a symbol never overlap — anything
+  // after this trade's close belongs to the NEXT trade. Reproduces the
+  // 2026-08-18 contamination: an old ICP short re-priced with the next ICP
+  // long's ENTRY fill (same buy side, days later, +288bps of fiction).
+  const r = exitPriceFromFills([
+    fill("ICP", "sell", 21, 2.168, T0),               // this short's entry
+    fill("ICP", "buy",  21, 2.222, T0 + 2 * HOUR),    // this short's stop-out
+    fill("ICP", "buy",  16, 2.286, T0 + 50 * HOUR),   // NEXT trade's entry (a long) — newest buy
+  ], { botSymbol: "ICP", direction: "SHORT", openedAtMs: T0, closedAtMs: T0 + 2 * HOUR + 60_000 });
+  assert.ok(r);
+  assert.equal(r.price, 2.222);
+  assert.equal(r.size, 21);
+  // Without the bound, the newest-first walk would have priced 2.286.
+  const unbounded = exitPriceFromFills([
+    fill("ICP", "sell", 21, 2.168, T0),
+    fill("ICP", "buy",  21, 2.222, T0 + 2 * HOUR),
+    fill("ICP", "buy",  16, 2.286, T0 + 50 * HOUR),
+  ], { botSymbol: "ICP", direction: "SHORT", openedAtMs: T0 });
+  assert.ok(unbounded);
+  assert.equal(unbounded.price, 2.286);
+});
+
 test("exitPriceFromFills returns null with no closing fill, so the caller falls back", () => {
   assert.equal(exitPriceFromFills([fill("SEI", "sell", 1000, 0.0401, T0)], {
     botSymbol: "SEI", direction: "SHORT", openedAtMs: T0,

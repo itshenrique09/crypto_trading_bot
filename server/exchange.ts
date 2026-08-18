@@ -176,6 +176,16 @@ export function exitPriceFromFills(
     botSymbol: string;
     direction: "LONG" | "SHORT";
     openedAtMs: number;
+    /**
+     * The trade's close timestamp, when the caller has one (a closed journal
+     * row). BOUNDS the fill window on the right: the one-position-per-symbol
+     * guard means two trades on a symbol never overlap in time, so anything
+     * after closedAt+grace belongs to a LATER trade. Without this bound a
+     * reconciliation run on 2026-08-18 priced an old ICP short's exit with the
+     * NEXT ICP trade's entry fill (+288bps of pure fiction) and an old NEAR
+     * exit with the next trade's right-size trim.
+     */
+    closedAtMs?: number;
     /** Share of the ORIGINAL position still open before this close (0–1]. */
     remainingFraction?: number;
   },
@@ -185,7 +195,10 @@ export function exitPriceFromFills(
 
   const sym = opts.botSymbol.toUpperCase();
   const from = opts.openedAtMs - FILL_LOOKBACK_GRACE_MS;
-  const mine = fills.filter(f => f.botSymbol.toUpperCase() === sym && f.timeMs >= from);
+  // The journal's closed_at is when the ENGINE noticed (up to a scan cycle
+  // after the venue fill), so the right edge gets the same grace as the left.
+  const until = opts.closedAtMs != null ? opts.closedAtMs + FILL_LOOKBACK_GRACE_MS : Infinity;
+  const mine = fills.filter(f => f.botSymbol.toUpperCase() === sym && f.timeMs >= from && f.timeMs <= until);
   if (mine.length === 0) return null;
 
   const entrySide = direction2Side(opts.direction, "open");

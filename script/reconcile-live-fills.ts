@@ -108,6 +108,9 @@ async function main() {
       botSymbol: t.symbol,
       direction,
       openedAtMs: new Date(t.created_at).getTime(),
+      // Right-bound the window at THIS trade's close — the same symbol traded
+      // again later must never lend its fills to this row (2026-08-18 lesson).
+      closedAtMs: t.closed_at ? new Date(t.closed_at).getTime() : undefined,
     });
 
     const bookedPnl = t.pnl_usd ?? 0;
