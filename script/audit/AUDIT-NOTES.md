@@ -40,6 +40,14 @@
    RSI paper=ON / live=OFF. Nota de comparabilidade: com listas divergentes, o paper deixa de ser benchmark
    1:1 do live nas estratégias afetadas — usar trades por estratégia nas comparações de execução.
 
+## Backlog de hipóteses (para A/B futuro — NÃO tocar durante a janela de 90d)
+
+- **Cooldown direction-aware** (anedota ICP 2026-08-15: live estopado num SHORT ficou em cooldown 12h e
+  perdeu o sinal LONG oposto 4h depois, que o paper apanhou por ter journal limpo — +2.46R). Hipótese: o
+  cooldown por (símbolo, estratégia) podia bloquear só re-entradas na MESMA direção. n=1 anedota ≠ evidência;
+  o harness não distingue direção no cooldown — exigiria extensão + A/B pré-registado ALL+2026. Reavaliar
+  no fim da janela, junto com o gate de drift (dados a acumular nas notes das trades live).
+
 ## Estado
 
 - **2026-08-14**: Fase 0 concluída. Fase 1 concluída (resultados abaixo) — pendente só a revisão
