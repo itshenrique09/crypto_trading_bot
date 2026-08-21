@@ -4,6 +4,7 @@ import {
   sumPnlUsdSince,
   sumNetRSince,
   isRollingDrawdownBreached,
+  rollingHaltClearsAt,
   strategiesToPause,
   checkMarginCapacity,
   type ClosedTradeLite,
@@ -134,6 +135,37 @@ test("strategiesToPause auto-resumes as losses age out of the window", () => {
     risk_usd: 10,
   }));
   assert.equal(strategiesToPause(trades, ["rsi-divergence"], KILL_OPTS).size, 0);
+});
+
+// ── rolling halt: when does it clear naturally? ───────────────────────────
+
+test("rollingHaltClearsAt is null while the halt is not active", () => {
+  const trades = [{ strategy: "ls", closed_at: new Date(NOW - DAY).toISOString(), pnl_usd: -10, risk_usd: 10, outcome: "loss" }];
+  assert.equal(rollingHaltClearsAt(trades, 10, { windowMs: 7 * DAY, maxLossR: 6, now: NOW }), null);
+});
+
+test("rollingHaltClearsAt lands right after the breaching loss ages out of the window", () => {
+  // One −70 loss (7R at oneR=10) closed 2 days ago breaches −6R; it leaves the
+  // 7-day window 5 days from now (closed_at + 7d).
+  const closedAt = NOW - 2 * DAY;
+  const trades = [{ strategy: "ls", closed_at: new Date(closedAt).toISOString(), pnl_usd: -70, risk_usd: 10, outcome: "loss" }];
+  const clears = rollingHaltClearsAt(trades, 10, { windowMs: 7 * DAY, maxLossR: 6, now: NOW });
+  assert.ok(clears != null);
+  assert.ok(Math.abs((clears as number) - (closedAt + 7 * DAY + 1000)) < 2000);
+  assert.equal(isRollingDrawdownBreached(trades, 10, { windowMs: 7 * DAY, maxLossR: 6, now: clears as number }), false);
+});
+
+test("rollingHaltClearsAt waits for ENOUGH losses to age out, not just the first", () => {
+  // Two −40 losses (4R each): dropping only the older one leaves −4R (fine),
+  // so the halt clears when the FIRST exits; but three −30s need two exits.
+  const t = (daysAgo: number, pnl: number) => ({ strategy: "ls", closed_at: new Date(NOW - daysAgo * DAY).toISOString(), pnl_usd: pnl, risk_usd: 10, outcome: "loss" });
+  const three = [t(6, -30), t(4, -30), t(2, -30)]; // −9R total
+  const clears = rollingHaltClearsAt(three, 10, { windowMs: 7 * DAY, maxLossR: 6, now: NOW });
+  // After the 6-days-ago loss exits (in 1 day): −6R = not < −6R → clears there.
+  assert.ok(Math.abs((clears as number) - (NOW - 6 * DAY + 7 * DAY + 1000)) < 2000);
+  const worse = [t(6, -40), t(4, -40), t(2, -40)]; // −12R: one exit leaves −8R, still breached
+  const clears2 = rollingHaltClearsAt(worse, 10, { windowMs: 7 * DAY, maxLossR: 6, now: NOW });
+  assert.ok(Math.abs((clears2 as number) - (NOW - 4 * DAY + 7 * DAY + 1000)) < 2000);
 });
 
 // ── margin capacity ───────────────────────────────────────────────────────

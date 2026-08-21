@@ -118,6 +118,7 @@ export default function PaperPage() {
           openCount={openCount}
           pausedStrategies={paper?.intelligence?.pausedStrategies ?? []}
           strategyNames={strategyNames}
+          guards={paper?.guards}
         />
       </div>
 

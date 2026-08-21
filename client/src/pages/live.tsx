@@ -178,6 +178,7 @@ export default function LivePage() {
               openCount={live.positions.length}
               pausedStrategies={live.pausedStrategies ?? []}
               strategyNames={strategyNames}
+              guards={live.guards}
             />
           </div>
 

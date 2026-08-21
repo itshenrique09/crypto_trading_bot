@@ -15,7 +15,7 @@ import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval
 import { getRuntimeInfo } from "./runtime-info";
 import { getBackupStatus } from "./backup";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
-import { isRollingDrawdownBreached, strategiesToPause, checkMarginCapacity } from "./portfolio-guards";
+import { isRollingDrawdownBreached, rollingHaltClearsAt, strategiesToPause, checkMarginCapacity } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { startFundingCarryLoop, getFundingCarryReport } from "./funding-carry";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
@@ -1863,6 +1863,36 @@ export async function registerRoutes(server: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Drawdown-halt manual override (one-shot resume) ────────────────
+  // See ddOverrideUntil() for semantics. Every use lands in the scan log so
+  // the decision is auditable next to the entries it allowed.
+  app.post("/api/guards/override", async (req, res) => {
+    try {
+      const { mode, guard } = (req.body ?? {}) as { mode?: string; guard?: string };
+      if (mode !== "paper" && mode !== "live") return res.status(400).json({ error: "mode must be 'paper' or 'live'" });
+      if (guard !== "daily" && guard !== "rolling") return res.status(400).json({ error: "guard must be 'daily' or 'rolling'" });
+      const untilMs = guard === "daily" ? nextDailyResetMs() : Date.now() + 24 * 3_600_000;
+      const untilIso = new Date(untilMs).toISOString();
+      await setSetting(DD_OVERRIDE_KEYS[mode][guard], untilIso);
+      logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `Halt ${guard} (${mode}) ignorado manualmente até ${untilIso} — o guard rearma-se sozinho` });
+      console.log(`[guards] ${mode}/${guard} halt manually overridden until ${untilIso}`);
+      broadcast(mode);
+      res.json({ mode, guard, overrideUntil: untilIso });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete("/api/guards/override", async (req, res) => {
+    try {
+      const { mode, guard } = (req.body ?? {}) as { mode?: string; guard?: string };
+      if (mode !== "paper" && mode !== "live") return res.status(400).json({ error: "mode must be 'paper' or 'live'" });
+      if (guard !== "daily" && guard !== "rolling") return res.status(400).json({ error: "guard must be 'daily' or 'rolling'" });
+      await setSetting(DD_OVERRIDE_KEYS[mode][guard], "");
+      logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `Halt ${guard} (${mode}): override cancelado — guard rearmado` });
+      broadcast(mode);
+      res.json({ mode, guard, overrideUntil: null });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   // Per-strategy stats
   app.get("/api/journal/stats", async (_req, res) => {
     const journal = await getJournal(10_000);
@@ -2066,6 +2096,29 @@ export async function registerRoutes(server: Server, app: Express) {
   async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
     const disabled = await getDisabledStrategyIds(mode);
     return getAllStrategies().filter(s => !disabled.has(s.id));
+  }
+
+  // ── Manual ONE-SHOT override of an active drawdown halt ─────────────
+  // The halts (−4R/day, −6R/rolling-7d) stay validated and armed; this lets
+  // the human resume entries when their judgment says the breach is variance
+  // or bookkeeping noise (both happened in Aug 2026), WITHOUT disabling the
+  // guard: daily overrides expire at the next daily reset, rolling overrides
+  // last 24h and must be re-confirmed while the breach persists. Per mode.
+  const DD_OVERRIDE_KEYS = {
+    paper: { daily: "dd_override_daily_paper", rolling: "dd_override_rolling_paper" },
+    live:  { daily: "dd_override_daily_live",  rolling: "dd_override_rolling_live" },
+  } as const;
+  async function ddOverrideUntil(mode: "paper" | "live", guard: "daily" | "rolling"): Promise<number | null> {
+    const raw = await getSetting(DD_OVERRIDE_KEYS[mode][guard]);
+    if (!raw) return null;
+    const t = Date.parse(raw);
+    return Number.isFinite(t) && t > Date.now() ? t : null;
+  }
+  /** Same day-boundary clock the halts use (server-local; UTC on the VPS). */
+  function nextDailyResetMs(): number {
+    const d = new Date();
+    d.setHours(24, 0, 0, 0);
+    return d.getTime();
   }
 
   // Manual per-symbol blocklist — an OPERATIONAL kill switch (venue delisting,
@@ -2359,7 +2412,8 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart);
       const daily1R     = currentBalance * baseRiskPct / 100;
       const dailyPnlUsd = todayTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (dailyPnlUsd < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R) return;  // Daily drawdown limit
+      if (dailyPnlUsd < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R
+          && !(await ddOverrideUntil("paper", "daily"))) return;  // Daily drawdown limit (manual override honoured)
 
       // NOTE (Jul 2026): the -8R MONTHLY guard was removed after the full-pipeline
       // harness (script/validate-pipeline.ts) showed it fired on normal variance
@@ -2368,7 +2422,8 @@ export async function registerRoutes(server: Server, app: Express) {
       // -6R remain — they bind rarely and cut genuine loss streaks.
 
       // Rolling 7-day: catches a multi-day grind that never trips the daily cap.
-      if (isRollingDrawdownBreached(closedTrades, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
+      if (isRollingDrawdownBreached(closedTrades, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })
+          && !(await ddOverrideUntil("paper", "rolling"))) {
         console.log(`[paper-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
         return;
       }
@@ -2795,11 +2850,30 @@ export async function registerRoutes(server: Server, app: Express) {
       const stTrades = paperTrades.filter(e => e.strategy === s.id);
       strategyCounts[s.id] = { open: stTrades.filter(e => e.outcome === "open").length, total: stTrades.length };
     }
+    // Drawdown-halt state for the UI — computed with the SAME numbers the scan
+    // loop enforces, plus the manual override and a natural-end estimate.
+    const dailyBreached   = todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R;
+    const rollingBreached = isRollingDrawdownBreached(closed, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
+    const rollingClears   = rollingHaltClearsAt(closed, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
+    const [ovDaily, ovRolling] = await Promise.all([ddOverrideUntil("paper", "daily"), ddOverrideUntil("paper", "rolling")]);
+
     res.json({
       ...paperStatus,
       openTrades:       openPaper.length,
       totalPaperTrades: paperTrades.length,
       strategyCounts,
+      guards: {
+        daily: {
+          halted: dailyBreached,
+          endsAt: dailyBreached ? new Date(nextDailyResetMs()).toISOString() : null,
+          overrideUntil: ovDaily ? new Date(ovDaily).toISOString() : null,
+        },
+        rolling: {
+          halted: rollingBreached,
+          endsAt: rollingClears != null ? new Date(rollingClears).toISOString() : null,
+          overrideUntil: ovRolling ? new Date(ovRolling).toISOString() : null,
+        },
+      },
       capital: {
         initial:    initialCapital,
         balance:    Math.round(currentBalance * 100) / 100,
@@ -3335,12 +3409,14 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                    .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R) return;  // Daily DD limit
+      if (todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R
+          && !(await ddOverrideUntil("live", "daily"))) return;  // Daily DD limit (manual override honoured)
 
       // Monthly -8R guard removed Jul 2026 — same rationale as paper scan.
 
       // Rolling 7-day portfolio guard — matches paper engine.
-      if (isRollingDrawdownBreached(closedLive, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })) {
+      if (isRollingDrawdownBreached(closedLive, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })
+          && !(await ddOverrideUntil("live", "rolling"))) {
         console.log(`[live-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
         return;
       }
@@ -3856,6 +3932,14 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayPnl   = closed.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
 
+      // Halt state mirrors the live scan's math; oneR needs a balance snapshot
+      // (engine stopped → no basis → guards read as not halted, like the scan).
+      const liveOneR = (liveEngineStatus.balance ?? 0) > 0 ? (liveEngineStatus.balance as number) * riskPct / 100 : 0;
+      const liveDailyBreached   = liveOneR > 0 && todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * liveOneR;
+      const liveRollingBreached = isRollingDrawdownBreached(closed, liveOneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
+      const liveRollingClears   = rollingHaltClearsAt(closed, liveOneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
+      const [ovDailyL, ovRollingL] = await Promise.all([ddOverrideUntil("live", "daily"), ddOverrideUntil("live", "rolling")]);
+
       res.json({
         ...liveEngineStatus,
         hasKeys,
@@ -3864,6 +3948,18 @@ export async function registerRoutes(server: Server, app: Express) {
         configured,
         riskPct,
         leverage,
+        guards: {
+          daily: {
+            halted: liveDailyBreached,
+            endsAt: liveDailyBreached ? new Date(nextDailyResetMs()).toISOString() : null,
+            overrideUntil: ovDailyL ? new Date(ovDailyL).toISOString() : null,
+          },
+          rolling: {
+            halted: liveRollingBreached,
+            endsAt: liveRollingClears != null ? new Date(liveRollingClears).toISOString() : null,
+            overrideUntil: ovRollingL ? new Date(ovRollingL).toISOString() : null,
+          },
+        },
         openTrades:       liveTrades.filter(e => e.outcome === "open").length,
         totalLiveTrades:  liveTrades.length,
         closedLiveTrades: closed.length,

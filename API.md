@@ -109,6 +109,9 @@ Body `{ enabled: boolean, mode?: "paper" | "live" | "both" }` (default `both`). 
 ### `PUT /api/universe/:symbol/toggle`
 Body `{ enabled: boolean }`. Symbol must belong to the validated universe. Blocks **new entries only**, both engines. Returns `{ symbol, enabled, disabled: string[] }`.
 
+### `POST /api/guards/override` · `DELETE /api/guards/override`
+Body `{ mode: "paper"|"live", guard: "daily"|"rolling" }`. **One-shot resume of an active drawdown halt** — the guard itself stays armed for future breaches: a daily override expires at the next daily reset, a rolling override lasts 24h (must be re-confirmed while the breach persists). DELETE re-arms immediately. Every use is written to the scan log for auditability. Halt state (breach, natural end estimate, active override) is served in `/api/paper/status` and `/api/live/status` under `guards.{daily,rolling} = { halted, endsAt, overrideUntil }`.
+
 ---
 
 ## Analysis & signals

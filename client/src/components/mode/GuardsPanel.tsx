@@ -3,7 +3,8 @@
 // sees is what the scan loop enforces.
 
 import { ShieldCheck, ShieldAlert } from "lucide-react";
-import type { EngineConfig, JournalEntry } from "@/lib/types";
+import type { EngineConfig, GuardsState, GuardState, JournalEntry } from "@/lib/types";
+import { useOverrideGuard, useRearmGuard } from "@/lib/api";
 import { fmtUsd } from "@/lib/format";
 import { Panel } from "@/components/ui-kit";
 import { cn } from "@/lib/utils";
@@ -18,6 +19,17 @@ interface Props {
   openCount: number;
   pausedStrategies?: string[];
   strategyNames?: Record<string, string>;
+  /** Server-computed halt state (breach, natural end, manual override). */
+  guards?: GuardsState;
+}
+
+function fmtTimeLeft(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "<1m";
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  if (h >= 48) return `${Math.round(h / 24)}d`;
+  return h > 0 ? `${h}h ${m.toString().padStart(2, "0")}m` : `${m}m`;
 }
 
 function sumPnlUsdSince(trades: JournalEntry[], sinceMs: number): number {
@@ -31,12 +43,17 @@ function sumPnlUsdSince(trades: JournalEntry[], sinceMs: number): number {
 }
 
 function GuardRow({
-  label, valueUsd, limitUsd, oneR,
-}: { label: string; valueUsd: number; limitUsd: number | null; oneR: number | null }) {
+  label, valueUsd, limitUsd, oneR, state, confirmText, onOverride, onRearm, pending,
+}: {
+  label: string; valueUsd: number; limitUsd: number | null; oneR: number | null;
+  state?: GuardState; confirmText: string;
+  onOverride: () => void; onRearm: () => void; pending: boolean;
+}) {
   const rValue = oneR && oneR > 0 ? valueUsd / oneR : null;
   // Progress toward the halt: 0 when flat/positive, 1 when the limit is hit.
   const frac = limitUsd && limitUsd < 0 ? Math.min(1, Math.max(0, valueUsd / limitUsd)) : 0;
-  const breached = limitUsd != null && valueUsd < limitUsd;
+  const breached = state?.halted ?? (limitUsd != null && valueUsd < limitUsd);
+  const overridden = state?.overrideUntil != null;
   return (
     <div className="space-y-1">
       <div className="flex items-baseline justify-between text-xs">
@@ -60,13 +77,45 @@ function GuardRow({
         <span>{breached ? "LIMITE ATINGIDO — entradas pausadas" : "dentro do limite"}</span>
         <span className="num">halt em {limitUsd != null ? fmtUsd(limitUsd) : "—"}</span>
       </div>
+      {breached && overridden && (
+        <div className="flex items-center justify-between rounded-md border border-warn/40 bg-warn/10 px-2 py-1.5">
+          <span className="text-[10px] text-warn">
+            Override ativo — entradas a correr apesar do halt
+            {state?.overrideUntil ? ` · rearma em ${fmtTimeLeft(state.overrideUntil)}` : ""}
+          </span>
+          <button
+            onClick={onRearm}
+            disabled={pending}
+            className="rounded border border-warn/40 px-2 py-0.5 text-[10px] font-medium text-warn hover:bg-warn/20 disabled:opacity-50"
+          >
+            Rearmar já
+          </button>
+        </div>
+      )}
+      {breached && !overridden && (
+        <div className="flex items-center justify-between rounded-md border border-down/40 bg-down/10 px-2 py-1.5">
+          <span className="text-[10px] text-down">
+            {state?.endsAt ? `Termina naturalmente em ~${fmtTimeLeft(state.endsAt)}` : "Em pausa até o limite aliviar"}
+          </span>
+          <button
+            onClick={() => { if (window.confirm(confirmText)) onOverride(); }}
+            disabled={pending}
+            className="rounded border border-down/40 px-2 py-0.5 text-[10px] font-medium text-down hover:bg-down/20 disabled:opacity-50"
+          >
+            Retomar já
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 export default function GuardsPanel({
-  mode, journal, oneR, oneRIsEstimate, config, openCount, pausedStrategies, strategyNames,
+  mode, journal, oneR, oneRIsEstimate, config, openCount, pausedStrategies, strategyNames, guards,
 }: Props) {
+  const overrideGuard = useOverrideGuard();
+  const rearmGuard = useRearmGuard();
+  const pending = overrideGuard.isPending || rearmGuard.isPending;
   const trades = journal.filter(t => t.mode === mode);
 
   const todayStart = new Date();
@@ -97,8 +146,24 @@ export default function GuardsPanel({
       )}
     >
       <div className="space-y-4">
-        <GuardRow label="P&L de hoje vs halt diário" valueUsd={dailyPnl} limitUsd={dailyLimit} oneR={oneR} />
-        <GuardRow label={`P&L ${rollingDays} dias vs halt rolling`} valueUsd={rollingPnl} limitUsd={rollingLimit} oneR={oneR} />
+        <GuardRow
+          label="P&L de hoje vs halt diário"
+          valueUsd={dailyPnl} limitUsd={dailyLimit} oneR={oneR}
+          state={guards?.daily}
+          confirmText={`Ignorar o halt diário (${mode})? O bot volta a abrir posições apesar do drawdown de hoje. O guard rearma-se sozinho à meia-noite.`}
+          onOverride={() => overrideGuard.mutate({ mode, guard: "daily" })}
+          onRearm={() => rearmGuard.mutate({ mode, guard: "daily" })}
+          pending={pending}
+        />
+        <GuardRow
+          label={`P&L ${rollingDays} dias vs halt rolling`}
+          valueUsd={rollingPnl} limitUsd={rollingLimit} oneR={oneR}
+          state={guards?.rolling}
+          confirmText={`Ignorar o halt rolling de ${rollingDays} dias (${mode})? O bot volta a abrir posições apesar do drawdown da semana. O override dura 24h — se o drawdown persistir, terás de reconfirmar.`}
+          onOverride={() => overrideGuard.mutate({ mode, guard: "rolling" })}
+          onRearm={() => rearmGuard.mutate({ mode, guard: "rolling" })}
+          pending={pending}
+        />
 
         <div className="flex items-center justify-between border-t border-border pt-3 text-xs">
           <span className="text-muted-foreground">Posições usadas</span>

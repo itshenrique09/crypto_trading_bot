@@ -102,6 +102,19 @@ const ENGINE_KEYS = ["/api/paper/status", "/api/live/status", "/api/journal"];
 
 export const useUniverse = () => useApi<UniverseResponse>("/api/universe", { staleTime: 5 * 60_000 });
 
+/** One-shot resume of an ACTIVE drawdown halt (daily: até à meia-noite; rolling: 24h). */
+export const useOverrideGuard = () => useAction(
+  ({ mode, guard }: { mode: "paper" | "live"; guard: "daily" | "rolling" }) =>
+    apiRequest("POST", "/api/guards/override", { mode, guard }),
+  { invalidates: ["/api/paper/status", "/api/live/status"], successMessage: "Halt ignorado — entradas retomadas (guard rearma-se sozinho)" },
+);
+
+export const useRearmGuard = () => useAction(
+  ({ mode, guard }: { mode: "paper" | "live"; guard: "daily" | "rolling" }) =>
+    apiRequest("DELETE", "/api/guards/override", { mode, guard }),
+  { invalidates: ["/api/paper/status", "/api/live/status"], successMessage: "Guard rearmado" },
+);
+
 /** Operational per-symbol blocklist — one list for both modes; blocks new entries only. */
 export const useToggleSymbol = () => useAction(
   ({ symbol, enabled }: { symbol: string; enabled: boolean }) =>

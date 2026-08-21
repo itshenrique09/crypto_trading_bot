@@ -48,6 +48,20 @@ export interface PaperPrice {
 
 // ── Engines ──────────────────────────────────────────────────────────
 
+export interface GuardState {
+  /** Breach is ACTIVE right now (independent of any override). */
+  halted: boolean;
+  /** Estimated natural end of the halt (daily reset / losses aging out). */
+  endsAt: string | null;
+  /** Manual one-shot override active until this instant, if any. */
+  overrideUntil: string | null;
+}
+
+export interface GuardsState {
+  daily: GuardState;
+  rolling: GuardState;
+}
+
 export interface PaperStatus {
   running: boolean;
   lastCheck: string | null;
@@ -63,6 +77,7 @@ export interface PaperStatus {
   } | null;
   openTrades: number;
   totalPaperTrades: number;
+  guards?: GuardsState;
   strategyCounts: Record<string, { open: number; total: number }>;
   capital: {
     initial: number;
@@ -111,6 +126,7 @@ export interface LiveStatus {
   /** Kill-switch state from the last liveScan (empty while engine stopped). */
   pausedStrategies: string[];
   hasKeys: boolean;
+  guards?: GuardsState;
   exchange: "kraken" | "mexc";
   exchanges: { id: string; name: string; note: string }[];
   configured: { kraken: boolean; mexc: boolean };

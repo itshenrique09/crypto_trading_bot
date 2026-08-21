@@ -71,6 +71,35 @@ export function isRollingDrawdownBreached(
   return pnl < -Math.abs(opts.maxLossR) * oneR;
 }
 
+/**
+ * Earliest moment the rolling-drawdown halt clears NATURALLY, assuming no
+ * further closed trades: the window sum only improves as old losses age out,
+ * which happens exactly when a trade's closed_at leaves the window. Returns
+ * null when the halt is not active at `now`. Always terminates: with no new
+ * trades every window eventually empties (sum 0 is never a breach).
+ * The UI uses this for "halt termina em ~X" — an ESTIMATE, since any new loss
+ * pushes it out again.
+ */
+export function rollingHaltClearsAt(
+  trades: ClosedTradeLite[],
+  oneR: number,
+  opts: RollingDrawdownOpts,
+): number | null {
+  const now = opts.now ?? Date.now();
+  if (!isRollingDrawdownBreached(trades, oneR, { ...opts, now })) return null;
+  const exits = trades
+    .filter(e => e.closed_at)
+    .map(e => new Date(e.closed_at as string).getTime() + opts.windowMs + 1000)
+    .filter(t => t > now)
+    .sort((a, b) => a - b);
+  for (const t of exits) {
+    if (!isRollingDrawdownBreached(trades, oneR, { ...opts, now: t })) return t;
+  }
+  // Unreachable in practice (the last exit empties the window), kept as a
+  // truthful fallback instead of pretending to know better.
+  return exits.length ? exits[exits.length - 1] : now;
+}
+
 export interface MarginCapacityOpts {
   /** Notional already open, in USD. */
   openNotionalUsd: number;
