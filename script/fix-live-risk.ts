@@ -36,7 +36,11 @@ async function main() {
   const rows = (await getJournal(10_000)).filter(e =>
     e.mode === "live" && e.outcome === "open" && (e.tp1_hit ?? 0) !== 1 &&
     e.entry_price > 0 && e.stop_loss > 0 && e.stop_loss !== e.entry_price &&
-    (e.position_size_usd ?? 0) > 0,
+    (e.position_size_usd ?? 0) > 0 &&
+    // Rows booked with the trim-as-partial-close scheme keep the PRE-trim
+    // notional in position_size_usd — recomputing risk from it would inflate
+    // risk_usd back to pre-trim levels. Their risk_usd is already honest.
+    !/trim booked as partial close/.test(e.notes || ""),
   );
 
   console.log(`# Fix live risk_usd ${APPLY ? "(APPLY)" : "(dry-run)"} — ${rows.length} open live rows eligible`);

@@ -117,6 +117,12 @@ export async function getDb(): Promise<Database> {
     "ALTER TABLE journal ADD COLUMN pnl_usd REAL",             // closed P&L in USD
     "ALTER TABLE journal ADD COLUMN peak_price REAL",          // trailing stop tracking
     "ALTER TABLE journal ADD COLUMN tp1_hit INTEGER DEFAULT 0", // 1 if TP1 was hit (trailing active)
+    // |entry − SL| / entry AT FILL TIME. The trailing stop needs the original
+    // stop distance after the SL column gets moved to break-even; deriving it
+    // from risk_usd/position_size_usd broke on right-sized trades (risk_usd is
+    // post-trim, position_size pre-trim → trail ran ~1-1.8R instead of 2R,
+    // caught 2026-08-21). Recorded explicitly so no ratio inference is needed.
+    "ALTER TABLE journal ADD COLUMN entry_risk_dist REAL",
   ];
   for (const sql of migrations) {
     try { _db.run(sql); } catch { /* already exists */ }

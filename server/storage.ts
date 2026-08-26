@@ -38,6 +38,7 @@ export interface JournalEntry {
   pnl_usd: number | null;            // actual P&L in USD
   peak_price: number | null;         // best price since entry (for trailing stop)
   tp1_hit: number;                   // 1 if TP1 was hit (trailing stop active)
+  entry_risk_dist: number | null;    // |entry − SL| / entry at fill (survives BE moves)
   notes: string;
   created_at: string;
   closed_at: string | null;
@@ -59,6 +60,7 @@ export interface InsertJournal {
   remaining_position_size_usd?: number;
   realized_pnl_usd?: number;
   risk_usd?: number;
+  entry_risk_dist?: number;
 }
 
 export async function getJournal(limit = 200): Promise<JournalEntry[]> {
@@ -94,8 +96,8 @@ export async function importJournalEntry(row: Omit<JournalEntry, "id">): Promise
        symbol, direction, entry_price, stop_loss, take_profit1, take_profit2,
        confluence_score, mode, strategy, followed, outcome, exit_price, pnl_pct,
        notes, created_at, closed_at, position_size_usd, remaining_position_size_usd,
-       realized_pnl_usd, risk_usd, pnl_usd, peak_price, tp1_hit
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       realized_pnl_usd, risk_usd, pnl_usd, peak_price, tp1_hit, entry_risk_dist
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.symbol, row.direction, row.entry_price, row.stop_loss, row.take_profit1,
       row.take_profit2 ?? null, row.confluence_score ?? null, row.mode,
@@ -104,7 +106,7 @@ export async function importJournalEntry(row: Omit<JournalEntry, "id">): Promise
       row.closed_at ?? null, row.position_size_usd ?? null,
       row.remaining_position_size_usd ?? null, row.realized_pnl_usd ?? 0,
       row.risk_usd ?? null, row.pnl_usd ?? null, row.peak_price ?? null,
-      row.tp1_hit ?? 0,
+      row.tp1_hit ?? 0, row.entry_risk_dist ?? null,
     ],
   );
   persist(db);
@@ -166,13 +168,14 @@ export async function addJournalEntry(entry: InsertJournal): Promise<JournalEntr
   const remainingPositionSize = entry.remaining_position_size_usd ?? entry.position_size_usd ?? null;
   const realizedPnl = entry.realized_pnl_usd ?? 0;
   db.run(
-    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, strategy, followed, outcome, notes, position_size_usd, remaining_position_size_usd, realized_pnl_usd, risk_usd, peak_price, tp1_hit, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0, ?)`,
+    `INSERT INTO journal (symbol, direction, entry_price, stop_loss, take_profit1, take_profit2, confluence_score, mode, strategy, followed, outcome, notes, position_size_usd, remaining_position_size_usd, realized_pnl_usd, risk_usd, entry_risk_dist, peak_price, tp1_hit, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     [
       entry.symbol, entry.direction, entry.entry_price, entry.stop_loss,
       entry.take_profit1, entry.take_profit2 || null, entry.confluence_score || null,
       entry.mode, strategy, followed, entry.notes || "",
       entry.position_size_usd || null, remainingPositionSize, realizedPnl, entry.risk_usd || null,
+      entry.entry_risk_dist || null,
       entry.entry_price,  // peak_price starts at entry
       new Date().toISOString(),
     ]

@@ -27,6 +27,8 @@ export interface JournalEntry {
   tp1_hit?: number | null;
   /** Best price seen in the trade's favour, used by the trailing stop. */
   peak_price?: number | null;
+  /** |entry − SL| / entry at fill — original stop distance (survives BE moves). */
+  entry_risk_dist?: number | null;
 }
 
 export interface PaperPrice {

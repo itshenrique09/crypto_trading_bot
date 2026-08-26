@@ -70,13 +70,24 @@ export function computeTrailStop(input: TrailingStopInputs): number {
 // risk_usd / position_size_usd = |entry - SL| / entry  (the SL distance %)
 // Therefore original_price_risk = (risk_usd / position_size_usd) × entry_price
 //
+// CAVEAT (2026-08-21): the ratio inference above is only valid when risk_usd
+// and position_size_usd describe the SAME position size. Right-sized live
+// trades broke that (risk_usd post-trim, position_size pre-trim) and the 2R
+// trail silently ran at ~1-1.8R on them. Rows written since then carry the
+// stop distance explicitly in entry_risk_dist — prefer it whenever present;
+// the ratio stays as the fallback for older rows.
+//
 // Returns 0 if the inputs are insufficient — caller should treat as "fall
 // back to fixed_pct mode" via the safeRisk guard above.
 export function deriveOriginalRiskFromJournal(
   riskUsd: number | null | undefined,
   positionSizeUsd: number | null | undefined,
   entryPrice: number | null | undefined,
+  entryRiskDist?: number | null,
 ): number {
+  if (entryRiskDist && entryRiskDist > 0 && entryPrice && entryPrice > 0) {
+    return entryRiskDist * entryPrice;
+  }
   if (!riskUsd || !positionSizeUsd || !entryPrice) return 0;
   if (positionSizeUsd <= 0 || entryPrice <= 0) return 0;
   return (Math.abs(riskUsd) / positionSizeUsd) * entryPrice;

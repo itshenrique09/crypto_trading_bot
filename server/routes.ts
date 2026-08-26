@@ -1678,6 +1678,7 @@ export async function registerRoutes(server: Server, app: Express) {
     closed_at: z.string().nullish(),
     tp1_hit: z.number().nullish(),
     peak_price: z.number().nullish(),
+    entry_risk_dist: z.number().nullish(),
   });
 
   app.post("/api/journal/import", async (req, res) => {
@@ -1712,6 +1713,7 @@ export async function registerRoutes(server: Server, app: Express) {
           realized_pnl_usd: d.realized_pnl_usd ?? 0, notes: d.notes ?? "",
           created_at: d.created_at, closed_at: d.closed_at ?? null,
           tp1_hit: d.tp1_hit ?? 0, peak_price: d.peak_price ?? null,
+          entry_risk_dist: d.entry_risk_dist ?? null,
         });
         if (inserted) imported++;
         else skipped++;
@@ -2238,6 +2240,7 @@ export async function registerRoutes(server: Server, app: Express) {
           trade.risk_usd,
           trade.position_size_usd,
           trade.entry_price,
+          trade.entry_risk_dist,
         );
         const trailStop = computeTrailStop({
           direction: isLong ? "LONG" : "SHORT",
@@ -2771,6 +2774,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 followed: "yes",
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
+                entry_risk_dist:   slDistPct,
                 notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
               });
 
@@ -3271,6 +3275,7 @@ export async function registerRoutes(server: Server, app: Express) {
             trade.risk_usd,
             trade.position_size_usd,
             trade.entry_price,
+            trade.entry_risk_dist,
           );
           const trailStop = computeTrailStop({
             direction: isLong ? "LONG" : "SHORT",
@@ -3687,10 +3692,32 @@ export async function registerRoutes(server: Server, app: Express) {
                     p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
                   const trimmed = pos ? await client.closePartial(pos, trimFraction) : null;
                   if (trimmed && pos && trimmed.size >= pos.size) {
-                    // Venue lot rounding closed the whole (tiny) position —
-                    // book nothing: the round-trip cost is cents and a ghost
-                    // row would poison the R stats.
-                    logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Entry drift ${slipBps}bps: right-sizing would close the entire position (${pos.size} contracts) — entry aborted`, signal: signal.direction, confidence: signal.confidence });
+                    // Venue lot rounding closed the WHOLE (tiny) position — a
+                    // real round trip was paid, so it MUST be journaled: with
+                    // no row there is no cooldown record and the still-valid
+                    // 1H signal would re-enter (and re-pay fees) every 3-min
+                    // scan. (Unreachable on Kraken today — its partial sizing
+                    // floors — but reachable on venues that round up.)
+                    const abortNotional = actualVol * actualEntry;
+                    const abortCost = abortNotional * (TRADE_COSTS.takerFeePct + TRADE_COSTS.slippagePct) * 2;
+                    const aborted = await addJournalEntry({
+                      symbol: sym, direction: signal.direction,
+                      entry_price: roundPriceForJournal(actualEntry),
+                      stop_loss: signal.stopLoss, take_profit1: signal.takeProfit1, take_profit2: signal.takeProfit2,
+                      confluence_score: signal.confluenceScore, mode: "live", strategy: strat.id, followed: "yes",
+                      position_size_usd: Math.round(abortNotional * 100) / 100,
+                      risk_usd: Math.round(realRiskUsd * 100) / 100,
+                      entry_risk_dist: fillStopDistPct,
+                      notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} — entry drift ${slipBps}bps: right-sizing closed the entire position (venue lot rounding). Round trip booked; cooldown applies.`,
+                    });
+                    await updateJournalEntry(aborted.id, {
+                      outcome: "loss",
+                      exit_price: roundPriceForJournal(actualEntry),
+                      pnl_usd: -Math.round(abortCost * 100) / 100,
+                      pnl_pct: -Math.round((TRADE_COSTS.takerFeePct + TRADE_COSTS.slippagePct) * 2 * 10000) / 100,
+                      closed_at: new Date().toISOString(),
+                    });
+                    logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Entry drift ${slipBps}bps: right-sizing would close the entire position (${pos.size} contracts) — entry aborted, round trip booked`, signal: signal.direction, confidence: signal.confidence });
                     continue;
                   }
                   if (trimmed && trimmed.size > 0) {
@@ -3751,6 +3778,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 remaining_position_size_usd: trimRemainingUsd != null ? Math.round(trimRemainingUsd * 100) / 100 : undefined,
                 realized_pnl_usd: trimRealizedUsd !== 0 ? Math.round(trimRealizedUsd * 10000) / 10000 : undefined,
                 risk_usd:          Math.round(bookedRiskUsd * 100) / 100,
+                entry_risk_dist:   fillStopDistPct,
                 notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} size=${actualVol} fill=${actualEntry.toFixed(6)} slip=${slipBps}bps lev=${leverage}x risk=${riskPctUsed.toFixed(2)}% 1R=$${bookedRiskUsd.toFixed(2)} (planned $${riskUsd.toFixed(2)}) vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"}${resizeNote} | ${signal.reason}`,
               });
 

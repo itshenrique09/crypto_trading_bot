@@ -117,6 +117,20 @@ test("returns 0 on missing or invalid fields (caller falls back to fixed_pct)", 
   assert.equal(deriveOriginalRiskFromJournal(undefined, undefined, undefined), 0);
 });
 
+test("deriveOriginalRiskFromJournal prefers the explicit entry_risk_dist over the ratio", () => {
+  // Right-sized rows book risk_usd POST-trim against a PRE-trim
+  // position_size_usd — the ratio understates the stop distance by the trim
+  // fraction. The explicit field must win: dist 3% of entry 101 → 3.03.
+  const withField = deriveOriginalRiskFromJournal(10, 505, 101, 0.03);
+  assert.ok(Math.abs(withField - 3.03) < 1e-9);
+  // Ratio fallback (old rows without the field): (10/505)×101 = 2.0 — the
+  // understated value the field exists to correct.
+  const ratioOnly = deriveOriginalRiskFromJournal(10, 505, 101, null);
+  assert.ok(Math.abs(ratioOnly - 2.0) < 1e-9);
+  // A zero/absent field must not short-circuit to 0.
+  assert.ok(deriveOriginalRiskFromJournal(50, 1000, 100, 0) > 0);
+});
+
 test("derived risk roundtrips correctly through computeTrailStop", () => {
   // Real-world: entry $0.1063 (DOGE), SL $0.1037 (~2.4% risk)
   // position_size_usd = $520, risk_usd = $12.50, entry = $0.1063
