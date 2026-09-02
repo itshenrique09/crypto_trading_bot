@@ -404,6 +404,12 @@ export class KrakenClient {
       size,
       reduceOnly: true,
     });
+    // Same verdict check as openPosition: a 200 + result:"success" envelope can
+    // still carry a rejected order in sendStatus.status.
+    const status = data?.sendStatus?.status;
+    if (status && !["placed", "partiallyFilled", "filled"].includes(status)) {
+      throw new Error(`Kraken rejected close for ${symbol}: ${status}`);
+    }
     return { orderId: String(data?.sendStatus?.order_id ?? ""), size };
   }
 
@@ -487,6 +493,14 @@ export class KrakenClient {
     const inst = await this.getInstrument(botSymbol);
     const side = closeSide(direction);
 
+    // Size must respect the instrument's precision. The engine computes the
+    // post-TP1 runner as `pos.size − closedVol`, which in floating point is
+    // e.g. 3.2 − 1.9 = 1.3000000000000003 — Kraken rejected exactly those on
+    // precision-1 instruments (ETC #365, DOT #376, 2026-08-26/28) and the
+    // positions ran unprotected for 14–41 h.
+    const orderSize = roundSize(size, inst.sizePrecision);
+    if (!(orderSize > 0)) throw new Error(`Protection size for ${botSymbol} rounds to zero at precision ${inst.sizePrecision} (size ${size})`);
+
     // Drop stale protection for this symbol before writing new levels. This
     // must recognise BOTH spellings of a stop, or the order it fails to match
     // is left resting forever — see isProtectiveOrderType.
@@ -496,15 +510,26 @@ export class KrakenClient {
       }
     }
 
+    // Kraken answers HTTP 200 + result:"success" even when the order itself
+    // is rejected — the verdict is in sendStatus.status. openPosition checked
+    // it; this path did not, so a rejected stop looked like a placed one.
+    const assertPlaced = (data: any, what: string) => {
+      const status = data?.sendStatus?.status;
+      if (status && !["placed", "partiallyFilled", "filled", "untouched"].includes(status)) {
+        throw new Error(`Kraken rejected ${what} for ${symbol}: ${status}`);
+      }
+    };
+
     const sl = await this.request<any>("POST", "/sendorder", {
       orderType: "stp",
       symbol,
       side,
-      size,
+      size: orderSize,
       stopPrice: roundPrice(stopLossPrice, inst.tickSize),
       reduceOnly: true,
       triggerSignal: "mark",
     });
+    assertPlaced(sl, "stop-loss");
 
     let tpId: string | undefined;
     if (takeProfitPrice != null && Number.isFinite(takeProfitPrice)) {
@@ -512,11 +537,12 @@ export class KrakenClient {
         orderType: "take_profit",
         symbol,
         side,
-        size,
+        size: orderSize,
         stopPrice: roundPrice(takeProfitPrice, inst.tickSize),
         reduceOnly: true,
         triggerSignal: "mark",
       });
+      assertPlaced(tp, "take-profit");
       tpId = String(tp?.sendStatus?.order_id ?? "");
     }
 
