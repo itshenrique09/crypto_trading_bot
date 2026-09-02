@@ -35,19 +35,21 @@ The full HTTP surface is documented in [API.md](./API.md).
 
 ---
 
-## Active Strategies (frozen 2026-07-02)
+## Active Strategies (frozen 2026-07-02 · re-measured honestly 2026-09-01)
+
+> **⚠️ 2026-09-01 — the validated edge was a look-ahead artefact.** `liquiditySweepSignal` reported the *sweep candle's* close as the entry price; with the confirmation-bar rule 93% of signals fire 1–2 bars later, when price had already moved a median 57 bps (p90 190 bps) in the trade's favour against a ~145 bps stop. Every backtest, the paper engine and the R bookkeeping "filled" at that price; live market orders could not (50 of 59 Kraken fills adverse, median 57 bps — the same number). With the entry fixed to the signal candle's close the same harness gives **PF 1.08 · +45R · exp +0.06R** for the whole system (LS alone PF 0.96, exp −0.03R); over 2.3 years of 1h data the honest system is exp +0.04R with a 161R drawdown. Only Break & Retest (T=92, exp +0.45R) and RSI Divergence (T=46, exp +0.48R) keep positive honest expectancy, on small samples. Full evidence: `script/audit/AUDIT-NOTES.md` (Fase 8), `script/audit/phase8-collapse.ts`, `script/audit/phase8-report-*.md`; the pre-fix report is archived as `script/audit/validate-pipeline-report-STALE-ENTRY-2026-09-01.md`. **Live trading is not justified by the current evidence.**
 
 | Strategy | Timeframe | Universe | Role |
 |----------|-----------|----------|------|
-| **Liquidity Sweep** | 1H | 41 coins | Workhorse — stop-hunt reversals (~85% of trades) |
+| **Liquidity Sweep** | 1H | 40 coins | Workhorse by trade count (~85% of trades) — honest expectancy ≈ 0 |
 | **RSI Divergence** | 1H | ATOM, INJ | Mean-reversion complement |
 | **Break & Retest** | 4H | 6 coins | Uncorrelated breakout exposure |
 
-The scanner universe is the union of every active strategy's preferred symbols (41 coins), built from `server/strategies/registry.ts` — the Markets page shows exactly what the engine trades.
+The scanner universe is the union of every active strategy's preferred symbols (40 coins after the Aug 2026 LUNC drop), built from `server/strategies/registry.ts` — the Markets page shows exactly what the engine trades.
 
-Validated as a **portfolio** by the full-pipeline harness (`script/validate-pipeline.ts`) with every engine gate, sequential capital, and fees+slippage modeled: **PF 1.99 · +715R · maxDD 31.2%** over the full window (PF 2.00 · +400R in 2026, data through Jul 7). The direction×regime matrix confirms the edge is symmetric — more than half of total R comes from BTC-down periods. The LS universe was expanded 28→41 coins in Jul 2026 via a two-halves consistency screen (`script/expand-universe-ls.ts`) — each new coin had to be independently profitable in both halves of the year, then the whole portfolio had to improve with them included (+517R → +688R). Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`) so backtest = paper = live; TON and BONK passed the screen but were excluded for lacking one. The tighter pre-expansion config (28 coins, group cap 2: PF 2.01, +517R, maxDD 27.4%) is the documented fallback if live drawdown tolerance demands it. Retired: Confluence Swing (Jul 2026, fee fodder at PF 1.07), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
+Current official numbers (`script/validate-pipeline.ts`, entry fix + LS floor 68, 8000×1h, $500, 2% risk, fees 0.05%+0.05%/side): **ENGINE T=770 · WR 33% · PF 1.08 · +45R · exp +0.06R** (2026: PF 1.05, exp +0.04R). The history of how the earlier headline (PF 1.99 · +715R · maxDD 31.2%, Jul 2026) was produced — universe expansion 28→41 via `script/expand-universe-ls.ts`, capacity and exit A/Bs — is preserved in `STRATEGIES.md` and `script/audit/`, but every one of those numbers was measured with the stale entry and must not be quoted as evidence of edge. Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`); TON and BONK were excluded for lacking one; LUNC was dropped because Kraken does not list it. Retired: Confluence Swing (Jul 2026), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
 
-> **Change policy**: strategy parameters and coin universes are FROZEN. Any change requires a pre-stated hypothesis, a full-pipeline A/B (`script/validate-pipeline.ts`, ALL + 2026 windows), and 90 days of frozen paper validation. Recent-window per-coin re-optimization is how this project previously destroyed its own edge.
+> **Change policy**: strategy parameters and coin universes are FROZEN. Any change requires a pre-stated hypothesis, a full-pipeline A/B (`script/validate-pipeline.ts`, ALL + 2026 windows — the harness enters at the signal candle's close since 2026-09-01; a regression test guards it), and 90 days of frozen paper validation **before live**. Recent-window re-optimization destroyed this project's edge once (Jun 2026); a same-day paper+live rollout of an A/B result did it again (Aug 14 2026, LS floor 60). Paper is the testing ground; live follows paper, never the harness directly.
 
 ---
 
@@ -61,7 +63,9 @@ All values below are the **actual engine constants** — they are exported verba
 | BTC macro multiplier | ×1.25 bull / ×0.75 bear (BTC daily trend) |
 | Max open positions | 10 (fixed; capacity A/B Jul 2026: +55R and *lower* maxDD than 6; 12 tested worse) |
 | Max hold time | 200h (1H strategies) / 240h (4H) → close at market (backtest parity + slot turnover) |
-| Max per correlation group | 3 (raised from 2 with the 41-coin universe — cap 2 bottlenecked the expansion) |
+| Max per correlation group | 3 (raised from 2 with the 41-coin universe in Jul 2026 — measured with the stale entry) |
+| Signal freshness | Setup skipped if its candle closed > 10 min ago (restarts / un-halts no longer enter stale setups at market) |
+| Paper fill | MEXC ticker at scan time (not the signal price); trade re-gated on the fill's R:R |
 | Symbol exposure | 1 position per symbol across all strategies |
 | Daily drawdown halt | −4R |
 | Rolling 7-day halt | −6R |
@@ -109,7 +113,7 @@ React SPA (hash routing) served by the same Express process. Dark-only design sy
 |------|------|-------------|
 | Live | `/#/live` | Kraken/MEXC account (equity, margin, uPnL), venue positions with on-exchange SL/TP protection and funding, risk guards, live-only equity curve and history, engine start/stop. Onboarding flow when no API keys are stored. |
 | Paper | `/#/paper` | Simulated balance and positions (marks from MEXC Futures), risk guards computed with the engine's own formulas, per-strategy performance, paper-only equity curve and history, engine start/stop. |
-| Mercados | `/#/markets` | The 41-coin trading universe with price, 1h/24h/7d change, volume/spread/funding **checked against the real engine gates** (✓/✗ per row). |
+| Mercados | `/#/markets` | The 40-coin trading universe with price, 1h/24h/7d change, volume/spread/funding **checked against the real engine gates** (✓/✗ per row). |
 | Símbolo | `/#/markets/:symbol` | TradingView-style chart (lightweight-charts: 15m/1H/4H/1D, volume, EMA 50/200, OHLC crosshair legend), open-position levels drawn on the chart, per-symbol gate status, live signals from the actual strategy registry, bot trade history for the symbol. |
 | Atividade | `/#/activity` | The scanner's decision feed (opened / filtered / no-signal with reasons — persisted across restarts), active strategies with universe sizes and kill-switch state, engine parameters, funding-carry observer. Force-scan button. |
 | Definições | `/#/settings` | Exchange API keys (AES-256 encrypted at rest), risk/leverage, paper capital, trailing mode, backup status, system info. |
