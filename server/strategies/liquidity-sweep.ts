@@ -99,15 +99,18 @@ export const liquiditySweepStrategy: Strategy = {
 
     if (sig.type === "NONE") return null;
 
-    // Minimum 60% confidence — lowered from 68 on 2026-08-14 via the audit's
-    // pre-registered official A/B (script/audit/AUDIT-NOTES.md + report copy in
-    // script/audit/validate-pipeline-report-LS-floor60.md): vs the shipped
-    // config it adds ~385 trades/yr at flat-to-better expectancy — sumR +35%
-    // ALL / +47% 2026, PF 1.97/2.07 — at the cost of sim maxDD 28.4%→42.7%
-    // (risk accepted by the user; live runs 0.5% risk/trade). RAISING the floor
-    // destroys edge (68→72 cost −248R ALL): confidence is informative above 68,
-    // not below. 90-day paper confirmation window runs from 2026-08-14.
-    if (sig.confidence < 60) return null;
+    // Minimum 68% confidence — RESTORED 2026-09-01 (was 60 from 2026-08-14).
+    // The 68→60 A/B of 2026-08-14 was run on a harness that filled every
+    // trade at the sweep candle's close 1–2 bars before the decision (see the
+    // entry note in analysis.ts liquiditySweepSignal); with that look-ahead
+    // removed the 60–67 band has no simulated edge (exp ≈ 0, phase8 report),
+    // and in the 18 days it traded for real it went 5 wins / 32 closed trades
+    // (paper+live pooled, exp −0.66R, p≈0.0004 vs the predicted 43% WR) and
+    // supplied most of the losses that kept both engines halted by the
+    // drawdown guards. Fewer zero-edge entries = less fee bleed and fewer
+    // halts. Any future floor change goes through the honest harness first
+    // and 90 days of paper — the repo's own policy, skipped on Aug 14.
+    if (sig.confidence < 68) return null;
 
     return {
       direction: sig.type,

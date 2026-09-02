@@ -10,7 +10,7 @@ import {
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
 import type { Strategy } from "./strategies/types";
-import { dropOpenCandle } from "./candles";
+import { dropOpenCandle, intervalToMs } from "./candles";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, MEXC_CONTRACT_OVERRIDES, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { getBackupStatus } from "./backup";
@@ -44,6 +44,30 @@ const TP1_PARTIAL_CLOSE_PCT = 0.6;
 // May 2026 paper data). Reject such signals outright rather than widening the
 // structural stop. 0.6% = 3× round-trip → fee drag ≤ ~0.33R.
 const MIN_SL_DISTANCE_PCT = 0.006;
+
+// ── SIGNAL FRESHNESS (both engines, 2026-09-01) ─────────────────────────────
+// Strategies decide on the last CLOSED candle and the entry is that candle's
+// close. The scan loop is a bare 3-minute interval, so normally an entry lands
+// 0–3 min after the close — but after a restart, a guard un-halting or a slot
+// freeing up, the same signal is still "valid" 15–57 minutes later and was
+// being sent to market at whatever the price had become (audit 2026-09-01:
+// 5 such live entries, mean adverse drift 115 bps on ~130 bps stops). A sweep
+// reversal is a moment, not a level: past this age the setup is skipped and
+// the next candle gets to speak for itself.
+const MAX_SIGNAL_AGE_MIN = 10;
+function signalAgeMinutes(candles: OHLCV[], interval: string): number {
+  const last = candles[candles.length - 1];
+  const ivMs = intervalToMs(interval) ?? 3_600_000;
+  if (!last) return Infinity;
+  return (Date.now() - (last.time * 1000 + ivMs)) / 60_000;
+}
+
+// Costs to book on a LIVE execution whose price is a MEASURED venue fill: the
+// taker fee is real, but the 0.05% slippage MODEL is already inside the fill
+// price — charging it again was writing ≈0.08R/trade of phantom loss into the
+// live journal (audit 2026-09-01, 4.5R over 56 trades) and feeding it to the
+// drawdown guards. Ticker-estimated exits keep the full model.
+const LIVE_FILL_COSTS = { takerFeePct: TRADE_COSTS.takerFeePct, slippagePct: 0 } as const;
 
 // ── Drawdown-guard tuning (shared by paper + live engines) ──
 // Calendar daily (−4R) and monthly (−8R) limits reset on their boundaries and
@@ -127,8 +151,8 @@ async function priceMarketClose(
    * find only the 60% just sold, call it incomplete and fall back to the ticker.
    */
   sizing: "remaining" | "last_event" = "remaining",
-): Promise<{ price: number; note: string }> {
-  if (!client.getFills) return { price: tickerPrice, note: "ticker ESTIMATE — venue exposes no fill history" };
+): Promise<{ price: number; note: string; measured: boolean }> {
+  if (!client.getFills) return { price: tickerPrice, note: "ticker ESTIMATE — venue exposes no fill history", measured: false };
 
   const openedAtMs = new Date(trade.created_at).getTime();
   const opts = {
@@ -142,9 +166,9 @@ async function priceMarketClose(
     await new Promise(r => setTimeout(r, 600));
     const fills = await client.getFills(new Date(openedAtMs - 60 * 60_000)).catch(() => [] as ExchangeFill[]);
     const resolved = exitPriceFromFills(fills, opts);
-    if (resolved && !resolved.incomplete) return { price: resolved.price, note: describeFill(resolved, tickerPrice) };
+    if (resolved && !resolved.incomplete) return { price: resolved.price, note: describeFill(resolved, tickerPrice), measured: true };
   }
-  return { price: tickerPrice, note: "ticker ESTIMATE — fill not visible in time" };
+  return { price: tickerPrice, note: "ticker ESTIMATE — fill not visible in time", measured: false };
 }
 
 // Default strategy ID — used as fallback when strategy field is missing (legacy entries)
@@ -2682,6 +2706,13 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // ── SIGNAL FRESHNESS — the setup belongs to the candle that just closed ──
+              const ageMin = signalAgeMinutes(candles, interval);
+              if (ageMin > MAX_SIGNAL_AGE_MIN) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Stale signal: candle closed ${ageMin.toFixed(0)} min ago (> ${MAX_SIGNAL_AGE_MIN} min) — waiting for the next close`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
               // 4H trades can last days; fighting the weekly structure kills edge.
               // 1H strategies (Swing, RSI Div) already have daily filter — weekly too slow.
@@ -2737,11 +2768,27 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // ── PAPER FILL = the MEXC ticker at scan time, not the signal price ──
+              // A paper "market order" fills where the market is when the scan
+              // runs (0–3 min after the candle close), like the live engine's
+              // does. Booking signal.entry instead credited paper with a price
+              // that no longer existed — the same optimism the harness had
+              // before the entry fix — and hid the paper↔live gap. Levels stay
+              // structural; the trade is re-gated on the real fill.
+              const fillPrice = marketMaps.priceByPair[`${sym}USDT`] || signal.entry;
+              const fillRisk   = signal.direction === "LONG" ? fillPrice - signal.stopLoss : signal.stopLoss - fillPrice;
+              const fillReward = signal.direction === "LONG" ? signal.takeProfit1 - fillPrice : fillPrice - signal.takeProfit1;
+              const driftBps   = Math.round(((fillPrice - signal.entry) / signal.entry) * 10_000);
+              if (fillRisk <= 0 || fillReward <= 0 || fillReward / fillRisk < MIN_RISK_REWARD) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Entry drift ${driftBps}bps: fill ${fillPrice} leaves R:R ${fillRisk > 0 && fillReward > 0 ? (fillReward / fillRisk).toFixed(2) : "≤0"} < ${MIN_RISK_REWARD} — skipped`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
               // Kelly retired Jul 2026 (see sizing note above): fixed base risk
               // halved max drawdown for <4% less total R in the pipeline A/B.
               const riskPctUsed = baseRiskPct * riskMultiplier;
-              const slDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
+              const slDistPct   = fillRisk / fillPrice;
               const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
@@ -2764,7 +2811,7 @@ export async function registerRoutes(server: Server, app: Express) {
               await addJournalEntry({
                 symbol: sym,
                 direction: signal.direction,
-                entry_price: signal.entry,
+                entry_price: roundPriceForJournal(fillPrice),
                 stop_loss: signal.stopLoss,
                 take_profit1: signal.takeProfit1,
                 take_profit2: signal.takeProfit2,
@@ -2775,7 +2822,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 position_size_usd: Math.round(posSize * 100) / 100,
                 risk_usd:          Math.round(riskUsd * 100) / 100,
                 entry_risk_dist:   slDistPct,
-                notes: `Paper [${strat.name}] | 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
+                notes: `Paper [${strat.name}] | fill=${fillPrice} drift=${driftBps}bps 1R=${riskUsd.toFixed(2)}€ size=${posSize.toFixed(0)}€ risk=${riskPctUsed.toFixed(2)}% vol24h=$${(vol24h/1e6).toFixed(0)}M funding=${funding != null ? (funding*100).toFixed(3)+"%" : "n/a"} — ${signal.reason}`,
               });
 
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "opened", reason: `${signal.direction} | score=${signal.confluenceScore} conf=${signal.confidence}% RR=${(reward/risk).toFixed(1)} risk=${riskPctUsed.toFixed(2)}%`, signal: signal.direction, confidence: signal.confidence });
@@ -3029,6 +3076,8 @@ export async function registerRoutes(server: Server, app: Express) {
 
   let liveCheckInterval: ReturnType<typeof setInterval> | null = null;
   let liveScanInterval:  ReturnType<typeof setInterval> | null = null;
+  /** trade id → last time liveCheck re-placed missing venue protection (rate limit for the self-heal). */
+  const protectionHealAt = new Map<number, number>();
   let liveEngineStatus = {
     running:       false,
     lastCheck:     null as string | null,
@@ -3061,7 +3110,9 @@ export async function registerRoutes(server: Server, app: Express) {
       // Snapshot venue state for the UI: mark price and unrealised P&L come
       // from the exchange itself, and the resting stop/TP orders are read back
       // so the dashboard can prove a position is actually protected.
-      const protection = client.getProtection ? await client.getProtection().catch(() => []) : [];
+      // null = the venue did not answer (do NOT treat as "unprotected"); [] = answered, nothing resting.
+      const protectionList = client.getProtection ? await client.getProtection().catch(() => null) : null;
+      const protection = protectionList ?? [];
       liveEngineStatus.account = account;
       liveEngineStatus.positions = exchangePositions.map(p => {
         const forSymbol = protection.filter(x => x.botSymbol === p.botSymbol);
@@ -3144,7 +3195,7 @@ export async function registerRoutes(server: Server, app: Express) {
             positionSizeUsd: trade.position_size_usd,
             remainingPositionSizeUsd: trade.remaining_position_size_usd,
             realizedPnlUsd: trade.realized_pnl_usd,
-          }, lastPrice, TRADE_COSTS);
+          }, lastPrice, resolved ? LIVE_FILL_COSTS : TRADE_COSTS);
 
           await updateJournalEntry(trade.id, {
             outcome:   accounting.outcome,
@@ -3181,7 +3232,7 @@ export async function registerRoutes(server: Server, app: Express) {
             positionSizeUsd: trade.position_size_usd,
             remainingPositionSizeUsd: trade.remaining_position_size_usd,
             realizedPnlUsd: trade.realized_pnl_usd,
-          }, fill.price, TRADE_COSTS);
+          }, fill.price, fill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
           await updateJournalEntry(trade.id, {
             outcome:     timeoutAccounting.outcome,
             exit_price:  roundPriceForJournal(fill.price),
@@ -3198,6 +3249,74 @@ export async function registerRoutes(server: Server, app: Express) {
         const newPeak = isLong ? Math.max(peak, price) : Math.min(peak, price);
         if (newPeak !== peak) {
           await updateJournalEntry(trade.id, { peak_price: newPeak });
+        }
+
+        // ── PROTECTION SELF-HEAL + SOFTWARE STOP FALLBACK (2026-09-02) ──────
+        // The venue stop is the primary protection, but its placement in
+        // liveScan is a try/catch that only logs, and Kraken triggers on MARK
+        // price while we watch LAST. Until now nothing checked that a stop was
+        // actually resting, and nothing closed a position whose stop had failed
+        // to fire: an unprotected runner would ride to liquidation. Two nets:
+        //  1. if the venue answered and shows NO stop for this position, re-place
+        //     the protective orders at the journal's levels (setProtection
+        //     replaces any stale ones);
+        //  2. if LAST has crossed the journal stop by more than a tolerance and
+        //     the position is STILL open, close at market and book the fill.
+        //     When the venue stop did fire the position is already gone and the
+        //     branch above books it — this only acts when the venue did not.
+        const journalStop = trade.stop_loss;
+        if (protectionList !== null && journalStop > 0) {
+          const resting = protectionList.some(x => x.botSymbol === trade.symbol && x.kind === "stop");
+          const lastHeal = protectionHealAt.get(trade.id) ?? 0;
+          // Re-place at most once per 10 min per trade: the venue's order list can
+          // lag a fresh placement by a cycle, and setProtection cancels+replaces.
+          if (!resting && Date.now() - lastHeal > 10 * 60_000) {
+            protectionHealAt.set(trade.id, Date.now());
+            try {
+              await client.setProtection(pos, journalStop, trade.take_profit2 ?? trade.take_profit1);
+              console.warn(`[live-check] ${trade.symbol}: no stop was resting on ${client.id.toUpperCase()} — protection re-placed @ ${journalStop}`);
+              logScan({ time: new Date().toISOString(), symbol: trade.symbol, strategy: trade.strategy ?? "live", result: "filtered", reason: `Protecção reposta na venue: nenhuma stop estava activa (SL ${journalStop})` });
+            } catch (healErr: any) {
+              console.error(`[live-check] ${trade.symbol}: protection re-place failed: ${healErr?.message ?? healErr}`);
+            }
+          }
+        }
+        const SOFT_STOP_TOLERANCE = 0.001; // 10 bps — mark≠last basis and stop-order latency
+        // After TP1 the runner's stop is break-even by design (the journal only
+        // records it when the venue update succeeded) — never let the software
+        // net sit looser than entry once TP1 has been taken.
+        const softStopLevel = trade.tp1_hit
+          ? (isLong ? Math.max(journalStop, trade.entry_price) : Math.min(journalStop, trade.entry_price))
+          : journalStop;
+        const softStopBreached = softStopLevel > 0 && (isLong
+          ? price <= softStopLevel * (1 - SOFT_STOP_TOLERANCE)
+          : price >= softStopLevel * (1 + SOFT_STOP_TOLERANCE));
+        if (softStopBreached) {
+          try {
+            await client.closePosition(pos);
+          } catch (closeErr: any) {
+            console.error(`[live-check] software stop close failed for ${trade.symbol}: ${closeErr?.message ?? closeErr}`);
+            continue; // retry next check
+          }
+          const softFill = await priceMarketClose(client, trade, tradeDirection, price);
+          const softAccounting = finalizeTradeAccounting({
+            direction: isLong ? "LONG" : "SHORT",
+            entryPrice: trade.entry_price,
+            positionSizeUsd: trade.position_size_usd,
+            remainingPositionSizeUsd: trade.remaining_position_size_usd,
+            realizedPnlUsd: trade.realized_pnl_usd,
+          }, softFill.price, softFill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
+          await updateJournalEntry(trade.id, {
+            outcome:     softAccounting.outcome,
+            exit_price:  roundPriceForJournal(softFill.price),
+            pnl_pct:     Math.round(softAccounting.pnlPct * 100) / 100,
+            pnl_usd:     softAccounting.pnlUsd !== null ? Math.round(softAccounting.pnlUsd * 100) / 100 : undefined,
+            remaining_position_size_usd: 0,
+            closed_at:   new Date().toISOString(),
+            notes:       (trade.notes || "") + ` | SOFTWARE STOP: last ${price} crossed SL ${softStopLevel} with the position still open on ${client.id.toUpperCase()} — closed at market @ ${softFill.note}`,
+          });
+          console.warn(`[live-check] ${trade.symbol}: software stop fired (last ${price} vs SL ${softStopLevel})`);
+          continue;
         }
 
         // TP1 hit → take the partial and move SL to break-even on the venue
@@ -3226,7 +3345,7 @@ export async function registerRoutes(server: Server, app: Express) {
               positionSizeUsd: trade.position_size_usd,
               remainingPositionSizeUsd: trade.remaining_position_size_usd,
               realizedPnlUsd: trade.realized_pnl_usd,
-            }, tp1Fill.price, actualClosePct, TRADE_COSTS);
+            }, tp1Fill.price, actualClosePct, tp1Fill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
             const closedFullPosition = closedVol >= pos.size;
 
             let exchangeProtectionUpdated = false;
@@ -3299,7 +3418,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 positionSizeUsd: trade.position_size_usd,
                 remainingPositionSizeUsd: trade.remaining_position_size_usd,
                 realizedPnlUsd: trade.realized_pnl_usd,
-              }, trailFill.price, TRADE_COSTS);
+              }, trailFill.price, trailFill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
 
               await updateJournalEntry(trade.id, {
                 outcome:   accounting.outcome,
@@ -3582,6 +3701,13 @@ export async function registerRoutes(server: Server, app: Express) {
               const signal = strat.analyze(candles);
               if (!signal) continue;
 
+              // ── SIGNAL FRESHNESS — mirrors paperScan ──
+              const ageMinLive = signalAgeMinutes(candles, interval);
+              if (ageMinLive > MAX_SIGNAL_AGE_MIN) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Stale signal: candle closed ${ageMinLive.toFixed(0)} min ago (> ${MAX_SIGNAL_AGE_MIN} min) — waiting for the next close`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
               if (interval === "4h") {
                 const weeklyTrend = await getWeeklyTrend(sym);
@@ -3735,7 +3861,7 @@ export async function registerRoutes(server: Server, app: Express) {
                       positionSizeUsd: preTrimPosSizeUsd,
                       remainingPositionSizeUsd: preTrimPosSizeUsd,
                       realizedPnlUsd: 0,
-                    }, actualEntry, trimmed.size / preTrimVol, TRADE_COSTS);
+                    }, actualEntry, trimmed.size / preTrimVol, LIVE_FILL_COSTS);
                     trimRemainingUsd = trim.remainingPositionSizeUsd;
                     trimRealizedUsd = trim.realizedPnlUsd;
                     resizeNote = ` | right-sized −${(trimFraction * 100).toFixed(0)}% at fill (drift ${slipBps}bps widened the stop distance; trim booked as partial close)`;
@@ -3920,7 +4046,7 @@ export async function registerRoutes(server: Server, app: Express) {
         positionSizeUsd: trade.position_size_usd,
         remainingPositionSizeUsd: trade.remaining_position_size_usd,
         realizedPnlUsd: trade.realized_pnl_usd,
-      }, exitPrice, TRADE_COSTS);
+      }, exitPrice, fill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
 
       await updateJournalEntry(id, {
         outcome:    accounting.outcome,

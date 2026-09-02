@@ -2429,17 +2429,35 @@ export function liquiditySweepSignal(
 
   // ── 5. Entry / Stop / TP ──
   const sc = best.candle;
+  const barsAfter = last - best.barIdx;
   let entry: number, stopLoss: number, takeProfit: number, takeProfit2: number;
 
-  // SL beyond the swept wick with 0.5 ATR buffer. The swept wick IS the
+  // ENTRY = the close of the SIGNAL candle (`price`), i.e. the last price that
+  // exists when this function runs — NOT the sweep candle's close.
+  //
+  // Look-ahead bug, found 2026-09-01 (script/audit/phase8-collapse.ts): the
+  // entry used to be `sc.close`, the close of the sweep candle. With the
+  // confirmation-bar rule above, 93% of signals fire 1–2 bars AFTER the sweep,
+  // and by construction those bars closed on the reversal side — so the
+  // reported entry was a price that had already moved away in the trade's
+  // favour by a median 57 bps / mean 79 bps (p90 190 bps) against a median
+  // stop distance of 145 bps. Every backtest, the paper engine and the R math
+  // "filled" at that stale price; live market orders could not, and the
+  // journal recorded the gap as "slippage" (50 of 59 Kraken fills adverse,
+  // median 57 bps — the same number). Re-simulated with the real decision
+  // price the portfolio expectancy fell from +0.54R to ≈ +0.05R. The only
+  // signals unaffected are same-bar (premium) sweeps, where sc IS the signal
+  // candle.
+  //
+  // SL stays beyond the swept wick with a 0.5 ATR buffer: the wick IS the
   // invalidation (price reclaimed the level = sweep thesis; breaking back
-  // through = thesis failed). 0.5 ATR cushion because sweeps occasionally
-  // produce follow-up wicks before the real reversal.
+  // through = thesis failed). Risk, R:R and TPs below are all measured from
+  // the real entry, so a confirmation that ran too far now fails the R:R gate
+  // instead of being booked as a phantom fill.
+  entry = price;
   if (best.direction === "bullish") {
-    entry    = sc.close;
     stopLoss = sc.low - atr * 0.5;
   } else {
-    entry    = sc.close;
     stopLoss = sc.high + atr * 0.5;
   }
 
@@ -2481,7 +2499,7 @@ export function liquiditySweepSignal(
   const reason =
     `[Liq Sweep ${dir}] ${best.pool.isEqual ? "EQL/EQH" : "swing"} @ ${best.pool.price.toFixed(5)} ` +
     `| wick ${best.wickRatio.toFixed(1)}× body | vol ${best.volRatio.toFixed(1)}× avg ` +
-    `| RSI ${rsiNow.toFixed(0)} | macro ${macroUp ? "bull" : "bear"} | conf ${conf}%`;
+    `| RSI ${rsiNow.toFixed(0)} | macro ${macroUp ? "bull" : "bear"} | conf ${conf}% | sweep bar -${barsAfter}`;
 
   return { type: dir, entry, stopLoss, takeProfit, takeProfit2, confidence: conf, reason };
 }

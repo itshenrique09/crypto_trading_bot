@@ -474,3 +474,41 @@ de portfólio ≥ +30R/ano no ALL; sobrevive -0.12R e remoção top-5; correlaç
 **Resposta à pergunta 4 da missão**: SIM, vale a pena UMA família nova (TSMOM 1d primeiro; compression
 breakout como 2ª), mas SÓ depois de colher os dois levers baratos e medidos (floor LS + pausar RSI) — uma
 família nova não-validada rende menos por unidade de esforço×risco do que +340R/ano num diff de 1 linha.
+
+---
+
+## Fase 8 — colapso pós-reset (2026-09-01 / 02)
+
+**Pergunta**: porque é que o bot "ficou péssimo, corta trades, tem muitos losses e passa a vida bloqueado nos guards" depois do dia 0 (2026-08-14)?
+**Dados**: exports `trades-paper-2026-09-01.json` (30 trades, Aug 14–25, depois zero), `trades-live-2026-09-01.json` (59 trades Kraken, Aug 11–Sep 1), `trades-paper-2026-08-14.json` (177 trades pré-reset). Realizado: paper exp −0.29R (WR 23%), live exp +0.00R (WR 41%, avg win +1.62R vs +2.55R paper), banda LS conf 60–67 pooled 5 wins / 32 trades (exp −0.66R, p≈0.0004 vs WR 43% previsto). Guards: paper parado (rolling-7d −6R + kill-switch LS) de Aug 22 a Sep 2 salvo Aug 24–25; live parado Aug 21–26 e Aug 28–Sep 2.
+
+**Causa raiz (confirmada pelo harness oficial)** — look-ahead na entrada do Liquidity Sweep. `liquiditySweepSignal` devolvia `entry = sc.close` (fecho da vela do SWEEP). Com a regra de confirmação (Apr 2026), 93% dos sinais disparam 1–2 velas depois; por construção essas velas fecharam do lado da reversão, logo o "preço de entrada" já tinha andado a favor: mediana 57 bps, média 79, p90 190, contra stop mediano de 145 bps (`phase8-report-honest.md`, secção "stale-entry gap"). Harness, paper e a contabilidade em R "enchiam" a esse preço; o live não podia — o journal registava a diferença como "slippage" (50/59 fills adversos, mediana 57 bps: o mesmo número). Replay dos 28 sinais LS do paper em dados Binance: só 11 disparam, 5 com a mesma direcção+confiança (wicks MEXC futures ≠ Binance spot) — o harness nem valida o mesmo fluxo de sinais que o engine negoceia.
+
+**Números honestos** (entrada = fecho da vela de sinal, harness oficial, 8000×1h, $500, 2%):
+| Config | T | WR | PF | sumR | exp |
+|---|---|---|---|---|---|
+| ENGINE floor 60, entrada stale (relatório de Jul/Aug) | 1394 | 44% | 1.84 | +749.8 | +0.54R |
+| ENGINE floor 60, entrada honesta | 894 | 34% | 1.19 | +120.6 | +0.13R |
+| **ENGINE floor 68, entrada honesta (shipped)** | 770 | 33% | 1.08 | +45.0 | +0.06R |
+| — Liquidity Sweep | 632 | 31% | 0.96 | −18.8 | −0.03R |
+| — Break & Retest | 92 | 42% | 1.74 | +41.7 | +0.45R |
+| — RSI Divergence | 46 | 46% | 1.79 | +22.1 | +0.48R |
+| ENGINE floor 60 honesto, 20000×1h (2.3 anos) | 2146 | 31% | 1.06 | +90.9 | +0.04R (maxDD 161R) |
+
+Variantes LS honestas (`phase8-collapse.ts --suite=sweepbar`, 8000 e 20000 velas): floors 60–80, só EQ pool, wick/vol ≥1.5, só sweeps na própria vela, entrada na vela do sweep sem confirmação (2.3y: exp −0.15R, PF 0.82), limite pousado no fecho do sweep (−0.12R) — nenhuma tem edge; +15–30 bps de slippage real torna todas negativas. Único braço que melhora: bloquear LONG com BTC diário em alta (ENGINE +0.15R, PF 1.20) — fica como hipótese para paper, não adoptado.
+Aviso: `phase8-report-core/guards/drift/honest.md` foram corridos com o código ANTES do fix (entrada stale); só as linhas "HONEST"/"DRIFT" desses relatórios e os `phase8-report-sweepbar-*.md` reflectem entradas honestas. Uma primeira corrida do suite "research" tinha um bug de cache (exits de outro pool) e foi apagada.
+
+**Achados secundários** (workflow de 5 investigadores, `subagents/workflows/wf_4424ad7a-ad6`): RSI "pausada por defeito" não pausou (default só se não existir row em `bot_settings`; 5 trades, −2.4R); slippage modelo cobrado em cima de fills reais Kraken (≈0.08R/trade fantasma); sem gate de frescura da vela (5 entradas live 15–57 min depois do fecho, drift médio +115 bps); right-size trim (30/59 trades) normaliza $ mas não a geometria TP/SL; filtro de volume $30M é letra morta (todos os símbolos são "preferred"); guards medem 1R em risco base enquanto os trades arriscam base×1.25; docs/código divergentes (41 vs 40 coins, cooldown 8h vs 12h, min candles 100 vs 220); floor 60 aplicado a paper E live no mesmo dia, contra a política de 90 dias de paper.
+
+**Alterações feitas (working tree, `npx tsc --noEmit` limpo, 170 testes)**:
+1. `server/analysis.ts` — entry = fecho da vela de sinal; reason ganha `| sweep bar -N`.
+2. `server/strategies/liquidity-sweep.ts` — floor 68 restaurado.
+3. `server/routes.ts` — paper enche ao ticker MEXC do momento do scan e re-valida R:R no fill; gate de frescura 10 min nos dois engines; `LIVE_FILL_COSTS` (só taxa) quando o preço é um fill medido; `priceMarketClose` devolve `measured`; liveCheck ganha rede de segurança: repõe a protecção na venue se nenhuma stop estiver activa (máx. 1×/10 min por trade) e fecha a mercado se o last cruzar o SL do journal em >10 bps com a posição ainda aberta (SOFTWARE STOP).
+4. `server/liquidity-sweep-entry.test.ts` — invariante entry == último fecho, R:R ≥ 2 medido na entrada real.
+4b. `server/kraken-client.ts` — `setProtection` arredonda o tamanho à precisão do instrumento (o runner pós-TP1 era `pos.size − closedVol` com lixo de vírgula flutuante, ex. 1.3000000000000003, rejeitado em ETC #365 / DOT #376 → posições 14–41 h sem stop) e valida `sendStatus.status` (a Kraken responde 200 + success mesmo quando rejeita); `closePosition` idem. Com o self-heal do liveCheck (rede de segurança: repõe protecção em falta 1×/10 min e fecha a mercado se o last cruzar o SL — clamp ao break-even após TP1 — em >10 bps), uma rejeição passa a ser retentada e visível em vez de deixar a posição nua.
+5. `script/validate-pipeline-report.md` regenerado (honesto); relatório antigo em `validate-pipeline-report-STALE-ENTRY-2026-09-01.md`.
+6. README / STRATEGIES / CLAUDE / AGENTS actualizados.
+
+**Não feito**: recalibrar guards (não há edge para calibrar); remover RSI do registry (honesto: é positiva); nova estratégia; deploy no VPS.
+
+**Recomendação**: live OFF até o paper HONESTO (fill ao ticker, entrada corrigida) mostrar ≥ +0.3R sobre ≥ 120 trades. O bot, como está, não tem edge demonstrado; o que existia era um artefacto de simulação.

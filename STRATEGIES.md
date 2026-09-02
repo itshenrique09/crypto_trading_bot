@@ -19,8 +19,11 @@ Full technical reference for all trading strategies implemented in the bot.
 
 ## Overview
 
-**Active set (frozen 2026-07-02)**: Liquidity Sweep (1H, 41 coins) · RSI Divergence (1H) · Break & Retest (4H).
-Validated as a portfolio by `script/validate-pipeline.ts` (all engine gates, sequential capital, fees+slippage): **PF 1.99 · +715R · maxDD 31.2%** over the full window; PF 2.00 · +400R in 2026 (data through Jul 7; includes the r_multiple-trailing exit upgrade). Direction × regime matrix confirms symmetric edge: >half of total R comes from BTC-down periods (SHORT·down +284R · PF 1.94; LONG·down +99R · PF 2.02 — reversal buys at capitulation lows). The LS universe expansion (28→41, `script/expand-universe-ls.ts`) required each coin to be profitable in BOTH halves of the year independently, the portfolio to improve overall (+517R → +688R with group cap 3), and a tradeable MEXC futures contract (`script/check-mexc-symbols.ts` — TON/BONK passed the screen but failed this). The Jul 2026 capacity A/B also confirmed the LS 12h cooldown is optimal (8h/6h both reduced total R) — signal parameters stay frozen. Pre-expansion fallback (28 coins, cap 2): PF 2.01 · +517R · maxDD 27.4%. Confluence Swing and SMC are documented below for reference but are **not traded** — see `server/strategies/registry.ts` for the retirement rationale.
+**Active set (frozen 2026-07-02)**: Liquidity Sweep (1H, 40 coins) · RSI Divergence (1H) · Break & Retest (4H).
+
+> **2026-09-01 — every number below this line that predates Sep 2026 was measured with a look-ahead entry.** `liquiditySweepSignal` returned the sweep candle's close as `entry`; with the confirmation-bar rule (Apr 2026) 93% of signals are decided 1–2 bars later, when price had already moved a median 57 bps (mean 79, p90 190) in the trade's favour on a ~145 bps stop. Harness, paper engine and R math all booked that phantom fill. Honest re-measurement (entry = signal candle's close, `script/validate-pipeline.ts` 2026-09-01, 8000×1h): **ENGINE PF 1.08 · +45R · exp +0.06R**; **Liquidity Sweep PF 0.96 · exp −0.03R** (was PF 1.85 / +0.54R); Break & Retest PF 1.74 · exp +0.45R (T=92); RSI Divergence PF 1.79 · exp +0.48R (T=46). Over 2.3 years (20000×1h) the honest system is exp +0.04R with a 161R drawdown. Honest variants of LS tested in `script/audit/phase8-collapse.ts` — floors 60–80, EQ-pool only, wick/vol gates, same-bar sweeps only, entering at the sweep bar without confirmation, a resting limit at the sweep close — none has edge; only "block LONG when BTC daily is up" improves the portfolio (PF 1.20, exp +0.15R) and it remains a hypothesis for paper. The Apr 2026 "+18.4% netR" credited to the confirmation-bar rule was the look-ahead itself: waiting for confirmation while keeping the pre-confirmation price is free favourable drift.
+
+Historical (stale-entry) validation record, kept for provenance: PF 1.99 · +715R · maxDD 31.2% over the full window; PF 2.00 · +400R in 2026 (data through Jul 7). The LS universe expansion (28→41, `script/expand-universe-ls.ts`) required each coin to be profitable in BOTH halves of the year, the portfolio to improve overall (+517R → +688R with group cap 3), and a tradeable MEXC futures contract (`script/check-mexc-symbols.ts` — TON/BONK failed this; LUNC dropped Aug 2026, Kraken does not list it). The Jul 2026 capacity A/B kept the LS 12h cooldown. Confluence Swing and SMC are documented below for reference but are **not traded** — see `server/strategies/registry.ts` for the retirement rationale.
 
 | | Break & Retest | RSI Divergence | Liquidity Sweep |
 |---|---|---|---|
@@ -34,7 +37,7 @@ Validated as a portfolio by `script/validate-pipeline.ts` (all engine gates, seq
 | **TP1 basis** | Next S/R level | 2.5R | ≥2R structural |
 | **TP2 basis** | Next S/R level | 4R | Opposite liquidity pool |
 | **EMA200 guard** | Yes (macro bull for LONG) | Yes (price vs EMA200) | No (mean-reverts after sweep) |
-| **Preferred symbols** | 6 coins | 2 coins | 41 coins (frozen; two-halves screen + MEXC-verified) |
+| **Preferred symbols** | 6 coins | 2 coins | 40 coins (frozen; two-halves screen + MEXC-verified; LUNC dropped Aug 2026) |
 
 > **Source of truth**: `server/strategies/registry.ts` is the canonical list of enabled strategies. If the table above and the registry disagree, the registry wins — fix the doc.
 
@@ -458,12 +461,13 @@ ATR% > 5.5% → skip (unpredictable price action, SL gets blown frequently).
 **Timeframe**: 1H  
 **Philosophy**: Price hunts resting liquidity above prior swing highs (or below lows), then reverses. The sweep wick + immediate reclaim is the entry trigger — institutional stop-runs that fade quickly.
 
-**Entry**: Candle wicks through a recent swing high/low but closes back inside the prior range, with confirmation from the following candle.  
-**SL**: Just beyond the sweep wick's extreme.  
-**TP1**: Nearest opposite-side structural level (≥ 2R minimum enforced internally).  
+**Entry**: Candle wicks through a recent swing high/low but closes back inside the prior range, with confirmation from the following candle(s). **The entry price is the close of the SIGNAL candle** (the last closed candle when the scan runs) — since 2026-09-01; before that it was the sweep candle's close, 1–2 bars stale, which is the look-ahead described in the Overview. The reason string tags the offset (`sweep bar -0/-1/-2`).  
+**SL**: Just beyond the sweep wick's extreme (+0.5 ATR, then pulled 20% toward entry).  
+**TP1**: Nearest opposite-side structural level (≥ 2R from the real entry, enforced internally).  
 **TP2**: Opposing liquidity pool (previous low for a high-sweep, previous high for a low-sweep).  
-**Cooldown**: 8h per symbol.  
-**Min candles**: 100.
+**Confidence floor**: 68 (60 between 2026-08-14 and 2026-09-01; the 60–67 band went 5 wins in 32 real trades).  
+**Cooldown**: 12h per symbol.  
+**Min candles**: 220.
 
 See `server/strategies/liquidity-sweep.ts` for the exact thresholds and reclaim logic.
 
