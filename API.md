@@ -160,7 +160,7 @@ Row shape (all endpoints):
 | `DELETE /api/journal/:id` | Delete row |
 | `POST /api/journal/from-signal` | Create a signal-mode entry from an analysis signal |
 | `GET /api/journal/stats` | Per-strategy aggregates — **paper trades and active strategies only** |
-| `GET /api/journal/export?mode=paper\|live` | **Full dump** (no 200 cap), download envelope `{ app, exportedAt, mode, count, trades }` with `Content-Disposition` filename |
+| `GET /api/journal/export?mode=paper\|live` | **Full dump** (no 200 cap), download envelope `{ app, exportedAt, mode, count, trades }` with `Content-Disposition` filename. Since 2026-09-07 every row carries `engine_version` (`<version>@<commit>` of the build that opened it), so a journal can be sliced by code state; import preserves it |
 | `POST /api/journal/import` | Restore an export (envelope or bare array, ≤10 000 rows). IDs re-assigned; duplicates (symbol+mode+created_at) skipped → idempotent. Returns `{ imported, skipped, invalid, total }` |
 
 > **Closing live positions**: never `PATCH` a live journal row shut — use `POST /api/live/close/:id`, which closes on the venue first and then reconciles the journal. Patching alone leaves the exchange position open and pauses all live entries.
@@ -189,7 +189,7 @@ Cadence: position management every **30s**, scan every **3min**; auto-starts on 
 | `POST /api/live/config` | `{ exchange: "kraken"\|"mexc", apiKey, apiSecret, riskPct ≤3, leverage 1–20 }`. Sentinel `"__keep__"` (or omission) preserves stored credentials so risk/leverage can change alone. Keys stored AES-256-CBC encrypted. |
 | `POST /api/live/test` | Connection test → `{ ok, balance?, error? }` |
 | `POST /api/live/start` / `POST /api/live/stop` | Engine control; start throws if the connection test fails and sets mode `live` |
-| `POST /api/live/close/:id` | Close a live position **on the venue** at market, then reconcile → `{ ok, closedOnVenue, exitPrice }` |
+| `POST /api/live/close/:id` | Close a live position **on the venue** at market, cancel its resting stop/TP, then reconcile → `{ ok, closedOnVenue, exitPrice }` |
 | `GET /api/live/status` | Full venue snapshot (below) |
 
 `GET /api/live/status` response highlights:

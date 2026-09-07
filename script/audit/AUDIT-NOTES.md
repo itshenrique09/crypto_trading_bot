@@ -569,3 +569,59 @@ Aviso: `phase8-report-core/guards/drift/honest.md` foram corridos com o código 
 
 **Validação oficial do engine redesenhado (2026-09-07, `script/validate-pipeline.ts`, Binance 20000×1h ≈ 2.3 anos + 1d×1500, ordem de scan do engine como tie-break, guard de drawdown, gates de regime, $500/2%)**: ENGINE T=566 WR 39% PF 1.15 sumR +54.8 exp **+0.10R** (2026: T=120, +0.11R), balance maxDD 50.8%; sleeves: LS SHORT·BTC-up T=146 exp +0.07R PF 1.10; TSMOM T=420 exp +0.11R PF 1.18. Feed MEXC (8000×1h): exp +0.08R, LS −0.05R, TSMOM +0.09R. Comparação com o engine anterior honesto na mesma janela: PF 0.92, exp −0.06R, maxDD 203R. O redesenho passa de negativo a marginalmente positivo, mas fica ABAIXO do bar PAPER (+0.15R) e é sensível à ordem de tie-break (a investigação, com A→Z, dava +0.28R para o mesmo livro). Veredito: hipótese de paper, live OFF. Braço `--slip=15` em `script/audit/validate-pipeline-report-binance-slip15.md`.
 **Braço --slip=15 (mesma corrida, +15 bps adversos em cada fill, SL/TP fixos, re-gate no fill)**: ENGINE T=559 WR 39% PF 1.08 sumR +26.8 exp **+0.05R** (2026: T=113, +0.05R), balance maxDD 52.1%.
+
+### Fase 9b — trabalhos futuros executados (2026-09-07)
+
+**A/B pré-registados (harness oficial, Binance 2.3y, ordem de scan do engine):**
+| Braço | T | PF | sumR | exp | balance maxDD | Decisão |
+|---|---|---|---|---|---|---|
+| ENGINE com multiplicador BTC ×1.25/×0.75 | 566 | 1.15 | +54.8 | +0.10R | 50.8% | — |
+| ENGINE sizing flat (sem multiplicador) | 566 | 1.15 | +54.8 | +0.10R | 48.5% | **Adoptado**: fluxo de trades idêntico, DD de saldo menor; o multiplicador só aumentava as células que o gate de regime já exclui |
+| TSMOM maxConcurrent=3 | 640 | 1.02 | +10.1 | +0.02R | 84.8% | Rejeitado |
+| TSMOM maxConcurrent=4 | 651 | 1.13 | +57.8 | +0.09R | 84.2% | Rejeitado (DD sobe) |
+| TSMOM maxConcurrent=5 | 672 | 1.15 | +70.3 | +0.10R | 74.6% | Rejeitado (DD sobe) |
+| TSMOM maxConcurrent=6 | 655 | 1.18 | +78.0 | +0.12R | 71.4% | Rejeitado pela regra (sumR sobe, mas DD 71% vs 51%) |
+Regra do sleeve: aceitar o cap com melhor sumR que não suba o maxDD → nenhum passa; o mecanismo `Strategy.maxConcurrent` fica disponível (engines + harness) mas sem valor definido.
+
+**Implementado**: re-gate do fill live (fill que cruza SL/TP1 ou deixa R:R < 1.5 é desfeito a mercado e registado como round trip; o `Math.abs` do right-size escondia fills para além do stop); coluna `engine_version` no journal (`<versão>@<commit>`, migração + export/import); marks ao mark price público da Kraken no paper (fill e gestão) e ao mark da posição no live, com MEXC como fallback; `Strategy.maxConcurrent` nos dois engines e no harness; multiplicador BTC removido dos engines, do harness (`riskMult` fora do ENGINE-CURRENT) e da lib de auditoria (`simOpts.riskMult` para comparações legadas).
+
+### Fase 9c — auditoria SL/TP/trailing/break-even (2026-09-07)
+
+**Método**: 4 auditores adversariais em paralelo (estratégias, paper, live, harness) sobre a working tree, com testes sintéticos e scans dos candles em cache (LS 2419 sinais, TSMOM 2490, B&R 825, RSI 1460), seguidos de cross-check independente dos achados críticos/altos. Verificado OK: direcção SL/TP1/TP2 em todos os sinais reais; gates 0.6%/R:R 1.5 aplicados aos níveis devolvidos igual nos dois engines e no harness; contabilidade paper = harness ao cêntimo (TP1 60%, BE no fill, custos por perna, R = pnl/risk); ordem SL→TP dentro da barra; trail em unidades do risco do fill.
+
+**Achados confirmados e correcções (tudo nesta branch):**
+| Id | Camada | Problema | Correcção |
+|---|---|---|---|
+| live-01 (crítico) | liveScan | Se o *undo* do fill re-gate falhasse, a linha era registada como round trip FECHADO e a posição ficava na venue sem stop, sem TP e sem gestão (liveCheck só gere linhas OPEN) | Undo com 3 tentativas; se ainda falhar a linha fica OPEN com WARNING, tenta-se colocar a stop de imediato e o self-heal/software stop assumem. Ordem "colocada" mas invisível em `positions` passa a ser reconciliada pelo ledger de fills (10 polls + fills) antes de desistir |
+| live-02 (alto) | liveCheck | O self-heal repunha a stop ORIGINAL num runner pós-TP1 (a mudança para BE falhara e `stop_loss` ficara antigo) — −1R em 40% da posição em vez de 0R | Heal ao nível clampado a BE quando `tp1_hit`, e grava `stop_loss` após sucesso; a perna TP da Kraken deixou de fazer falhar o `setProtection` quando a stop ficou colocada |
+| live-03 (alto) | exchange.ts | `KrakenAdapter.getPositions` devolvia `markPrice = entrada` quando faltava o ticker → software stop/TP1/trail cegos, fallback MEXC inatingível | `markPrice` indefinido sem ticker → liveCheck cai para o feed MEXC; self-heal corre ANTES do gate de preço |
+| live-04 (médio) | liveCheck | VWAP do parcial TP1 podia misturar o trim de right-size (também reduce-only, na janela de 5 min) | `notBeforeMs` = instante do envio do parcial em `priceMarketClose`/`exitPriceFromFills` |
+| live-05 (médio) | liveCheck | Heal só verificava a stop; sem rede em software para TP2 | Heal também repõe TP2 em falta; software TP2 fecha o runner a mercado se o mark cruzar TP2 sem ordem na venue |
+| live-06 (médio) | liveScan | Fill favorável (mais perto da stop) ficava com `risk_usd` real < planeado → R inflacionado | `risk_usd` = max(real, planeado) |
+| live-07 (baixo) | live | Ordens protectoras ficavam a "flutuar" após fechos do engine (max-hold, software stop, trail, fecho manual) | `cancelProtection` no adapter/cliente Kraken, chamado após cada fecho iniciado pelo engine |
+| strategies-02 (médio) | tsmom.ts | SHORT em moeda de ATR enorme devolvia TP2 ≤ 0 (92/1180 shorts reais); chegava ao journal e a Kraken rejeitava a perna | `analyze` devolve null quando TP2 ≤ 0; `setProtection` ignora TP não positivo |
+| strategies-03/05 (médio) | engines | TP2 em falta/≤0/mais perto que TP1 tratado de 3 formas diferentes | `normaliseTakeProfit2` nos dois scans: colapsa para single-target (TP2 = TP1) |
+| strategies-04 (médio) | live vs paper | Trades single-target (TP2 == TP1, 67% dos LS) fechavam 100% em TP1 na venue, mas 60% + runner no paper/harness | Venue só recebe TP quando TP2 é distinto; single-target = parcial em software + trail (paridade com paper). Heal respeita a mesma regra |
+| paper-001 (alto) | paperCheck | Trail pós-TP1 sem piso de break-even (TSMOM TP1 = 1.75R; LS com drift de fill) | Já corrigido na 9b (`trailStop > entry`), agora coberto pelo cross-check |
+| harness-02 | validate-pipeline | `--slip` somava aos 5 bps de slippage do modelo na perna de entrada (dupla contagem) | `entrySlippagePct: 0` no braço com slip; `simulateManagedExit` ganhou o parâmetro |
+| harness-05/09 | harness | `maxBars` copiado à mão; fee default da lib 0.0002 | `maxBars` derivado de `MAX_HOLD_HOURS_BY_INTERVAL`; fee 0.0005 |
+
+**strategies-01 (alto) — stop LS dentro do wick varrido.** Com a entrada honesta, o aperto de 20% coloca a stop DENTRO do wick em 31% dos sinais (713/2309; bar-1/bar-2), contradizendo o comentário do código ("o wick É a invalidação"). Hipótese pré-declarada: re-sweeps mais rasos param o trade → clampar a stop ≥ 0.1 ATR além do wick deve ajudar. **A/B oficial** (harness, Binance 2.3y, 20000 candles, ordem de scan do engine, sem slip; `LS_STOP_MODE`):
+| Braço | T | PF | sumR | exp | 2026 exp | maxDD | LS sleeve |
+|---|---|---|---|---|---|---|---|
+| tighten (em produção) | 567 | 1.21 | +74.5 | +0.13R | +0.10R | 48.5% | T=146 PF 1.10 +0.08R |
+| clamp (≥0.1 ATR além do wick) | 570 | 1.19 | +66.7 | +0.12R | +0.07R | 48.5% | T=149 PF 1.05 +0.04R |
+| raw (sem aperto) | 566 | 1.18 | +61.2 | +0.11R | +0.03R | 48.5% | T=149 PF 1.03 +0.02R |
+Diferenças dentro do ruído (Δ ≈ 0.01R/trade; SE da média ≈ 0.05R) e o braço em produção não é o pior. **Hipótese não suportada → a geometria NÃO muda** (política de validação: alteração de estratégia sem suporte do harness não entra). O facto fica documentado no código, em STRATEGIES.md e num teste que fixa a geometria; os braços continuam disponíveis via `LS_STOP_MODE` para futuros A/B.
+
+**Nota sobre a baseline**: a remoção dos 92 shorts TSMOM com TP2 ≤ 0 (correcção strategies-02) muda a baseline oficial de T=566 PF 1.15 exp +0.10R para **T=567 PF 1.21 sumR +74.5 exp +0.13R** (TSMOM sleeve +0.11R → +0.15R). É uma correcção de contrato, não uma optimização: um preço não cai abaixo de zero.
+
+**Validação oficial após a auditoria (2026-09-07, geometria em produção, `LS_STOP_MODE=tighten`):**
+| Braço | T | WR | PF | sumR | exp | 2026 exp | maxDD | LS sleeve | TSMOM sleeve |
+|---|---|---|---|---|---|---|---|---|---|
+| Binance 20000×1h + 1d (`script/validate-pipeline-report.md`) | 567 | 40% | 1.21 | +74.5 | +0.13R | +0.10R | 48.5% | T=146 PF 1.10 +0.08R | T=421 PF 1.26 +0.15R |
+| Feed MEXC 20000×1h (`script/audit/validate-pipeline-report-mexc.md`) | 522 | 38% | 1.08 | +27.3 | +0.05R | −0.02R | 44.4% | T=108 PF 0.85 **−0.12R** | T=414 PF 1.16 +0.10R |
+| Binance + 15 bps de slip na entrada, sem dupla contagem (`script/audit/validate-pipeline-report-binance-slip15.md`) | 561 | 40% | 1.15 | +52.9 | +0.09R | +0.05R | 48.4% | T=139 PF 1.01 +0.01R | T=422 PF 1.21 +0.12R |
+Leitura: o livro continua PAPER-CANDIDATE. O sleeve LS SHORT·BTC-up é **negativo no feed do engine** (−0.12R, 108 trades) e ≈ 0 com slip realista; o que sustenta o livro é o TSMOM (+0.10R a +0.15R consoante o feed). O gate para live não muda: ≥ +0.3R em ≥ 120 trades paper honestos após 2026-09-02, com bootstrap por blocos.
+
+**Não alterado (baixo, registado):** exit_reason estruturado no journal (paper-006); pricing do undo com fills reais (live-08); flag de trades truncados no fim da janela do harness (harness-10).
