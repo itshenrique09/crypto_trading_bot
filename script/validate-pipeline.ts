@@ -33,8 +33,10 @@ import {
   defaultBtcContext,
   type BtcTrend,
 } from "../server/btc-regime-gate";
-import { isRollingDrawdownBreached, strategiesToPause } from "../server/portfolio-guards";
-import type { Strategy } from "../server/strategies/types";
+import { isRollingDrawdownBreached, strategiesToPause, evaluateDrawdownGuard, emptyDrawdownGuardState, type DrawdownGuardState } from "../server/portfolio-guards";
+import { regimeAllows, type Strategy, type BtcDailyTrend } from "../server/strategies/types";
+import { GUARD } from "../server/engine-config";
+import { feedFromEnvOrArgv, fetchMexcPaginated } from "./audit/feed";
 
 // ── Engine constants (mirrored from server/routes.ts) ─────────────────────
 const MIN_SL_DISTANCE_PCT = 0.006;
@@ -72,6 +74,14 @@ const argv = Object.fromEntries(
 const TOTAL_CANDLES = parseInt(argv.candles ?? "8000");
 const START_CAPITAL = parseFloat(argv.capital ?? "500");
 const BASE_RISK_PCT = parseFloat(argv.risk ?? "2");
+// --feed=mexc validates on the engine's own candle feed (MEXC futures) instead
+// of Binance spot — see script/audit/feed.ts. Default binance (reproducible).
+const FEED = feedFromEnvOrArgv(argv);
+// --slip=<bps>: adverse entry drift applied to every fill (SL/TP stay structural,
+// the trade is re-gated on the real entry and right-sized like the live engine).
+// 0 = the harness's classic close fill; 15 ≈ measured Kraken market-order cost.
+const SLIP_BPS = parseFloat(argv.slip ?? "0");
+const GUARD_OPTS = { peakWindowMs: GUARD.peakWindowDays * 86_400_000, haltR: GUARD.haltR, resumeR: GUARD.resumeR, maxHaltMs: GUARD.maxHaltHours * 3_600_000 };
 const YEAR_2026_TS = Date.UTC(2026, 0, 1) / 1000;
 
 // ── Toggleable gates ───────────────────────────────────────────────────────
@@ -88,11 +98,14 @@ type GateId =
   | "ddMonthly"    // -8R monthly portfolio pause
   | "ddRolling"    // -6R rolling-7d portfolio pause
   | "kelly"        // fractional-Kelly sizing (off → base risk %)
-  | "riskMult";    // BTC daily-trend risk multiplier 0.75x/1.25x
+  | "riskMult"     // BTC daily-trend risk multiplier 0.75x/1.25x
+  | "ddGuard"      // 2026-09-03 portfolio drawdown guard (trade-R, 30d peak, hysteresis, bounded halt)
+  | "regimeGate";  // 2026-09-03 per-strategy direction × BTC-daily regime gate (Strategy.regimeGate)
 
 const ALL_GATES: GateId[] = [
   "dirOverlay", "dailyTrend", "weeklyTrend", "shortConf", "atrPct",
   "btcCap", "groupCap", "killSwitch", "ddDaily", "ddMonthly", "ddRolling", "kelly", "riskMult",
+  "ddGuard", "regimeGate",
 ];
 
 interface RunConfig {
@@ -139,6 +152,7 @@ async function fetchJSON(url: string, retries = 3): Promise<any> {
 }
 
 async function fetchPaginated(symbol: string, interval: string, total: number): Promise<OHLCV[]> {
+  if (FEED === "mexc") return fetchMexcPaginated(symbol, interval, total, CACHE_DIR, DAY_KEY);
   const cachePath = `${CACHE_DIR}/pl_${symbol}_${interval}_${total}_${DAY_KEY}.json`;
   if (existsSync(cachePath)) {
     return JSON.parse(readFileSync(cachePath, "utf-8")) as OHLCV[];
@@ -222,7 +236,7 @@ interface Candidate {
   takeProfit2?: number | null;
 }
 
-interface ResolvedExit { netR: number; exitTsSec: number }
+interface ResolvedExit { netR: number; exitTsSec: number; filled: boolean }
 
 function intervalSec(iv: string): number {
   if (iv === "1h") return 3600;
@@ -235,7 +249,7 @@ function intervalHours(iv: string): number { return intervalSec(iv) / 3600; }
 function buildCandidates(strat: Strategy, symbol: string, candles: OHLCV[]): Candidate[] {
   const out: Candidate[] = [];
   const window = Math.max(strat.minCandles, 60);
-  const maxBars = strat.interval === "4h" ? 60 : 200; // parity with validate-2026 + route backtests
+  const maxBars = strat.interval === "4h" ? 60 : 200; // 60×4h, 200×1h, 200×1d — parity with server/engine-config MAX_HOLD
   const ivSec = intervalSec(strat.interval);
   if (candles.length < window + maxBars + 10) return out;
 
@@ -289,12 +303,24 @@ function resolveExits(
   resolved = new Array<ResolvedExit>(candidates.length);
   for (const c of candidates) {
     const candles = streams.get(c.streamKey)!;
+    // Adverse entry drift (--slip): the fill lands SLIP_BPS against the trade,
+    // SL/TP stay at the signal's structural levels, and the trade is re-gated on
+    // the real entry (stop ≥ 0.6%, R:R ≥ 1.5) exactly like the engines' fill
+    // re-gate. netR is per real risk; the engines right-size to the planned $risk.
+    const d = SLIP_BPS / 10_000;
+    const entry = c.dir === "LONG" ? c.entry * (1 + d) : c.entry * (1 - d);
+    const riskH = c.dir === "LONG" ? entry - c.stopLoss : c.stopLoss - entry;
+    const rewardH = c.dir === "LONG" ? c.takeProfit1 - entry : entry - c.takeProfit1;
+    if (riskH <= 0 || rewardH <= 0 || riskH / entry < MIN_SL_DISTANCE_PCT || rewardH / riskH < MIN_RR) {
+      resolved[c.idx] = { netR: 0, exitTsSec: c.tsSec, filled: false };
+      continue;
+    }
     const exit = simulateManagedExit(
-      { direction: c.dir, entry: c.entry, stopLoss: c.stopLoss, takeProfit1: c.takeProfit1, takeProfit2: c.takeProfit2 },
+      { direction: c.dir, entry, stopLoss: c.stopLoss, takeProfit1: c.takeProfit1, takeProfit2: c.takeProfit2 },
       candles.slice(c.entryIdx + 1, c.entryIdx + 1 + c.maxBars),
       exitCfg,
     );
-    resolved[c.idx] = { netR: exit.netR, exitTsSec: c.tsSec + exit.barsHeld * c.ivSec };
+    resolved[c.idx] = { netR: exit.netR, exitTsSec: c.tsSec + exit.barsHeld * c.ivSec, filled: true };
   }
   exitCache.set(key, resolved);
   return resolved;
@@ -330,12 +356,20 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
   const exits = resolveExits(candidates, streams, cfg.exit);
   const active = new Set((cfg.strategies ?? strategies.map(s => s.id)));
   const excluded = new Set(cfg.excludeSymbols ?? []);
+  const scanOrder = new Map(Array.from(new Set(strategies.flatMap(s => s.preferredSymbols ?? []))).map((s, i) => [s, i] as [string, number]));
   const cands = candidates
     .filter(c => active.has(c.stratId) && !excluded.has(c.symbol))
-    .sort((a, b) => a.tsSec - b.tsSec || a.symbol.localeCompare(b.symbol));
+    // Same-timestamp tie-break = the ENGINE's scan order (union of preferredSymbols in
+    // registry order, see SCANNER_COINS in server/routes.ts). With maxOpen binding,
+    // the order decides which coincident signals are taken — daily strategies emit
+    // every signal at the same timestamp — and A→Z was found to be the most
+    // favourable of 23 orderings for TSMOM (phase 9 review). Parity, not luck.
+    .sort((a, b) => a.tsSec - b.tsSec || (scanOrder.get(a.symbol) ?? 9999) - (scanOrder.get(b.symbol) ?? 9999) || a.symbol.localeCompare(b.symbol));
 
   const perSymbolCap = cfg.perSymbolCap ?? 1;
   const cooldownH = new Map(strategies.map(s => [s.id, cfg.cooldownOverride?.[s.id] ?? s.cooldownHours ?? 0]));
+  const stratById = new Map(strategies.map(s => [s.id, s]));
+  let ddState: DrawdownGuardState = emptyDrawdownGuardState();
 
   let balance = START_CAPITAL;
   let peakBalance = START_CAPITAL;
@@ -413,7 +447,13 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
       if (last && (nowMs - last) / 3_600_000 < cd) { block("cooldown"); continue; }
     }
 
-    // ── portfolio drawdown guards (mirror paperScan order) ──
+    // ── portfolio drawdown guard (engine since 2026-09-03: trade-R, 30d peak, hysteresis, bounded halt) ──
+    if (!skip.has("ddGuard")) {
+      const ev = evaluateDrawdownGuard(closedLog, ddState, { ...GUARD_OPTS, now: nowMs });
+      ddState = ev.state;
+      if (ddState.halted) { block("ddGuard"); continue; }
+    }
+    // ── legacy trio (daily / monthly / rolling-7d) — kept as toggles for A/Bs, off in ENGINE-CURRENT ──
     const oneR = balance * BASE_RISK_PCT / 100;
     if (!skip.has("ddDaily")) {
       const dayStart = new Date(nowMs); dayStart.setUTCHours(0, 0, 0, 0);
@@ -433,6 +473,11 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
 
     // ── BTC regime: risk multiplier, position cap, directional overlay ──
     const btcDailyTrend = dTrend("BTC", nowSec) as BtcTrend;
+    // ── per-strategy regime gate (direction × BTC daily) — declared on the Strategy, applied by both engines ──
+    if (!skip.has("regimeGate")) {
+      const strat = stratById.get(c.stratId);
+      if (strat && !regimeAllows(strat, c.dir, btcDailyTrend as BtcDailyTrend)) { block("regimeGate"); continue; }
+    }
     let riskMultiplier = 1.0;
     if (!skip.has("riskMult")) {
       if (btcDailyTrend === "up") riskMultiplier = 1.25;
@@ -528,6 +573,7 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
     if (riskUsd <= 0) { block("zeroRisk"); continue; }
 
     const exit = exits[c.idx];
+    if (!exit.filled) { block("unfilled"); continue; }
     const trade: SimTrade = {
       symbol: c.symbol, strategy: c.stratId, dir: c.dir,
       netR: exit.netR, riskUsd, pnlUsd: exit.netR * riskUsd,
@@ -573,8 +619,8 @@ async function main() {
   const log = (s = "") => { console.log(s); lines.push(s); };
 
   log(`# Full-Pipeline Portfolio Validation — ${new Date().toISOString().slice(0, 10)}`);
-  log(`Capital $${START_CAPITAL} · base risk ${BASE_RISK_PCT}% · candles ${TOTAL_CANDLES} · gates mirror server/routes.ts paperScan`);
-  log(`Unmodeled: MEXC volume/spread/funding filters, entry drift, engine downtime.`);
+  log(`Capital $${START_CAPITAL} · base risk ${BASE_RISK_PCT}% · candles ${TOTAL_CANDLES} · feed ${FEED === "mexc" ? "MEXC futures (engine feed)" : "Binance spot"} · entry slip ${SLIP_BPS} bps · gates mirror server/routes.ts (drawdown guard ${GUARD.haltR}/${GUARD.resumeR}R over ${GUARD.peakWindowDays}d, regime gates from the registry)`);
+  log(`Entry = signal candle close (since 2026-09-01). Unmodeled: spread/funding filters, engine downtime; slippage only via --slip.`);
   log();
 
   // ── data ──
@@ -586,7 +632,8 @@ async function main() {
       const key = `${sym}:${strat.interval}`;
       if (!streams.has(key)) {
         process.stdout.write(`  fetching ${key}...\r`);
-        try { streams.set(key, await fetchPaginated(sym, strat.interval, TOTAL_CANDLES)); }
+        // daily strategies: 1500 bars ≈ 4 years is plenty and keeps the fetch bounded
+        try { streams.set(key, await fetchPaginated(sym, strat.interval, strat.interval === "1d" ? Math.min(TOTAL_CANDLES, 1500) : TOTAL_CANDLES)); }
         catch (e: any) { console.error(`fetch failed ${key}: ${e?.message ?? e}`); }
       }
     }
@@ -635,7 +682,9 @@ async function main() {
   //     (+ live-only volume/spread/funding + max-hold timeout 200h/240h);
   //   exits: TP1 60% → SL breakeven → trail r_multiple 2R (default since Jul 7
   //     exit A/B: beat fixed 2% on every metric in both windows).
-  const ENGINE_CURRENT_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "ddMonthly", "kelly"]);
+  // ENGINE-CURRENT (2026-09-03): the legacy trio (ddDaily/ddRolling/killSwitch) is OFF and the
+  // drawdown guard + per-strategy regime gate are ON — exactly what server/routes.ts runs.
+  const ENGINE_CURRENT_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "ddMonthly", "kelly", "ddDaily", "ddRolling", "killSwitch"]);
   const ENGINE_EXIT: ManagedExitConfig = { trailMode: "r_multiple", trailRMultiple: 2.0 };
   const configs: RunConfig[] = [
     { label: "ENGINE-CURRENT (shipped Jul 2026)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT },
@@ -764,7 +813,10 @@ async function main() {
     log(`  ${m}  ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
   }
 
-  const out = "script/validate-pipeline-report.md";
+  // The committed report is the Binance / slip-0 run; other feeds and slip arms get their own file.
+  const out = FEED === "binance" && SLIP_BPS === 0
+    ? "script/validate-pipeline-report.md"
+    : `script/audit/validate-pipeline-report-${FEED}${SLIP_BPS ? `-slip${SLIP_BPS}` : ""}.md`;
   writeFileSync(out, lines.join("\n"));
   console.log(`\n[report written to ${out}]`);
 }
