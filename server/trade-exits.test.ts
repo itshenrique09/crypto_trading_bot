@@ -54,3 +54,14 @@ test("managed exit subtracts taker fees and slippage from net PnL", () => {
   assert.equal(result.grossPnlPct, 9.12);
   assert.ok(result.netPnlPct < result.grossPnlPct);
 });
+
+test("entrySlippagePct=0 charges slippage on the exit legs only (harness --slip parity)", () => {
+  const candles = [{ time: 1, open: 100, high: 103, low: 94, close: 95, volume: 1 }];
+  const both = simulateManagedExit(longLevels, candles, { takerFeePct: 0, slippagePct: 0.001 });
+  const exitOnly = simulateManagedExit(longLevels, candles, { takerFeePct: 0, slippagePct: 0.001, entrySlippagePct: 0 });
+  // Gross is −5% either way; default models 10 bps on BOTH legs (0.2%), the
+  // harness arm that already moved the entry pays it once (0.1%).
+  assert.equal(both.grossPnlPct, -5);
+  assert.ok(Math.abs(both.netPnlPct - (-5.2)) < 1e-9);
+  assert.ok(Math.abs(exitOnly.netPnlPct - (-5.1)) < 1e-9);
+});

@@ -13,6 +13,13 @@ export interface ManagedExitConfig {
   trailingPct?: number;
   takerFeePct?: number;
   slippagePct?: number;
+  /**
+   * Slippage charged on the ENTRY leg only. Defaults to `slippagePct` (both
+   * legs modelled alike). The harness sets it to 0 when it has already moved
+   * the entry against the trade with an explicit drift (--slip), so the same
+   * bps are not charged twice (audit 2026-09-07, harness-02).
+   */
+  entrySlippagePct?: number;
   /** Trailing mode for the post-TP1 runner. Defaults to "fixed_pct" (legacy). */
   trailMode?: "fixed_pct" | "r_multiple";
   /** R-multiple for "r_multiple" trail (peak ∓ k×|entry-SL|). Defaults to 2.0. */
@@ -68,6 +75,7 @@ export function simulateManagedExit(
   const trailingPct = Math.max(0, config.trailingPct ?? DEFAULT_TRAILING_PCT);
   const takerFeePct = Math.max(0, config.takerFeePct ?? DEFAULT_TAKER_FEE_PCT);
   const slippagePct = Math.max(0, config.slippagePct ?? DEFAULT_SLIPPAGE_PCT);
+  const entrySlipPct = Math.max(0, config.entrySlippagePct ?? slippagePct);
   const trailMode   = config.trailMode ?? "fixed_pct";
   const trailR      = Math.max(0, config.trailRMultiple ?? 2.0);
 
@@ -198,7 +206,11 @@ export function simulateManagedExit(
     return sum + fill.share * directionalReturn(direction, entry, fill.price) * 100;
   }, 0);
   const totalExitShare = fills.reduce((sum, fill) => sum + fill.share, 0);
-  const costPct = (takerFeePct + slippagePct) * 100 * (1 + totalExitShare);
+  // Fees on every leg; slippage on the entry leg (entrySlipPct) and on each
+  // exit leg (slippagePct), all as % of the ORIGINAL notional.
+  const costPct = takerFeePct * 100 * (1 + totalExitShare)
+    + entrySlipPct * 100
+    + slippagePct * 100 * totalExitShare;
   const netPnlPct = grossPnlPct - costPct;
   const riskPct = (riskAbs / entry) * 100;
 

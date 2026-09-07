@@ -48,6 +48,13 @@ export interface Strategy {
    * exists yet; the Settings UI can flip it afterwards.
    */
   defaultPaused?: { paper?: boolean; live?: boolean };
+  /**
+   * Maximum concurrent open positions for THIS strategy (a slot sleeve inside
+   * the portfolio cap). Multi-week strategies otherwise occupy every slot and
+   * starve the intraday ones — the phase-6/9 TSMOM "cannibalisation". Applied
+   * identically by both engines and the harness; undefined = only the global cap.
+   */
+  maxConcurrent?: number;
   /** Analyze candles and return a signal or null */
   analyze(candles: OHLCV[]): StrategySignal | null;
 }

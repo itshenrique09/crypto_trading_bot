@@ -76,8 +76,11 @@ test("Kraken positions are marked against the venue's own mark price", async () 
   assert.equal(btc.markPrice, 64_400);                       // from the ticker feed
   assert.ok(Math.abs(btc.notionalUsd! - 0.0031 * 64_400) < 1e-6);
   assert.equal(btc.unrealizedFunding, 0.02);
-  // No ticker for SOL → falls back to entry rather than reporting a bogus mark.
-  assert.equal(sol.markPrice, 74);
+  // No ticker for SOL → the mark is UNKNOWN (undefined), never the entry price:
+  // liveCheck marks on this field, and an entry-priced "mark" made the software
+  // stop / TP1 / trail blind (audit 2026-09-07, live-03). Notional still uses entry.
+  assert.equal(sol.markPrice, undefined);
+  assert.ok(Math.abs(sol.notionalUsd! - 2.7 * 74) < 1e-6);
 });
 
 test("getProtection reads BOTH of Kraken's stop spellings, and only reduce-only orders", async () => {

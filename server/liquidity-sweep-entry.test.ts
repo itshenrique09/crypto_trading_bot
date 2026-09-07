@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { liquiditySweepSignal, type OHLCV } from "./analysis";
+import { liquiditySweepSignal, setLiquiditySweepStopMode, getLiquiditySweepStopMode, type OHLCV } from "./analysis";
 
 const CACHE_DIR = join(process.cwd(), "script", ".cache");
 
@@ -52,4 +52,42 @@ test("liquidity sweep entry is the signal candle's close (no stale sweep-bar pri
   assert.ok(fired > 0, "expected at least one signal in the cached streams");
   // The confirmation-bar rule still produces most signals; the fix only changes WHERE they are priced.
   assert.ok(confirmationBar > 0, "expected confirmation-bar signals to still exist");
+});
+
+test("liquidity sweep stop modes: clamp keeps the stop beyond the swept wick, tighten (shipped) does not for a share of signals", (t) => {
+  const streams = cachedStreams();
+  if (streams.length === 0) { t.skip("no cached 1h candles under script/.cache"); return; }
+  const original = getLiquiditySweepStopMode();
+  const scan = (): { fired: number; insideWick: number } => {
+    let fired = 0, insideWick = 0;
+    for (const { candles } of streams) {
+      const start = Math.max(220, candles.length - 2500);
+      for (let i = start; i < candles.length; i++) {
+        const slice = candles.slice(i - 220, i + 1);
+        const sig = liquiditySweepSignal(slice);
+        if (sig.type === "NONE") continue;
+        fired++;
+        const k = Number(sig.reason.match(/sweep bar -(\d)/)![1]);
+        const sweep = slice[slice.length - 1 - k];
+        const inside = sig.type === "LONG" ? sig.stopLoss > sweep.low : sig.stopLoss < sweep.high;
+        if (inside) insideWick++;
+      }
+    }
+    return { fired, insideWick };
+  };
+  try {
+    setLiquiditySweepStopMode("clamp");
+    const clamped = scan();
+    assert.ok(clamped.fired > 0);
+    assert.equal(clamped.insideWick, 0, "clamp mode: the stop must stay beyond the sweep extreme");
+    // The shipped tighten arm is what the audit caught: with the honest entry it
+    // puts a material share of stops inside the wick. The official A/B found no
+    // cost (AUDIT-NOTES Fase 9c), so it stays — pin the geometry so the fact is
+    // visible, not accidental.
+    setLiquiditySweepStopMode("tighten");
+    const tightened = scan();
+    assert.ok(tightened.insideWick > 0, "tighten mode is expected to breach the wick on real data");
+  } finally {
+    setLiquiditySweepStopMode(original);
+  }
 });

@@ -123,6 +123,10 @@ export async function getDb(): Promise<Database> {
     // post-trim, position_size pre-trim → trail ran ~1-1.8R instead of 2R,
     // caught 2026-08-21). Recorded explicitly so no ratio inference is needed.
     "ALTER TABLE journal ADD COLUMN entry_risk_dist REAL",
+    // Which build opened the trade (version@commit). Aug 2026 had four engine
+    // changes inside one "clean" measurement window and no way to slice the
+    // journal by code state afterwards; every row now carries its engine.
+    "ALTER TABLE journal ADD COLUMN engine_version TEXT",
   ];
   for (const sql of migrations) {
     try { _db.run(sql); } catch { /* already exists */ }

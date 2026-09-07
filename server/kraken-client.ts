@@ -205,6 +205,49 @@ export function selectPosition(
   ) ?? null;
 }
 
+// ── Public tickers (no credentials) ─────────────────────────────────────────
+// Kraken's mark price is what its stops trigger on and what it settles P&L on.
+// Both engines mark open positions and (paper) fill at this price when it is
+// available, so paper ≈ live ≈ venue; MEXC's last price remains the fallback.
+let publicTickerCache: { at: number; map: Map<string, KrakenTicker> } | null = null;
+
+export async function fetchKrakenPublicTickers(): Promise<Map<string, KrakenTicker>> {
+  if (publicTickerCache && Date.now() - publicTickerCache.at < 5_000) return publicTickerCache.map;
+  const res = await fetch(`${BASE_URL}${API_PREFIX}/tickers`);
+  if (!res.ok) throw new Error(`Kraken tickers → ${res.status}`);
+  const json: any = await res.json();
+  const map = new Map<string, KrakenTicker>();
+  for (const t of json?.tickers ?? []) {
+    const symbol = String(t?.symbol ?? "").toUpperCase();
+    if (!symbol.startsWith("PF_")) continue;
+    map.set(symbol, {
+      symbol,
+      markPrice: Number(t.markPrice ?? t.last ?? 0),
+      last: Number(t.last ?? t.markPrice ?? 0),
+      fundingRate: t.fundingRate != null ? Number(t.fundingRate) : null,
+      fundingRatePrediction: t.fundingRatePrediction != null ? Number(t.fundingRatePrediction) : null,
+      vol24h: Number(t.vol24h ?? 0),
+      bid: t.bid != null && Number.isFinite(Number(t.bid)) ? Number(t.bid) : null,
+      ask: t.ask != null && Number.isFinite(Number(t.ask)) ? Number(t.ask) : null,
+    });
+  }
+  publicTickerCache = { at: Date.now(), map };
+  return map;
+}
+
+/** Bot symbol → Kraken mark price, for every PF_ perpetual with a positive mark. Empty map on failure. */
+export async function fetchKrakenMarks(): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  try {
+    for (const t of Array.from((await fetchKrakenPublicTickers()).values())) {
+      if (t.markPrice > 0) out.set(fromKrakenSymbol(t.symbol), t.markPrice);
+    }
+  } catch (err) {
+    console.error("[kraken] public tickers unavailable — marking on MEXC last:", (err as any)?.message ?? err);
+  }
+  return out;
+}
+
 // ── Client ────────────────────────────────────────────────────────────────
 
 export class KrakenClient {
@@ -342,24 +385,7 @@ export class KrakenClient {
    */
   async getTickers(): Promise<Map<string, KrakenTicker>> {
     if (this.tickerCache && Date.now() - this.tickerCache.at < 5_000) return this.tickerCache.map;
-    const res = await fetch(`${BASE_URL}${API_PREFIX}/tickers`);
-    if (!res.ok) throw new Error(`Kraken tickers → ${res.status}`);
-    const json: any = await res.json();
-    const map = new Map<string, KrakenTicker>();
-    for (const t of json?.tickers ?? []) {
-      const symbol = String(t?.symbol ?? "").toUpperCase();
-      if (!symbol.startsWith("PF_")) continue;
-      map.set(symbol, {
-        symbol,
-        markPrice: Number(t.markPrice ?? t.last ?? 0),
-        last: Number(t.last ?? t.markPrice ?? 0),
-        fundingRate: t.fundingRate != null ? Number(t.fundingRate) : null,
-        fundingRatePrediction: t.fundingRatePrediction != null ? Number(t.fundingRatePrediction) : null,
-        vol24h: Number(t.vol24h ?? 0),
-        bid: t.bid != null && Number.isFinite(Number(t.bid)) ? Number(t.bid) : null,
-        ask: t.ask != null && Number.isFinite(Number(t.ask)) ? Number(t.ask) : null,
-      });
-    }
+    const map = await fetchKrakenPublicTickers();
     this.tickerCache = { at: Date.now(), map };
     return map;
   }
@@ -509,11 +535,7 @@ export class KrakenClient {
     // Drop stale protection for this symbol before writing new levels. This
     // must recognise BOTH spellings of a stop, or the order it fails to match
     // is left resting forever — see isProtectiveOrderType.
-    for (const o of await this.getOpenOrders()) {
-      if (o.symbol === symbol && o.reduceOnly && isProtectiveOrderType(o.orderType)) {
-        await this.cancelOrder(o.orderId).catch(() => { /* already gone */ });
-      }
-    }
+    await this.cancelProtection(botSymbol);
 
     // Kraken answers HTTP 200 + result:"success" even when the order itself
     // is rejected — the verdict is in sendStatus.status. openPosition checked
@@ -536,22 +558,52 @@ export class KrakenClient {
     });
     assertPlaced(sl, "stop-loss");
 
+    // The take-profit leg is best-effort ONCE the stop is resting: a rejected
+    // TP used to throw here, which made the caller believe the whole update
+    // failed (journal stop never moved to break-even, heal re-armed the venue
+    // at the ORIGINAL stop — audit 2026-09-07, live-02). The stop is the safety
+    // contract; a missing TP is re-placed by liveCheck's self-heal. A TP level
+    // that is not a positive price (a SHORT whose 3.5×ATR target went below
+    // zero) is skipped outright instead of being sent for the venue to reject.
     let tpId: string | undefined;
-    if (takeProfitPrice != null && Number.isFinite(takeProfitPrice)) {
-      const tp = await this.request<any>("POST", "/sendorder", {
-        orderType: "take_profit",
-        symbol,
-        side,
-        size: orderSize,
-        stopPrice: roundPrice(takeProfitPrice, inst.tickSize),
-        reduceOnly: true,
-        triggerSignal: "mark",
-      });
-      assertPlaced(tp, "take-profit");
-      tpId = String(tp?.sendStatus?.order_id ?? "");
+    if (takeProfitPrice != null && Number.isFinite(takeProfitPrice) && takeProfitPrice > 0) {
+      try {
+        const tp = await this.request<any>("POST", "/sendorder", {
+          orderType: "take_profit",
+          symbol,
+          side,
+          size: orderSize,
+          stopPrice: roundPrice(takeProfitPrice, inst.tickSize),
+          reduceOnly: true,
+          triggerSignal: "mark",
+        });
+        assertPlaced(tp, "take-profit");
+        tpId = String(tp?.sendStatus?.order_id ?? "");
+      } catch (tpErr: any) {
+        console.error(`[kraken] take-profit leg for ${botSymbol} not placed (stop IS resting @ ${stopLossPrice}): ${tpErr?.message ?? tpErr}`);
+      }
     }
 
     return { stopOrderId: String(sl?.sendStatus?.order_id ?? ""), takeProfitOrderId: tpId };
+  }
+
+  /**
+   * Cancel every reduce-only stop / take-profit resting for a bot symbol.
+   * Used before re-placing protection and after engine-initiated full closes,
+   * so a filled position never leaves orphan triggers behind (an orphan
+   * reduce-only order is harmless on Kraken — reduceOnly on a flat book is
+   * rejected — but it clutters the order list and the protection display).
+   */
+  async cancelProtection(botSymbol: string): Promise<number> {
+    const symbol = toKrakenSymbol(botSymbol);
+    let n = 0;
+    for (const o of await this.getOpenOrders()) {
+      if (o.symbol === symbol && o.reduceOnly && isProtectiveOrderType(o.orderType)) {
+        await this.cancelOrder(o.orderId).catch(() => { /* already gone */ });
+        n++;
+      }
+    }
+    return n;
   }
 
   // ── Connection test ─────────────────────────────────────────────────────

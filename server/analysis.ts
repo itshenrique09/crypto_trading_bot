@@ -2261,6 +2261,28 @@ export function rsiDivergenceSignal(candles: OHLCV[]): RsiDivSignal {
 // side of the pool. 21-coin 3.7y A/B: +18.4% netR, all 21 PF improved,
 // trade count –16% (fewer/higher-quality setups).
 // Interval: 1H. minCandles: 220.
+
+/**
+ * How the Liquidity Sweep stop is finished after the structural level is set:
+ *  - "tighten" (default, shipped): pull the whole entry→stop distance 20%
+ *    toward entry. Validated May 2026 with the STALE sweep-close entry; with
+ *    the honest entry (signal-candle close, 1–2 bars of follow-through away)
+ *    the same pull lands the stop INSIDE the swept wick for 31% of signals
+ *    (audit 2026-09-07, strategies-01) — see the tightening comment below for
+ *    why it is nevertheless kept;
+ *  - "clamp": tighten, but never inside the swept wick — keep ≥ 0.1 ATR
+ *    beyond the sweep extreme (A/B arm);
+ *  - "raw": no tightening at all (A/B counterfactual).
+ * Read from LS_STOP_MODE for the harness; settable for tests.
+ */
+export type LiquiditySweepStopMode = "tighten" | "clamp" | "raw";
+let lsStopMode: LiquiditySweepStopMode =
+  (["tighten", "clamp", "raw"] as const).includes(process.env.LS_STOP_MODE as LiquiditySweepStopMode)
+    ? (process.env.LS_STOP_MODE as LiquiditySweepStopMode)
+    : "tighten";
+export function setLiquiditySweepStopMode(mode: LiquiditySweepStopMode): void { lsStopMode = mode; }
+export function getLiquiditySweepStopMode(): LiquiditySweepStopMode { return lsStopMode; }
+
 export function liquiditySweepSignal(
   candles: OHLCV[],
   opts: { requireConfirmation?: boolean } = {},
@@ -2449,11 +2471,12 @@ export function liquiditySweepSignal(
   // signals unaffected are same-bar (premium) sweeps, where sc IS the signal
   // candle.
   //
-  // SL stays beyond the swept wick with a 0.5 ATR buffer: the wick IS the
-  // invalidation (price reclaimed the level = sweep thesis; breaking back
-  // through = thesis failed). Risk, R:R and TPs below are all measured from
-  // the real entry, so a confirmation that ran too far now fails the R:R gate
-  // instead of being booked as a phantom fill.
+  // The STRUCTURAL stop is the swept wick plus a 0.5 ATR buffer; the 20%
+  // tightening at the end of this function then pulls it toward entry (and,
+  // for ~31% of honest-entry signals, back inside the wick — see there). Risk,
+  // R:R and TPs below are all measured from the real entry, so a confirmation
+  // that ran too far now fails the R:R gate instead of being booked as a
+  // phantom fill.
   entry = price;
   if (best.direction === "bullish") {
     stopLoss = sc.low - atr * 0.5;
@@ -2486,14 +2509,35 @@ export function liquiditySweepSignal(
   if (best.direction === "bullish" && macroUp)     conf += 5;
   conf = Math.min(conf, 88);
 
-  // ── SL tightening (backtest-validated, May 2026) ──
+  // ── SL tightening (backtest-validated, May 2026 — with the stale entry) ──
   // Liquidity sweeps either reverse fast or fail — a tight invalidation cuts
   // losers quickly and lifts R per win. Pulling the structural SL 20% toward
   // entry lifted pooled PF 1.59→1.70 and total R +24% across ALL 10 test coins
   // (3y 1H, live-accurate exits + 0.6% SL floor). The engine's MIN_SL_DISTANCE_PCT
   // floor (0.6%) protects against over-tight degenerate stops. Applied last so
   // the structural-quality gates above (risk≥0.75 ATR, R:R≥2) judge the raw sweep.
-  stopLoss = entry + (stopLoss - entry) * 0.8;
+  //
+  // 2026-09-07 audit: that validation ran when entry was the sweep candle's
+  // close, where the wick was almost never crossed (6.5% of signals). With the
+  // honest entry the same 20% pull lands INSIDE the swept wick for 31% of
+  // signals (bar-1/bar-2 sweeps: the entry is 1–2 bars of follow-through away,
+  // so 20% of a longer distance eats the whole 0.5 ATR buffer). Hypothesis
+  // pre-stated: a stop inside the wick is hit by shallower re-sweeps that the
+  // close-based rule does not treat as invalidation, so clamping it beyond the
+  // wick should help. Official harness A/B (2.3y Binance, engine scan order):
+  // tighten sumR +74.5 (exp +0.13R) · clamp +66.7 (+0.12R) · raw +61.2
+  // (+0.11R), identical maxDD — the arms are within noise and the tightened
+  // stop is not the worse one. Per the validation policy an unsupported
+  // geometry change does not ship: "tighten" stays, the arms remain available
+  // via LS_STOP_MODE (AUDIT-NOTES Fase 9c).
+  if (lsStopMode !== "raw") {
+    stopLoss = entry + (stopLoss - entry) * 0.8;
+    if (lsStopMode === "clamp") {
+      stopLoss = best.direction === "bullish"
+        ? Math.min(stopLoss, sc.low - atr * 0.1)
+        : Math.max(stopLoss, sc.high + atr * 0.1);
+    }
+  }
 
   const dir = best.direction === "bullish" ? "LONG" : "SHORT";
   const reason =

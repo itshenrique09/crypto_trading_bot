@@ -107,6 +107,13 @@ export interface ExchangeAdapter {
   closePartial(position: ExchangePosition, closePct: number): Promise<{ orderId: string; size: number }>;
   /** Place/replace stop-loss (and optionally take-profit) for an open position. */
   setProtection(position: ExchangePosition, stopLossPrice: number, takeProfitPrice?: number): Promise<void>;
+  /**
+   * Cancel every protective (reduce-only stop / take-profit) order resting for a
+   * bot symbol. Called after an ENGINE-initiated full close so the venue is not
+   * left with orphan triggers that would open a naked opposite position later.
+   * Returns how many orders were cancelled.
+   */
+  cancelProtection?(botSymbol: string): Promise<number>;
   /** Protective orders currently resting on the venue, for display/verification. */
   getProtection?(): Promise<ExchangeProtection[]>;
   /** Recent executions — the only source of a real fill price. */
@@ -192,6 +199,14 @@ export function exitPriceFromFills(
     closedAtMs?: number;
     /** Share of the ORIGINAL position still open before this close (0–1]. */
     remainingFraction?: number;
+    /**
+     * Ignore close-side fills older than this. Set by the caller that has just
+     * SENT the order it wants priced (the TP1 partial): the "last_event" window
+     * otherwise blends in an earlier reduce-only fill — the entry right-size
+     * trim lands seconds after the entry and, inside the 5-min event window,
+     * polluted the TP1 VWAP (audit 2026-09-07, live-04).
+     */
+    notBeforeMs?: number;
   },
 ): ResolvedExit | null {
   const wantFraction = opts.remainingFraction;
@@ -202,7 +217,9 @@ export function exitPriceFromFills(
   // The journal's closed_at is when the ENGINE noticed (up to a scan cycle
   // after the venue fill), so the right edge gets the same grace as the left.
   const until = opts.closedAtMs != null ? opts.closedAtMs + FILL_LOOKBACK_GRACE_MS : Infinity;
-  const mine = fills.filter(f => f.botSymbol.toUpperCase() === sym && f.timeMs >= from && f.timeMs <= until);
+  const closeFloor = opts.notBeforeMs ?? -Infinity;
+  const mine = fills.filter(f => f.botSymbol.toUpperCase() === sym && f.timeMs >= from && f.timeMs <= until
+    && (f.side === direction2Side(opts.direction, "open") || f.timeMs >= closeFloor));
   if (mine.length === 0) return null;
 
   const entrySide = direction2Side(opts.direction, "open");
@@ -338,10 +355,15 @@ export class KrakenAdapter implements ExchangeAdapter {
   async getPositions(): Promise<ExchangePosition[]> {
     const positions = await this.client.getPositions();
     // Mark against the venue's own price so the app agrees with the exchange.
+    // When the ticker is missing (public endpoint down, suspended market) the
+    // mark is reported as UNKNOWN — never as the entry price. liveCheck uses
+    // markPrice as its control price, and an entry-priced "mark" made the
+    // software stop, TP1 and trail silently blind (audit 2026-09-07, live-03):
+    // undefined lets the engine fall back to the MEXC feed instead.
     const tickers = await this.client.getTickers().catch(() => new Map());
     return positions.map(p => {
       const t = tickers.get(p.symbol);
-      const mark = t?.markPrice && t.markPrice > 0 ? t.markPrice : p.price;
+      const mark = t?.markPrice && t.markPrice > 0 ? t.markPrice : undefined;
       return {
         botSymbol: fromKrakenSymbol(p.symbol),
         direction: p.side === "long" ? "LONG" as const : "SHORT" as const,
@@ -349,7 +371,7 @@ export class KrakenAdapter implements ExchangeAdapter {
         entryPrice: p.price,
         unrealizedPnl: p.unrealizedPnl,
         markPrice: mark,
-        notionalUsd: p.size * mark,
+        notionalUsd: p.size * (mark ?? p.price),
         unrealizedFunding: p.unrealizedFunding ?? null,
         raw: { symbol: p.symbol },
       };
@@ -405,6 +427,10 @@ export class KrakenAdapter implements ExchangeAdapter {
 
   async setProtection(position: ExchangePosition, stopLossPrice: number, takeProfitPrice?: number): Promise<void> {
     await this.client.setProtection(position.botSymbol, position.direction, position.size, stopLossPrice, takeProfitPrice);
+  }
+
+  async cancelProtection(botSymbol: string): Promise<number> {
+    return this.client.cancelProtection(botSymbol);
   }
 
   /** Kraken public /tickers carries bid/ask — the spread where the order will actually fill. */

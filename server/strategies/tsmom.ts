@@ -77,7 +77,11 @@ export const tsmomStrategy: Strategy = {
     const stopLoss = direction === "LONG" ? entry - stopDist : entry + stopDist;
     const takeProfit1 = direction === "LONG" ? entry + TP1_MULT * stopDist : entry - TP1_MULT * stopDist;
     const takeProfit2 = direction === "LONG" ? entry + TP2_MULT * stopDist : entry - TP2_MULT * stopDist;
-    if (stopLoss <= 0 || takeProfit1 <= 0) return null;
+    // A SHORT on a coin whose 2×ATR exceeds ~28.6% of price puts the 3.5× target
+    // at or below zero (92 of 1180 real shorts in the audit scan). A price can't
+    // fall past zero: no valid runner target → no valid trade. Nothing downstream
+    // sanitised it — the journal stored a negative TP2 and Kraken rejected the leg.
+    if (stopLoss <= 0 || takeProfit1 <= 0 || takeProfit2 <= 0) return null;
     return {
       direction, entry, stopLoss, takeProfit1, takeProfit2,
       confidence: 70, confluenceScore: 70,

@@ -10,7 +10,14 @@ import { type OHLCV } from "../../server/analysis";
 import { classifyBtcRegime, defaultBtcContext, type BtcTrend } from "../../server/btc-regime-gate";
 import { isRollingDrawdownBreached, strategiesToPause, evaluateDrawdownGuard, emptyDrawdownGuardState, type DrawdownGuardState } from "../../server/portfolio-guards";
 import { regimeAllows, type Strategy, type BtcDailyTrend } from "../../server/strategies/types";
-import { GUARD } from "../../server/engine-config";
+import { GUARD, MAX_HOLD_HOURS_BY_INTERVAL } from "../../server/engine-config";
+
+/** Max-hold in BARS derived from the engine's per-interval hours, so the harness cannot drift from the engine. */
+export function maxHoldBarsFor(interval: string): number {
+  const hours = MAX_HOLD_HOURS_BY_INTERVAL[interval as keyof typeof MAX_HOLD_HOURS_BY_INTERVAL] ?? 200;
+  const perBar = interval === "4h" ? 4 : interval === "1d" ? 24 : 1;
+  return Math.round(hours / perBar);
+}
 import { feedFromEnvOrArgv, fetchMexcPaginated } from "./feed";
 
 // ── Engine constants (mirror validate-pipeline.ts / server/routes.ts) ──────
@@ -206,7 +213,7 @@ export function intervalSec(iv: string): number {
 export function buildCandidatesTagged(strat: Strategy, symbol: string, candles: OHLCV[]): AuditCandidate[] {
   const out: AuditCandidate[] = [];
   const window = Math.max(strat.minCandles, 60);
-  const maxBars = strat.interval === "4h" ? 60 : 200;
+  const maxBars = maxHoldBarsFor(strat.interval);
   const ivSec = intervalSec(strat.interval);
   if (candles.length < window + maxBars + 10) return out;
 
@@ -271,7 +278,7 @@ export function simulateManagedExitAudit(
 
   const tp1ClosePct = clamp(config.tp1ClosePct ?? 0.6, 0, 1);
   const trailingPct = Math.max(0, config.trailingPct ?? 0.02);
-  const takerFeePct = Math.max(0, config.takerFeePct ?? 0.0002);
+  const takerFeePct = Math.max(0, config.takerFeePct ?? 0.0005); // = server/trade-exits DEFAULT_TAKER_FEE_PCT (was a stale 0.0002)
   const slippagePct = Math.max(0, config.slippagePct ?? 0.0005);
   const trailMode = config.trailMode ?? "fixed_pct";
   const trailR = Math.max(0, config.trailRMultiple ?? 2.0);
@@ -505,6 +512,8 @@ export interface SimOptions {
   guard?: "dd" | "trio";
   /** Apply Strategy.regimeGate (default true — the engines do). */
   regimeGate?: boolean;
+  /** Legacy BTC ×1.25/×0.75 sizing multiplier (default false — retired from the engines 2026-09-07). */
+  riskMult?: boolean;
 }
 
 export function simulateEngineCurrent(
@@ -623,12 +632,23 @@ export function simulateEngineCurrent(
       const strat = stratById.get(c.stratId);
       if (strat && !regimeAllows(strat, c.dir, btcDailyTrend as BtcDailyTrend)) { block("regimeGate"); continue; }
     }
+    // BTC sizing multiplier retired from the engines 2026-09-07; opt back in with simOpts.riskMult for legacy comparisons.
     let riskMultiplier = 1.0;
-    if (btcDailyTrend === "up") riskMultiplier = 1.25;
-    else if (btcDailyTrend === "down") riskMultiplier = 0.75;
+    if (simOpts.riskMult) {
+      if (btcDailyTrend === "up") riskMultiplier = 1.25;
+      else if (btcDailyTrend === "down") riskMultiplier = 0.75;
+    }
     try { classifyBtcRegime({ daily: btcDailyTrend, weekly: wTrend("BTC", nowSec) as BtcTrend }); } catch { defaultBtcContext(); }
 
     if (totalOpenCount() >= FIXED_MAX_OPEN) { block("maxOpen"); continue; }
+    {
+      const cap = stratById.get(c.stratId)?.maxConcurrent;
+      if (cap != null) {
+        let openForStrat = 0;
+        for (const list of openBySymbol.values()) for (const pos of list) if (pos.strategy === c.stratId) openForStrat++;
+        if (openForStrat >= cap) { block("stratCap"); continue; }
+      }
+    }
 
     const group = COIN_GROUP[c.symbol];
     if (group) {
