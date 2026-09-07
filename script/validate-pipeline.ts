@@ -35,7 +35,7 @@ import {
 } from "../server/btc-regime-gate";
 import { isRollingDrawdownBreached, strategiesToPause, evaluateDrawdownGuard, emptyDrawdownGuardState, type DrawdownGuardState } from "../server/portfolio-guards";
 import { regimeAllows, type Strategy, type BtcDailyTrend } from "../server/strategies/types";
-import { GUARD } from "../server/engine-config";
+import { GUARD, MAX_HOLD_HOURS_BY_INTERVAL } from "../server/engine-config";
 import { feedFromEnvOrArgv, fetchMexcPaginated } from "./audit/feed";
 
 // ── Engine constants (mirrored from server/routes.ts) ─────────────────────
@@ -130,6 +130,8 @@ interface RunConfig {
    *  0 blocks the bucket entirely. Unlisted buckets = 1.0. Implementable 1:1 in the
    *  engine (btcDailyTrend is already computed every scan). */
   sizeTiltByDirRegime?: Partial<Record<string, number>>;
+  /** Per-strategy concurrent-position cap override (strategyId → max open). Defaults to Strategy.maxConcurrent. */
+  maxConcurrentByStrategy?: Record<string, number>;
 }
 
 // ── Candle fetching with day-keyed disk cache ─────────────────────────────
@@ -249,7 +251,10 @@ function intervalHours(iv: string): number { return intervalSec(iv) / 3600; }
 function buildCandidates(strat: Strategy, symbol: string, candles: OHLCV[]): Candidate[] {
   const out: Candidate[] = [];
   const window = Math.max(strat.minCandles, 60);
-  const maxBars = strat.interval === "4h" ? 60 : 200; // 60×4h, 200×1h, 200×1d — parity with server/engine-config MAX_HOLD
+  // Max-hold in bars DERIVED from the engine's hours (1h→200, 4h→60, 1d→200) —
+  // a hard-coded copy drifted from MAX_HOLD_HOURS_BY_INTERVAL once already.
+  const maxHoldHours = MAX_HOLD_HOURS_BY_INTERVAL[strat.interval as keyof typeof MAX_HOLD_HOURS_BY_INTERVAL] ?? 200;
+  const maxBars = Math.round(maxHoldHours / intervalHours(strat.interval));
   const ivSec = intervalSec(strat.interval);
   if (candles.length < window + maxBars + 10) return out;
 
@@ -315,10 +320,13 @@ function resolveExits(
       resolved[c.idx] = { netR: 0, exitTsSec: c.tsSec, filled: false };
       continue;
     }
+    // With an explicit --slip the entry drift IS the entry slippage: charge the
+    // model's 5 bps on the exit legs only, not on top of the drift.
+    const cfgForSim: ManagedExitConfig | undefined = SLIP_BPS > 0 ? { ...(exitCfg ?? {}), entrySlippagePct: 0 } : exitCfg;
     const exit = simulateManagedExit(
       { direction: c.dir, entry, stopLoss: c.stopLoss, takeProfit1: c.takeProfit1, takeProfit2: c.takeProfit2 },
       candles.slice(c.entryIdx + 1, c.entryIdx + 1 + c.maxBars),
-      exitCfg,
+      cfgForSim,
     );
     resolved[c.idx] = { netR: exit.netR, exitTsSec: c.tsSec + exit.barsHeld * c.ivSec, filled: true };
   }
@@ -495,6 +503,16 @@ function simulate(cfg: RunConfig, candidates: Candidate[], streams: Map<string, 
       : directionPolicyForRegime(btcContext.regime);
 
     if (totalOpenCount() >= effectiveMaxOpen) { block("maxOpen"); continue; }
+
+    // ── per-strategy sleeve cap (Strategy.maxConcurrent, engine parity) ──
+    {
+      const cap = cfg.maxConcurrentByStrategy?.[c.stratId] ?? stratById.get(c.stratId)?.maxConcurrent;
+      if (cap != null) {
+        let openForStrat = 0;
+        for (const list of openBySymbol.values()) for (const pos of list) if (pos.strategy === c.stratId) openForStrat++;
+        if (openForStrat >= cap) { block("stratCap"); continue; }
+      }
+    }
 
     // ── correlation group cap ──
     const group = COIN_GROUP[c.symbol];
@@ -684,10 +702,23 @@ async function main() {
   //     exit A/B: beat fixed 2% on every metric in both windows).
   // ENGINE-CURRENT (2026-09-03): the legacy trio (ddDaily/ddRolling/killSwitch) is OFF and the
   // drawdown guard + per-strategy regime gate are ON — exactly what server/routes.ts runs.
-  const ENGINE_CURRENT_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "ddMonthly", "kelly", "ddDaily", "ddRolling", "killSwitch"]);
+  // 2026-09-07: riskMult (BTC ×1.25/×0.75 sizing) retired from the engines — identical trade
+  // stream, lower balance drawdown (A/B row "ENGINE + riskMult" keeps the comparison).
+  const ENGINE_CURRENT_SKIP = new Set<GateId>(["atrPct", "shortConf", "dailyTrend", "dirOverlay", "btcCap", "ddMonthly", "kelly", "ddDaily", "ddRolling", "killSwitch", "riskMult"]);
   const ENGINE_EXIT: ManagedExitConfig = { trailMode: "r_multiple", trailRMultiple: 2.0 };
   const configs: RunConfig[] = [
     { label: "ENGINE-CURRENT (shipped Jul 2026)", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT },
+    // ── Sep 2026 follow-ups: pre-registered A/Bs on the redesigned book ──
+    // H-riskMult (decided 2026-09-07): the BTC ×1.25/×0.75 sizing multiplier produced the
+    // identical trade stream with a HIGHER balance drawdown (50.8% vs 48.5%) → retired.
+    // This row keeps the legacy sizing visible for comparison.
+    { label: "ENGINE + riskMult ×1.25/×0.75 (legacy sizing)", skip: new Set<GateId>([...ENGINE_CURRENT_SKIP].filter(g => g !== "riskMult") as GateId[]), exit: ENGINE_EXIT },
+    // H-sleeve (decided 2026-09-07): capping TSMOM's concurrent multi-week holds frees
+    // slots for the 1h sleeve. Rule: accept the cap with the best sumR that does not
+    // raise maxDD. Result: every cap raised balance maxDD (71–85% vs 51%) → no cap shipped;
+    // the mechanism (Strategy.maxConcurrent) stays available.
+    { label: "SLEEVE tsmom maxConcurrent=4", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxConcurrentByStrategy: { "tsmom-daily": 4 } },
+    { label: "SLEEVE tsmom maxConcurrent=6", skip: ENGINE_CURRENT_SKIP, exit: ENGINE_EXIT, maxConcurrentByStrategy: { "tsmom-daily": 6 } },
     // ── capacity suite (Jul 2026 round 2): structural throughput, not signal tuning ──
     { label: "CAP maxOpen=8", skip: ENGINE_CURRENT_SKIP, maxOpen: 8 },
     { label: "CAP maxOpen=10", skip: ENGINE_CURRENT_SKIP, maxOpen: 10 },
