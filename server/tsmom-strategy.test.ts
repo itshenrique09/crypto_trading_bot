@@ -42,3 +42,24 @@ test("TSMOM needs enough history and declares its engine contract", () => {
   assert.ok((tsmomStrategy.preferredSymbols?.length ?? 0) >= 40);
   assert.equal(tsmomStrategy.defaultPaused?.live, true);
 });
+
+test("TSMOM refuses a SHORT whose 3.5× target would be at or below zero (huge-ATR coin)", () => {
+  // Daily ranges of ±30% → ATR ≈ 60% of price → stop 2×ATR ≈ 120% of price.
+  // SHORT: TP2 = entry − 3.5×stop < 0 — a price cannot fall past zero, so the
+  // signal must be rejected (92/1180 real shorts did this in the audit scan and
+  // the negative TP2 reached the journal and the venue).
+  const wild: OHLCV[] = [];
+  const t0 = Date.UTC(2026, 0, 1) / 1000;
+  for (let i = 0; i < 90; i++) {
+    wild.push({ time: t0 + i * 86_400, open: 100, high: 130, low: 70, close: 100 + (i % 2 ? 3 : -3), volume: 1000 });
+  }
+  const shortBreak = [...wild];
+  shortBreak[shortBreak.length - 1] = { ...wild[wild.length - 1], close: 60, low: 60 };
+  assert.equal(tsmomStrategy.analyze(shortBreak), null, "SHORT with TP2 ≤ 0 must be rejected");
+
+  // The LONG mirror on the same volatility is fine — every level is positive.
+  const longBreak = [...wild];
+  longBreak[longBreak.length - 1] = { ...wild[wild.length - 1], close: 140, high: 140 };
+  const sig = tsmomStrategy.analyze(longBreak);
+  assert.ok(sig && sig.direction === "LONG" && sig.takeProfit2! > sig.takeProfit1 && sig.takeProfit1 > sig.entry);
+});

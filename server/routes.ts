@@ -13,7 +13,7 @@ import { regimeAllows, type Strategy, type BtcDailyTrend } from "./strategies/ty
 import { dropOpenCandle, intervalToMs } from "./candles";
 import { GUARD, MAX_HOLD_HOURS_BY_INTERVAL, SCAN } from "./engine-config";
 import { scheduleAtCloses, type ScanSchedule } from "./scan-scheduler";
-import { roundSize } from "./kraken-client";
+import { roundSize, fetchKrakenMarks } from "./kraken-client";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, MEXC_CONTRACT_OVERRIDES, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { getBackupStatus } from "./backup";
@@ -96,7 +96,10 @@ const MIN_RISK_REWARD = 1.5;
 // exceeds the strategy interval's budget (table in server/engine-config.ts).
 function maxHoldHoursForStrategy(strategyId: string | null | undefined): number {
   const strat = strategyId ? getAllStrategies().find(s => s.id === strategyId) : undefined;
-  return MAX_HOLD_HOURS_BY_INTERVAL[strat?.interval ?? "4h"] ?? 240;
+  // Rows opened by strategies no longer in the registry keep their own interval's budget.
+  const RETIRED_INTERVALS: Record<string, string> = { "rsi-divergence": "1h", "break-retest": "4h", "confluence-swing": "1h", "v2-swing": "1h", "smc": "4h" };
+  const interval = strat?.interval ?? (strategyId ? RETIRED_INTERVALS[strategyId] : undefined) ?? "4h";
+  return MAX_HOLD_HOURS_BY_INTERVAL[interval] ?? 240;
 }
 
 function normalizeDirection(direction: string): "LONG" | "SHORT" {
@@ -148,6 +151,8 @@ async function priceMarketClose(
    * find only the 60% just sold, call it incomplete and fall back to the ticker.
    */
   sizing: "remaining" | "last_event" = "remaining",
+  /** Ignore close-side fills before this instant — pass the moment the order being priced was SENT. */
+  notBeforeMs?: number,
 ): Promise<{ price: number; note: string; measured: boolean }> {
   if (!client.getFills) return { price: tickerPrice, note: "ticker ESTIMATE — venue exposes no fill history", measured: false };
 
@@ -157,6 +162,7 @@ async function priceMarketClose(
     direction,
     openedAtMs,
     remainingFraction: sizing === "remaining" ? remainingFractionOf(trade) : undefined,
+    notBeforeMs,
   };
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -166,6 +172,45 @@ async function priceMarketClose(
     if (resolved && !resolved.incomplete) return { price: resolved.price, note: describeFill(resolved, tickerPrice), measured: true };
   }
   return { price: tickerPrice, note: "ticker ESTIMATE — fill not visible in time", measured: false };
+}
+
+/**
+ * The take-profit level the VENUE should hold for a position, or undefined.
+ * Single-target trades (TP2 == TP1 — 67% of Liquidity Sweep signals) and
+ * non-positive targets get NO venue take-profit: after the software TP1
+ * partial the runner is trailed to break-even / 2R, exactly what paper and
+ * the harness do. Before 2026-09-07 the venue was handed TP1 for the FULL
+ * size on those trades and closed 100% at TP1 while paper booked 60% + a
+ * runner — the validated exit plan was never the one live executed
+ * (audit strategies-04).
+ */
+function venueTakeProfitFor(tp1: number, tp2: number | null | undefined): number | undefined {
+  if (tp2 == null || !(tp2 > 0) || tp2 === tp1) return undefined;
+  return tp2;
+}
+
+/**
+ * Engine boundary for a strategy's TP2: it must be a positive price beyond TP1
+ * in the trade's direction; anything else (missing, ≤ 0, or closer than TP1 —
+ * the retired B&R could emit that) collapses to single-target (TP2 = TP1).
+ * Applied by BOTH scans after the min-stop / R:R gates so every strategy is
+ * held to one contract.
+ */
+function normaliseTakeProfit2(signal: { direction: "LONG" | "SHORT"; takeProfit1: number; takeProfit2?: number }): void {
+  const tp2 = signal.takeProfit2;
+  const beyondTp1 = tp2 != null && tp2 > 0 && (signal.direction === "LONG" ? tp2 >= signal.takeProfit1 : tp2 <= signal.takeProfit1);
+  if (!beyondTp1) signal.takeProfit2 = signal.takeProfit1;
+}
+
+/** Cancel the venue's resting stop/TP after an ENGINE-initiated full close (best-effort, logged). */
+async function dropProtection(client: ExchangeAdapter, botSymbol: string, why: string): Promise<void> {
+  if (!client.cancelProtection) return;
+  try {
+    const n = await client.cancelProtection(botSymbol);
+    if (n > 0) console.log(`[live] ${botSymbol}: ${n} protective order(s) cancelled after ${why}`);
+  } catch (err: any) {
+    console.error(`[live] ${botSymbol}: could not cancel protective orders after ${why}: ${err?.message ?? err}`);
+  }
 }
 
 // Default strategy ID — used as fallback when strategy field is missing (legacy entries)
@@ -1700,6 +1745,7 @@ export async function registerRoutes(server: Server, app: Express) {
     tp1_hit: z.number().nullish(),
     peak_price: z.number().nullish(),
     entry_risk_dist: z.number().nullish(),
+    engine_version: z.string().nullish(),
   });
 
   app.post("/api/journal/import", async (req, res) => {
@@ -1729,6 +1775,7 @@ export async function registerRoutes(server: Server, app: Express) {
           mode: d.mode, strategy: d.strategy ?? "v2-swing", followed: d.followed ?? "yes",
           outcome: d.outcome, exit_price: d.exit_price ?? null, pnl_pct: d.pnl_pct ?? null,
           pnl_usd: d.pnl_usd ?? null, risk_usd: d.risk_usd ?? null,
+          engine_version: d.engine_version ?? null,
           position_size_usd: d.position_size_usd ?? null,
           remaining_position_size_usd: d.remaining_position_size_usd ?? null,
           realized_pnl_usd: d.realized_pnl_usd ?? 0, notes: d.notes ?? "",
@@ -2232,17 +2279,44 @@ export async function registerRoutes(server: Server, app: Express) {
       const trailingMode: TrailingMode = "r_multiple";
       const trailingRMultiple = DEFAULT_R_MULTIPLE;
 
+      // Mark on Kraken's mark price when available (what its stops trigger on), MEXC last otherwise.
+      const krakenMarks = await fetchKrakenMarks();
+
       for (const trade of openPaper) {
         const pair = `${trade.symbol}USDT`;
-        const price = priceMap[pair];
-        if (!price) continue;
+        const price = krakenMarks.get(trade.symbol) || priceMap[pair];
+        if (!price) {
+          // No mark from either venue (delisted / renamed contract). The trade must
+          // not hold a slot forever: once past max-hold, close it at the last known
+          // mark (peak or entry) with an explicit note; otherwise wait for a price.
+          const ageNoPrice = (Date.now() - new Date(trade.created_at).getTime()) / 3_600_000;
+          if (Number.isFinite(ageNoPrice) && ageNoPrice > maxHoldHoursForStrategy(trade.strategy)) {
+            const lastKnown = trade.peak_price ?? trade.entry_price;
+            const acc = finalizeTradeAccounting({
+              direction: trade.direction === "LONG" ? "LONG" : "SHORT",
+              entryPrice: trade.entry_price,
+              positionSizeUsd: trade.position_size_usd,
+              remainingPositionSizeUsd: trade.remaining_position_size_usd,
+              realizedPnlUsd: trade.realized_pnl_usd,
+            }, lastKnown, TRADE_COSTS);
+            await updateJournalEntry(trade.id, {
+              outcome: acc.outcome, exit_price: roundPriceForJournal(lastKnown),
+              pnl_pct: Math.round(acc.pnlPct * 100) / 100,
+              pnl_usd: acc.pnlUsd !== null ? Math.round(acc.pnlUsd * 100) / 100 : undefined,
+              remaining_position_size_usd: 0, closed_at: new Date().toISOString(),
+              notes: (trade.notes || "") + ` | Max-hold timeout with NO market price for ${trade.symbol} — closed at last known mark ${lastKnown} (ESTIMATE)`,
+            });
+          }
+          continue;
+        }
 
         const isLong    = trade.direction === "LONG";
         const peak      = trade.peak_price ?? trade.entry_price;
         let tp1Hit      = trade.tp1_hit === 1;
         const sl        = trade.stop_loss;
         const tp1       = trade.take_profit1;
-        const tp2       = trade.take_profit2;
+        // Harness parity: a missing TP2 collapses onto TP1 (simulateManagedExit does the same).
+        const tp2       = trade.take_profit2 ?? trade.take_profit1;
         const accountingState = {
           direction: isLong ? "LONG" as const : "SHORT" as const,
           entryPrice: trade.entry_price,
@@ -2303,7 +2377,10 @@ export async function registerRoutes(server: Server, app: Express) {
         // drop below entry in one tick could otherwise close at break-even instead
         // of the (higher, in favour) trailing stop level — converting a win into 0R.
         if (isLong) {
-          if (tp1Hit && price <= trailStop) {
+          // The trail only counts once it sits BEYOND break-even (harness rule); before
+          // that a drop through entry is a break-even exit at entry, never at a trail
+          // level below it (a gap could otherwise book a "trailing win" under entry).
+          if (tp1Hit && trailStop > trade.entry_price && price <= trailStop) {
             outcome = "win";
             exitPrice = trailStop;
             closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, ${trailDescription})`;
@@ -2331,7 +2408,7 @@ export async function registerRoutes(server: Server, app: Express) {
             closeReason = "TP2";
           }
         } else {
-          if (tp1Hit && price >= trailStop) {
+          if (tp1Hit && trailStop < trade.entry_price && price >= trailStop) {
             outcome = "win";
             exitPrice = trailStop;
             closeReason = `Trailing stop (peak ${newPeak.toFixed(4)}, ${trailDescription})`;
@@ -2458,14 +2535,14 @@ export async function registerRoutes(server: Server, app: Express) {
       }
       if (paperGuardState.halted && !(await ddOverrideUntil("paper", "rolling"))) return;
 
-      // ── BTC MACRO RISK FILTER ─────────────────────────────────────
-      // Adjust risk % based on BTC daily trend
-      let riskMultiplier = 1.0;
+      // ── BTC DAILY TREND — feeds the per-strategy regime gate and the UI ──
+      // The ×1.25/×0.75 sizing multiplier that used to hang off it was removed on
+      // 2026-09-07 (pre-registered A/B in script/validate-pipeline.ts: identical
+      // trade stream, balance maxDD 48.5% flat vs 50.8% multiplied — it only ever
+      // sized up the cells the regime gate now excludes).
       let btcDailyTrend: BtcTrend = "neutral";
       try {
         btcDailyTrend = await getDailyTrend("BTC") as BtcTrend;
-        if      (btcDailyTrend === "up")   riskMultiplier = 1.25;  // BTC bull → 2.5%
-        else if (btcDailyTrend === "down") riskMultiplier = 0.75;  // BTC bear → 1.5%
       } catch (err) { console.error("[btc-filter] failed:", err); }
 
       // ── REGIME BRAIN (always on — no manual flags) ───────────────
@@ -2563,10 +2640,14 @@ export async function registerRoutes(server: Server, app: Express) {
       }
 
       // ── FUTURES LIQUIDITY + FUNDING MAPS — fetch once per scan ──
-      const [marketMaps, fundingMap] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap()]);
+      const [marketMaps, fundingMap, krakenMarks] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap(), fetchKrakenMarks()]);
       const volumeMap = marketMaps.amount24BySymbol;
       const spreadMap = marketMaps.spreadPctBySymbol;
       const tradableSymbols = marketMaps.availableSymbols;
+
+      // ── SLEEVES — open positions per strategy (Strategy.maxConcurrent) ──
+      const openByStrategy: Record<string, number> = {};
+      for (const t of openTradesList) if (t.strategy) openByStrategy[t.strategy] = (openByStrategy[t.strategy] || 0) + 1;
 
       // ── CORRELATION — count open trades per group ──
       const openByGroup: Record<string, number> = {};
@@ -2655,6 +2736,12 @@ export async function registerRoutes(server: Server, app: Express) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Not in preferred symbols list` });
                 continue;
               }
+            }
+
+            // ── Per-strategy sleeve cap — multi-week holds must not take every slot ──
+            if (strat.maxConcurrent != null && (openByStrategy[strat.id] || 0) >= strat.maxConcurrent) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy sleeve full: ${openByStrategy[strat.id]}/${strat.maxConcurrent} open` });
+              continue;
             }
 
             // ── Per-strategy drawdown kill-switch ──
@@ -2770,6 +2857,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `R:R ${(reward/risk).toFixed(2)} < 1.5 minimum`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
+              normaliseTakeProfit2(signal);
 
               // ── PAPER FILL = the MEXC ticker at scan time, not the signal price ──
               // A paper "market order" fills where the market is when the scan
@@ -2778,19 +2866,27 @@ export async function registerRoutes(server: Server, app: Express) {
               // that no longer existed — the same optimism the harness had
               // before the entry fix — and hid the paper↔live gap. Levels stay
               // structural; the trade is re-gated on the real fill.
-              const fillPrice = marketMaps.priceByPair[`${sym}USDT`] || signal.entry;
+              // Kraken mark first (the venue live executes and settles on), MEXC last as fallback.
+              // Fresh mark at DECISION time (Kraken public tickers are cached 5s), not the
+              // snapshot taken when the 40-coin scan started; never fall back to the
+              // candle close — a fill needs a market price or there is no fill.
+              const freshMarks = await fetchKrakenMarks();
+              const fillPrice = freshMarks.get(sym) || krakenMarks.get(sym) || marketMaps.priceByPair[`${sym}USDT`] || 0;
+              if (!(fillPrice > 0)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: "No market price available for the paper fill (Kraken mark / MEXC last both missing)", signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
               const fillRisk   = signal.direction === "LONG" ? fillPrice - signal.stopLoss : signal.stopLoss - fillPrice;
               const fillReward = signal.direction === "LONG" ? signal.takeProfit1 - fillPrice : fillPrice - signal.takeProfit1;
               const driftBps   = Math.round(((fillPrice - signal.entry) / signal.entry) * 10_000);
-              if (fillRisk <= 0 || fillReward <= 0 || fillReward / fillRisk < MIN_RISK_REWARD) {
+              if (fillRisk <= 0 || fillReward <= 0 || fillRisk / fillPrice < MIN_SL_DISTANCE_PCT || fillReward / fillRisk < MIN_RISK_REWARD) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Entry drift ${driftBps}bps: fill ${fillPrice} leaves R:R ${fillRisk > 0 && fillReward > 0 ? (fillReward / fillRisk).toFixed(2) : "≤0"} < ${MIN_RISK_REWARD} — skipped`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 
-              // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
-              // Kelly retired Jul 2026 (see sizing note above): fixed base risk
-              // halved max drawdown for <4% less total R in the pipeline A/B.
-              const riskPctUsed = baseRiskPct * riskMultiplier;
+              // ── POSITION SIZING — fixed fractional (Kelly retired Jul 2026, BTC
+              // multiplier retired Sep 2026): every trade risks exactly the base % ──
+              const riskPctUsed = baseRiskPct;
               const slDistPct   = fillRisk / fillPrice;
               const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
@@ -2833,6 +2929,7 @@ export async function registerRoutes(server: Server, app: Express) {
               openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
               openNotionalUsd += posSize;
               newOpens++;
+              openByStrategy[strat.id] = (openByStrategy[strat.id] || 0) + 1;
               const g = COIN_GROUP[sym];
               if (g) openByGroup[g] = (openByGroup[g] || 0) + 1;
 
@@ -3204,11 +3301,50 @@ export async function registerRoutes(server: Server, app: Express) {
           continue;
         }
 
-        // Still open — track peak price and manage trailing stop
-        const price = priceMap[`${trade.symbol}USDT`] || 0;
-        if (!price) continue;
-
+        // Still open — track peak price and manage trailing stop. Mark on the venue's
+        // own mark price (what its stop orders trigger on; undefined when its ticker
+        // is missing); the MEXC feed is the fallback.
+        const price = (pos.markPrice && pos.markPrice > 0 ? pos.markPrice : 0) || priceMap[`${trade.symbol}USDT`] || 0;
         const isLong = trade.direction === "LONG";
+
+        // ── PROTECTION SELF-HEAL (2026-09-02; widened 2026-09-07) ─────────────
+        // The venue stop is the primary protection, but its placement in liveScan
+        // is a try/catch that only logs, and the break-even move after TP1 can be
+        // rejected. Runs BEFORE the price gate — it needs no price.
+        //  • no stop resting → re-place at the journal level, CLAMPED to
+        //    break-even once TP1 has been taken: the heal used to re-arm the
+        //    ORIGINAL stop on a post-TP1 runner, −1R exposure on 40% of the
+        //    position instead of 0R (audit live-02);
+        //  • a TP2 is expected but no take-profit is resting → re-place as well
+        //    (audit live-05). Single-target trades expect none.
+        // At most once per 10 min per trade: the venue's order list can lag a
+        // fresh placement by a cycle, and setProtection cancels+replaces.
+        const journalStop = trade.stop_loss;
+        const venueTp = venueTakeProfitFor(trade.take_profit1, trade.take_profit2);
+        if (protectionList !== null && journalStop > 0) {
+          const protForSymbol = protectionList.filter(x => x.botSymbol === trade.symbol);
+          const restingStop = protForSymbol.some(x => x.kind === "stop");
+          const restingTp   = protForSymbol.some(x => x.kind === "take_profit");
+          const needHeal = !restingStop || (venueTp != null && !restingTp);
+          const lastHeal = protectionHealAt.get(trade.id) ?? 0;
+          if (needHeal && Date.now() - lastHeal > 10 * 60_000) {
+            protectionHealAt.set(trade.id, Date.now());
+            const healStop = trade.tp1_hit
+              ? (isLong ? Math.max(journalStop, trade.entry_price) : Math.min(journalStop, trade.entry_price))
+              : journalStop;
+            try {
+              await client.setProtection(pos, healStop, venueTp);
+              if (healStop !== journalStop) await updateJournalEntry(trade.id, { stop_loss: healStop });
+              const what = !restingStop ? `nenhuma stop estava activa (SL ${healStop})` : `take-profit em falta (TP2 ${venueTp})`;
+              console.warn(`[live-check] ${trade.symbol}: ${!restingStop ? "no stop" : "no take-profit"} was resting on ${client.id.toUpperCase()} — protection re-placed (stop @ ${healStop}${venueTp != null ? `, TP @ ${venueTp}` : ""})`);
+              logScan({ time: new Date().toISOString(), symbol: trade.symbol, strategy: trade.strategy ?? "live", result: "filtered", reason: `Protecção reposta na venue: ${what}` });
+            } catch (healErr: any) {
+              console.error(`[live-check] ${trade.symbol}: protection re-place failed: ${healErr?.message ?? healErr}`);
+            }
+          }
+        }
+
+        if (!price) continue;
 
         // ── MAX-HOLD TIMEOUT — close stale positions at market (mirrors paper) ──
         const ageHoursLive = (Date.now() - new Date(trade.created_at).getTime()) / 3_600_000;
@@ -3220,6 +3356,7 @@ export async function registerRoutes(server: Server, app: Express) {
             console.error(`[Live] Max-hold close failed for ${trade.symbol}: ${closeErr.message}`);
             continue; // retry on next check
           }
+          await dropProtection(client, trade.symbol, "max-hold close");
           const fill = await priceMarketClose(client, trade, tradeDirection, price);
           const timeoutAccounting = finalizeTradeAccounting({
             direction: isLong ? "LONG" : "SHORT",
@@ -3246,37 +3383,13 @@ export async function registerRoutes(server: Server, app: Express) {
           await updateJournalEntry(trade.id, { peak_price: newPeak });
         }
 
-        // ── PROTECTION SELF-HEAL + SOFTWARE STOP FALLBACK (2026-09-02) ──────
-        // The venue stop is the primary protection, but its placement in
-        // liveScan is a try/catch that only logs, and Kraken triggers on MARK
-        // price while we watch LAST. Until now nothing checked that a stop was
-        // actually resting, and nothing closed a position whose stop had failed
-        // to fire: an unprotected runner would ride to liquidation. Two nets:
-        //  1. if the venue answered and shows NO stop for this position, re-place
-        //     the protective orders at the journal's levels (setProtection
-        //     replaces any stale ones);
-        //  2. if LAST has crossed the journal stop by more than a tolerance and
-        //     the position is STILL open, close at market and book the fill.
-        //     When the venue stop did fire the position is already gone and the
-        //     branch above books it — this only acts when the venue did not.
-        const journalStop = trade.stop_loss;
-        if (protectionList !== null && journalStop > 0) {
-          const resting = protectionList.some(x => x.botSymbol === trade.symbol && x.kind === "stop");
-          const lastHeal = protectionHealAt.get(trade.id) ?? 0;
-          // Re-place at most once per 10 min per trade: the venue's order list can
-          // lag a fresh placement by a cycle, and setProtection cancels+replaces.
-          if (!resting && Date.now() - lastHeal > 10 * 60_000) {
-            protectionHealAt.set(trade.id, Date.now());
-            try {
-              await client.setProtection(pos, journalStop, trade.take_profit2 ?? trade.take_profit1);
-              console.warn(`[live-check] ${trade.symbol}: no stop was resting on ${client.id.toUpperCase()} — protection re-placed @ ${journalStop}`);
-              logScan({ time: new Date().toISOString(), symbol: trade.symbol, strategy: trade.strategy ?? "live", result: "filtered", reason: `Protecção reposta na venue: nenhuma stop estava activa (SL ${journalStop})` });
-            } catch (healErr: any) {
-              console.error(`[live-check] ${trade.symbol}: protection re-place failed: ${healErr?.message ?? healErr}`);
-            }
-          }
-        }
-        const SOFT_STOP_TOLERANCE = 0.001; // 10 bps — mark≠last basis and stop-order latency
+        // ── SOFTWARE STOP FALLBACK (2026-09-02) ──────────────────────────────
+        // If the mark has crossed the journal stop by more than a tolerance and
+        // the position is STILL open (venue stop rejected, not yet healed), close
+        // at market and book the fill. When the venue stop did fire the position
+        // is already gone and the branch above books it — this only acts when
+        // the venue did not.
+        const SOFT_STOP_TOLERANCE = 0.001; // 10 bps — mark/last basis and stop-order latency
         // After TP1 the runner's stop is break-even by design (the journal only
         // records it when the venue update succeeded) — never let the software
         // net sit looser than entry once TP1 has been taken.
@@ -3293,6 +3406,7 @@ export async function registerRoutes(server: Server, app: Express) {
             console.error(`[live-check] software stop close failed for ${trade.symbol}: ${closeErr?.message ?? closeErr}`);
             continue; // retry next check
           }
+          await dropProtection(client, trade.symbol, "software stop");
           const softFill = await priceMarketClose(client, trade, tradeDirection, price);
           const softAccounting = finalizeTradeAccounting({
             direction: isLong ? "LONG" : "SHORT",
@@ -3319,6 +3433,7 @@ export async function registerRoutes(server: Server, app: Express) {
           const tp1Hit = isLong ? price >= trade.take_profit1 : price <= trade.take_profit1;
           if (tp1Hit) {
             let closedVol = 0;
+            const partialSentAt = Date.now();
             try {
               const partialOrder = await client.closePartial(pos, TP1_PARTIAL_CLOSE_PCT);
               closedVol = partialOrder.size;
@@ -3328,9 +3443,11 @@ export async function registerRoutes(server: Server, app: Express) {
             }
 
             // The partial went out as a MARKET order, so it filled wherever the
-            // book was — not at the planned TP1 level. Book the execution.
+            // book was — not at the planned TP1 level. Book the execution, and
+            // price ONLY fills from this order onwards: an entry right-size trim
+            // minutes earlier is also a reduce-only fill and would pollute the VWAP.
             const tp1Fill = await priceMarketClose(
-              client, trade, tradeDirection, trade.take_profit1, "last_event",
+              client, trade, tradeDirection, trade.take_profit1, "last_event", partialSentAt - 1_000,
             );
 
             const actualClosePct = pos.size > 0 ? closedVol / pos.size : TP1_PARTIAL_CLOSE_PCT;
@@ -3347,7 +3464,8 @@ export async function registerRoutes(server: Server, app: Express) {
             let exchangeProtectionError: string | undefined;
             try {
               if (!closedFullPosition) {
-                const currentTp = trade.take_profit2 ?? trade.take_profit1;
+                // Distinct TP2 only — a single-target runner is trailed in software (paper parity).
+                const currentTp = venueTakeProfitFor(trade.take_profit1, trade.take_profit2);
                 // Protect only what is still open after the partial.
                 const runner: ExchangePosition = { ...pos, size: pos.size - closedVol };
                 await client.setProtection(runner, trade.entry_price, currentTp);
@@ -3400,11 +3518,15 @@ export async function registerRoutes(server: Server, app: Express) {
             fixedPct: DEFAULT_TRAIL_PCT,
             rMultiple: trailingRMultiple,
           });
-          const trailHit  = isLong ? price <= trailStop : price >= trailStop;
+          // Trail counts only once it is beyond break-even (mirrors paperCheck and the
+          // harness); below that the venue's break-even stop / the software stop rule.
+          const trailBeyondBE = isLong ? trailStop > trade.entry_price : trailStop < trade.entry_price;
+          const trailHit  = trailBeyondBE && (isLong ? price <= trailStop : price >= trailStop);
           if (trailHit) {
             // Close position at market
             try {
               await client.closePosition(pos);
+              await dropProtection(client, trade.symbol, "trailing stop");
 
               const trailFill = await priceMarketClose(client, trade, tradeDirection, price);
               const accounting = finalizeTradeAccounting({
@@ -3425,6 +3547,41 @@ export async function registerRoutes(server: Server, app: Express) {
                 notes:     (trade.notes || "") + ` | Trailing stop (peak ${newPeak.toFixed(4)}, mode=${trailingMode}${trailingMode === "r_multiple" ? ` ${trailingRMultiple}×` : ` ${(DEFAULT_TRAIL_PCT*100).toFixed(0)}%`}) @ ${trailFill.note}`,
               });
             } catch (err) { console.error("[live-trail] journal update failed (position may already be closed):", err); }
+          } else {
+            // ── SOFTWARE TP2 NET (2026-09-07, audit live-05) ──────────────────
+            // The venue's take-profit order is the primary exit for the runner.
+            // When it is missing or was rejected (the self-heal may still be
+            // waiting on its 10-min cadence), close the runner ourselves once the
+            // mark crosses TP2 — paper books TP2 at the level; live books the fill.
+            const tp2Level = venueTakeProfitFor(trade.take_profit1, trade.take_profit2);
+            const tp2Crossed = tp2Level != null && (isLong ? price >= tp2Level : price <= tp2Level);
+            if (tp2Crossed) {
+              try {
+                await client.closePosition(pos);
+              } catch (closeErr: any) {
+                console.error(`[live-check] software TP2 close failed for ${trade.symbol}: ${closeErr?.message ?? closeErr}`);
+                continue; // the venue TP may land first; retry next check otherwise
+              }
+              await dropProtection(client, trade.symbol, "software TP2");
+              const tp2Fill = await priceMarketClose(client, trade, tradeDirection, price);
+              const tp2Accounting = finalizeTradeAccounting({
+                direction: isLong ? "LONG" : "SHORT",
+                entryPrice: trade.entry_price,
+                positionSizeUsd: trade.position_size_usd,
+                remainingPositionSizeUsd: trade.remaining_position_size_usd,
+                realizedPnlUsd: trade.realized_pnl_usd,
+              }, tp2Fill.price, tp2Fill.measured ? LIVE_FILL_COSTS : TRADE_COSTS);
+              await updateJournalEntry(trade.id, {
+                outcome:     tp2Accounting.outcome,
+                exit_price:  roundPriceForJournal(tp2Fill.price),
+                pnl_pct:     Math.round(tp2Accounting.pnlPct * 100) / 100,
+                pnl_usd:     tp2Accounting.pnlUsd !== null ? Math.round(tp2Accounting.pnlUsd * 100) / 100 : undefined,
+                remaining_position_size_usd: 0,
+                closed_at:   new Date().toISOString(),
+                notes:       (trade.notes || "") + ` | SOFTWARE TP2: mark ${price} crossed TP2 ${tp2Level} with the runner still open on ${client.id.toUpperCase()} — closed at market @ ${tp2Fill.note}`,
+              });
+              console.warn(`[live-check] ${trade.symbol}: software TP2 fired (mark ${price} vs TP2 ${tp2Level})`);
+            }
           }
         }
       }
@@ -3485,8 +3642,8 @@ export async function registerRoutes(server: Server, app: Express) {
       // cap and the directional overlay; per-symbol ADX regime + short-macro
       // filter run unconditionally below. Loaded BEFORE the early cap check.
 
-      // BTC trends — daily fetched here so it's available for both the BTC gate
-      // (computed next) and the per-trade riskMultiplier (set later).
+      // BTC daily trend — feeds the per-strategy regime gate and the UI snapshot
+      // (the sizing multiplier that also used it was retired 2026-09-07).
       let btcDailyTrend: BtcTrend = "neutral";
       try {
         btcDailyTrend = await getDailyTrend("BTC") as BtcTrend;
@@ -3514,10 +3671,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const currentBalance = balance.equity;
       const baseRiskPct = parseFloat(await getSetting("live_risk_pct") || "1"); // conservative 1% default
 
-      // BTC macro risk multiplier (per-trade sizing — distinct from the BTC regime cap above)
-      let riskMultiplier = 1.0;
-      if      (btcDailyTrend === "up")   riskMultiplier = 1.25;
-      else if (btcDailyTrend === "down") riskMultiplier = 0.75;
+      // BTC risk multiplier retired 2026-09-07 (see paperScan) — sizing is flat base %.
 
       // ── DRAWDOWN GUARD (same rule and constants as paper) ──
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
@@ -3560,6 +3714,10 @@ export async function registerRoutes(server: Server, app: Express) {
       let openNotionalUsd = liveEngineStatus.positions.length > 0
         ? liveEngineStatus.positions.reduce((s, p) => s + (p.notionalUsd ?? 0), 0)
         : openLive.reduce((s, e) => s + (e.remaining_position_size_usd ?? e.position_size_usd ?? 0), 0);
+
+      // ── SLEEVES — open live positions per strategy (Strategy.maxConcurrent) ──
+      const openByStrategyLive: Record<string, number> = {};
+      for (const t of openLive) if (t.strategy) openByStrategyLive[t.strategy] = (openByStrategyLive[t.strategy] || 0) + 1;
 
       // ── CORRELATION — count open live trades per group ──
       const tradableSymbols = marketMaps.availableSymbols;
@@ -3643,6 +3801,12 @@ export async function registerRoutes(server: Server, app: Express) {
               continue;
             }
 
+            // ── Per-strategy sleeve cap — mirrors paperScan ──
+            if (strat.maxConcurrent != null && (openByStrategyLive[strat.id] || 0) >= strat.maxConcurrent) {
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy sleeve full: ${openByStrategyLive[strat.id]}/${strat.maxConcurrent} open` });
+              continue;
+            }
+
             // ── Per-strategy drawdown kill-switch ──
             if (pausedStrategiesLive.has(strat.id)) {
               logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Strategy paused: 7d netR < -3R (per-strategy drawdown kill-switch)` });
@@ -3712,9 +3876,10 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
               if (risk <= 0 || reward / risk < MIN_RISK_REWARD) continue;
+              normaliseTakeProfit2(signal);
 
-              // ── POSITION SIZING — fixed fractional × BTC macro multiplier ──
-              const riskPctUsed = baseRiskPct * riskMultiplier;
+              // ── POSITION SIZING — fixed fractional, flat base % (mirrors paperScan) ──
+              const riskPctUsed = baseRiskPct;
               const slDistPct   = risk / signal.entry;
               const riskUsd     = currentBalance * riskPctUsed / 100;
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
@@ -3756,6 +3921,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              const orderSentAt = Date.now();
               const order = await client.openPosition(sym, signal.direction, posSize, signal.entry, leverage);
 
               // ── Reconcile actual fill price ──────────────────────────
@@ -3767,7 +3933,7 @@ export async function registerRoutes(server: Server, app: Express) {
               let actualEntry = signal.entry;
               let actualVol   = order.size;
               let filled      = false;
-              for (let attempt = 0; attempt < 6; attempt++) {
+              for (let attempt = 0; attempt < 10; attempt++) {
                 await new Promise(r => setTimeout(r, 500));
                 try {
                   const pos = (await client.getPositions()).find(p =>
@@ -3781,8 +3947,109 @@ export async function registerRoutes(server: Server, app: Express) {
                 } catch (err) { console.error("[live-fill-check] failed:", err); }
               }
 
+              // The position list can lag or fail for a burst; the fills ledger
+              // is the authoritative record of what executed. An order that
+              // openPosition reported as placed but that never showed in the
+              // positions poll used to be dropped with NO journal row — if it
+              // had filled, the position surfaced only as "unmanaged", with no
+              // stop and nothing managing it (audit 2026-09-07, live-01).
+              if (!filled && client.getFills) {
+                const entrySide = signal.direction === "LONG" ? "buy" : "sell";
+                const fills = await client.getFills(new Date(orderSentAt - 60_000)).catch(() => [] as ExchangeFill[]);
+                const entryFills = fills.filter(f => f.botSymbol.toUpperCase() === sym.toUpperCase() && f.side === entrySide && f.timeMs >= orderSentAt - 5_000);
+                const vol = entryFills.reduce((s, f) => s + f.size, 0);
+                if (vol > 0) {
+                  actualEntry = entryFills.reduce((s, f) => s + f.size * f.price, 0) / vol;
+                  actualVol   = vol;
+                  filled      = true;
+                  console.warn(`[live-fill-check] ${sym}: position not listed after 5s but ${entryFills.length} entry fill(s) found — proceeding from the fills ledger`);
+                }
+              }
+
               if (!filled) {
-                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Order ${order.orderId} not visible in positions after 3s — skipping journal entry`, signal: signal.direction, confidence: signal.confidence });
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Order ${order.orderId} not visible in positions or fills after 5s — no journal row; if the position appears later it is flagged as unmanaged and must be reconciled`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
+              // ── FILL RE-GATE — did the market order land past the stop or the target? ──
+              // The right-size below measures |fill − stop| with Math.abs, so a LONG
+              // filled BELOW its stop (or a SHORT above it) would look like a small,
+              // valid risk and a venue stop would then be placed already through the
+              // mark. Same for a fill past TP1. Paper re-gates its ticker fill on
+              // R:R; live must do the same with the real fill, and undo the entry
+              // when it fails — a round trip in fees is cheaper than an unprotected
+              // position or a trade with no reward left.
+              const fillRiskDir = signal.direction === "LONG" ? actualEntry - signal.stopLoss : signal.stopLoss - actualEntry;
+              const fillRewardDir = signal.direction === "LONG" ? signal.takeProfit1 - actualEntry : actualEntry - signal.takeProfit1;
+              if (fillRiskDir <= 0 || fillRewardDir <= 0 || fillRiskDir / actualEntry < MIN_SL_DISTANCE_PCT || fillRewardDir / fillRiskDir < MIN_RISK_REWARD) {
+                const drift = Math.round(((actualEntry - signal.entry) / signal.entry) * 10000);
+                const whyFailed = fillRiskDir <= 0 ? "crossed the stop" : fillRewardDir <= 0 ? "crossed TP1" : `left R:R ${(fillRewardDir / fillRiskDir).toFixed(2)} < ${MIN_RISK_REWARD}`;
+                // Undo at market. A FAILED undo must never be booked as a closed
+                // round trip: the venue would then hold a full position with no
+                // stop, no TP and nothing managing it — liveCheck manages OPEN
+                // journal rows only (audit 2026-09-07, live-01). Retry; if the
+                // close still fails, keep the row OPEN with the signal's levels
+                // so the self-heal / software stop take over, and try to place
+                // the stop right away.
+                let undone = false;
+                let undoErrMsg = "";
+                for (let attempt = 0; attempt < 3 && !undone; attempt++) {
+                  if (attempt > 0) await new Promise(r => setTimeout(r, 700));
+                  try {
+                    const pos = (await client.getPositions()).find(p =>
+                      p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
+                    if (!pos) { undone = true; break; } // already flat — the close landed, or the venue closed it
+                    await client.closePosition(pos);
+                    undone = true;
+                  } catch (undoErr: any) {
+                    undoErrMsg = undoErr?.message ?? String(undoErr);
+                    console.error(`[live-scan] fill re-gate: undo close attempt ${attempt + 1}/3 failed for ${sym}: ${undoErrMsg}`);
+                  }
+                }
+                if (!undone) {
+                  const openNotional = actualVol * actualEntry;
+                  const openRiskDist = (Math.max(fillRiskDir, 0) / actualEntry) || slDistPct;
+                  const kept = await addJournalEntry({
+                    symbol: sym, direction: signal.direction,
+                    entry_price: roundPriceForJournal(actualEntry),
+                    stop_loss: signal.stopLoss, take_profit1: signal.takeProfit1, take_profit2: signal.takeProfit2,
+                    confluence_score: signal.confluenceScore, mode: "live", strategy: strat.id, followed: "yes",
+                    position_size_usd: Math.round(openNotional * 100) / 100,
+                    risk_usd: Math.round(riskUsd * 100) / 100,
+                    entry_risk_dist: openRiskDist,
+                    notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} — WARNING: fill ${actualEntry.toFixed(6)} (drift ${drift}bps) ${whyFailed} and the undo close FAILED 3× (${undoErrMsg}). Row kept OPEN so liveCheck manages it (protection self-heal + software stop); close it manually if this persists.`,
+                  });
+                  try {
+                    const pos = (await client.getPositions()).find(p =>
+                      p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
+                    if (pos) await client.setProtection(pos, signal.stopLoss, venueTakeProfitFor(signal.takeProfit1, signal.takeProfit2));
+                  } catch (protErr: any) {
+                    console.error(`[live-scan] fill re-gate: protection for the kept-open ${sym} position failed too: ${protErr?.message ?? protErr}`);
+                  }
+                  liveEngineStatus.error = `${sym}: entry failed the fill re-gate and the undo close failed — position kept OPEN under management (journal #${kept.id}); check the venue`;
+                  logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Fill re-gate: fill ${actualEntry} (drift ${drift}bps) ${whyFailed}; undo close failed 3× — position kept OPEN under management (journal #${kept.id})`, signal: signal.direction, confidence: signal.confidence });
+                  continue;
+                }
+                const abortNotional = actualVol * actualEntry;
+                const abortCost = abortNotional * (TRADE_COSTS.takerFeePct + TRADE_COSTS.slippagePct) * 2;
+                const aborted = await addJournalEntry({
+                  symbol: sym, direction: signal.direction,
+                  entry_price: roundPriceForJournal(actualEntry),
+                  stop_loss: signal.stopLoss, take_profit1: signal.takeProfit1, take_profit2: signal.takeProfit2,
+                  confluence_score: signal.confluenceScore, mode: "live", strategy: strat.id, followed: "yes",
+                  position_size_usd: Math.round(abortNotional * 100) / 100,
+                  risk_usd: Math.round(riskUsd * 100) / 100,
+                  entry_risk_dist: slDistPct,
+                  notes: `Live [${strat.name}] ${client.id}:${venueSym} orderId=${order.orderId} — fill ${actualEntry.toFixed(6)} (drift ${drift}bps) ${whyFailed}: entry undone at market, round trip booked; cooldown applies.`,
+                });
+                await updateJournalEntry(aborted.id, {
+                  outcome: "loss",
+                  exit_price: roundPriceForJournal(actualEntry),
+                  pnl_usd: -Math.round(abortCost * 100) / 100,
+                  pnl_pct: -Math.round((TRADE_COSTS.takerFeePct + TRADE_COSTS.slippagePct) * 2 * 10000) / 100,
+                  closed_at: new Date().toISOString(),
+                });
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Fill re-gate: fill ${actualEntry} (drift ${drift}bps) failed the stop/target check — entry undone`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 
@@ -3869,10 +4136,14 @@ export async function registerRoutes(server: Server, app: Express) {
                   console.error(`[live-scan] right-size failed for ${sym}: ${trimErr?.message ?? trimErr} — keeping full size, booking the real risk`);
                 }
               }
-              // R math must divide by what is truly at risk, not the plan —
-              // booking the pre-order riskUsd made R lie in both directions
-              // (losses read −1.3R…−2.4R, winners were inflated the same way).
-              const bookedRiskUsd = realRiskUsd > 0 ? realRiskUsd : riskUsd;
+              // R math divides by what is truly at risk: adverse drift was trimmed
+              // back to the plan above, so realRiskUsd ≈ riskUsd there. A FAVOURABLE
+              // fill (closer to the stop) is left at full size and risks LESS than
+              // planned — book the planned risk in that case, or a routine outcome
+              // mints outsized R (audit 2026-09-07, live-06: the 2026-08-20 SUI
+              // +1.4R would have read +1.6R). Booking the pre-order riskUsd
+              // unconditionally was the older bug (−1R stop-outs read −2.4R).
+              const bookedRiskUsd = realRiskUsd > 0 ? Math.max(realRiskUsd, riskUsd) : riskUsd;
 
               // Attach protective SL/TP. MEXC could carry these on the entry
               // order; Kraken needs separate reduce-only orders, so both go
@@ -3880,7 +4151,8 @@ export async function registerRoutes(server: Server, app: Express) {
               try {
                 const pos = (await client.getPositions()).find(p =>
                   p.botSymbol.toUpperCase() === sym.toUpperCase() && p.direction === signal.direction && p.size > 0);
-                if (pos) await client.setProtection(pos, signal.stopLoss, signal.takeProfit2 ?? signal.takeProfit1);
+                // Venue TP only for a distinct TP2 — single-target trades are trailed in software (see venueTakeProfitFor).
+                if (pos) await client.setProtection(pos, signal.stopLoss, venueTakeProfitFor(signal.takeProfit1, signal.takeProfit2));
               } catch (protErr: any) {
                 console.error(`[live-scan] protection failed for ${sym}: ${protErr?.message ?? protErr}`);
               }
@@ -3912,6 +4184,7 @@ export async function registerRoutes(server: Server, app: Express) {
               openSymbolExposures.push({ symbol: sym, strategy: strat.id, outcome: "open" });
               openNotionalUsd += actualPosSize;
               newOpens++;
+              openByStrategyLive[strat.id] = (openByStrategyLive[strat.id] || 0) + 1;
               if (group) openByGroup[group] = (openByGroup[group] || 0) + 1;
             } catch (err: any) {
               console.error(`[live-scan] ${sym}/${strat.id} error:`, err);
@@ -4036,7 +4309,10 @@ export async function registerRoutes(server: Server, app: Express) {
       const { priceByPair } = await fetchMexcContractTickerMaps().catch(() => ({ priceByPair: {} as Record<string, number> }));
       const tickerPrice = pos?.markPrice ?? priceByPair[`${trade.symbol}USDT`] ?? trade.entry_price;
 
-      if (pos) await client.closePosition(pos);
+      if (pos) {
+        await client.closePosition(pos);
+        await dropProtection(client, trade.symbol, "manual close");
+      }
 
       // Book the execution the venue actually gave us, not the ticker.
       const fill = await priceMarketClose(client, trade, direction, tickerPrice);
