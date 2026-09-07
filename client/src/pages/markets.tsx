@@ -42,10 +42,7 @@ export default function MarketsPage() {
 
   const blockedCount = useMemo(() => {
     if (!gates || !market) return null;
-    return market.filter(c =>
-      c.volume24h < gates.minVolumeUsdt ||
-      (c.spreadPct != null && c.spreadPct > gates.maxSpreadPct),
-    ).length;
+    return market.filter(c => c.spreadPct != null && c.spreadPct > gates.maxSpreadPct).length;
   }, [market, gates]);
 
   return (
@@ -97,7 +94,7 @@ export default function MarketsPage() {
                     <Th right>1h</Th>
                     <Th right>24h</Th>
                     <Th right>7d</Th>
-                    <Th right title={gates ? `Gate: ≥ $${fmtCompact(gates.minVolumeUsdt)}` : undefined}>
+                    <Th right title="Informativo — o engine não filtra por volume (o antigo gate de $30M nunca disparava)">
                       Volume 24h
                     </Th>
                     <Th right title={gates ? `Gate: ≤ ${(gates.maxSpreadPct * 100).toFixed(2)}%` : undefined}>
@@ -111,7 +108,6 @@ export default function MarketsPage() {
                 </thead>
                 <tbody>
                   {coins.map(c => {
-                    const volPass = gates ? c.volume24h >= gates.minVolumeUsdt : true;
                     const spreadPass = gates && c.spreadPct != null ? c.spreadPct <= gates.maxSpreadPct : true;
                     const fundingBlocksLong = gates && c.fundingRate != null && c.fundingRate > gates.fundingLongMax;
                     const fundingBlocksShort = gates && c.fundingRate != null && c.fundingRate < gates.fundingShortMin;
@@ -133,8 +129,7 @@ export default function MarketsPage() {
                         <Td right><ChangeCell value={c.change24h} /></Td>
                         <Td right><ChangeCell value={c.change7d} /></Td>
                         <Td right>
-                          <span className="num text-muted-foreground">${fmtCompact(c.volume24h)} </span>
-                          {gates && <GateCheck pass={volPass} title={volPass ? "Volume acima do mínimo" : `Abaixo do gate de $${fmtCompact(gates.minVolumeUsdt)} — sem entradas`} />}
+                          <span className="num text-muted-foreground">${fmtCompact(c.volume24h)}</span>
                         </Td>
                         <Td right>
                           <span className="num text-muted-foreground">
@@ -197,7 +192,6 @@ export default function MarketsPage() {
           {gates && (
             <Panel title="Gates de entrada (engine)">
               <div className="space-y-1.5 text-xs">
-                <div className="flex justify-between"><span className="text-muted-foreground">Volume 24h mín.</span><span className="num">${fmtCompact(gates.minVolumeUsdt)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Spread máx.</span><span className="num">{(gates.maxSpreadPct * 100).toFixed(2)}%</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Funding (LONG / SHORT)</span><span className="num">≤{(gates.fundingLongMax * 100).toFixed(1)}% / ≥{(gates.fundingShortMin * 100).toFixed(1)}%</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Distância SL mín.</span><span className="num">{(gates.minSlDistancePct * 100).toFixed(1)}%</span></div>

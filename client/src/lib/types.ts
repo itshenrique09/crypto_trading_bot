@@ -59,7 +59,21 @@ export interface GuardState {
   overrideUntil: string | null;
 }
 
+/** Portfolio drawdown guard (2026-09-03): realized equity in trade-R vs its rolling peak. */
+export interface DrawdownGuardState extends GuardState {
+  cumR: number;
+  peakR: number;
+  ddR: number;
+  haltR: number;
+  resumeR: number;
+  peakWindowDays: number;
+  maxHaltHours: number;
+  haltedSince: string | null;
+}
+
 export interface GuardsState {
+  drawdown: DrawdownGuardState;
+  /** Legacy mirrors kept for older clients: `rolling` = the drawdown guard, `daily` is retired. */
   daily: GuardState;
   rolling: GuardState;
 }
@@ -210,7 +224,6 @@ export interface UniverseResponse {
 
 export interface EngineConfig {
   riskGates: {
-    minVolumeUsdt: number;
     maxSpreadPct: number;
     fundingLongMax: number;
     fundingShortMin: number;
@@ -221,11 +234,10 @@ export interface EngineConfig {
     maxOpenPositions: number;
     maxPerCorrelationGroup: number;
     onePositionPerSymbol: boolean;
-    dailyDrawdownHaltR: number;
-    rollingWindowDays: number;
-    rollingDrawdownHaltR: number;
-    killSwitchMinTrades: number;
-    killSwitchMaxNetR: number;
+    drawdownGuard: { peakWindowDays: number; haltR: number; resumeR: number; maxHaltHours: number };
+    /** Per strategy: BTC daily regimes in which each direction is traded ([] = never, absent = always). */
+    regimeGates: Record<string, { long?: string[]; short?: string[] }>;
+    scan: { closeOffsetMs: number; retryOffsetMs: number; maxSignalAgeMin: number };
   };
   exits: {
     tp1PartialClosePct: number;

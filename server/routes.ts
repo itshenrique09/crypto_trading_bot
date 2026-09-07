@@ -9,13 +9,16 @@ import {
 } from "./storage";
 import { analyzeIndicators, generateSignal, refineEntry, smcSignal, breakRetestSignal, rsiDivergenceSignal, liquiditySweepSignal, type OHLCV } from "./analysis";
 import { getAllStrategies, getStrategyIds } from "./strategies/registry";
-import type { Strategy } from "./strategies/types";
+import { regimeAllows, type Strategy, type BtcDailyTrend } from "./strategies/types";
 import { dropOpenCandle, intervalToMs } from "./candles";
+import { GUARD, MAX_HOLD_HOURS_BY_INTERVAL, SCAN } from "./engine-config";
+import { scheduleAtCloses, type ScanSchedule } from "./scan-scheduler";
+import { roundSize } from "./kraken-client";
 import { buildMexcContractTickerMaps, parseMexcKlineData, toMexcContractInterval, MEXC_CONTRACT_OVERRIDES, type MexcContractTicker } from "./mexc-market";
 import { getRuntimeInfo } from "./runtime-info";
 import { getBackupStatus } from "./backup";
 import { shouldSkipSymbolForOpenExposure } from "./exposure-guards";
-import { isRollingDrawdownBreached, rollingHaltClearsAt, strategiesToPause, checkMarginCapacity } from "./portfolio-guards";
+import { checkMarginCapacity, evaluateDrawdownGuard, emptyDrawdownGuardState, type DrawdownGuardState, type DrawdownGuardEval } from "./portfolio-guards";
 import { classifyBtcRegime, defaultBtcContext, type BtcRegimeContext, type BtcTrend } from "./btc-regime-gate";
 import { startFundingCarryLoop, getFundingCarryReport } from "./funding-carry";
 import { computeTrailStop, deriveOriginalRiskFromJournal, type TrailingMode, DEFAULT_TRAIL_PCT, DEFAULT_R_MULTIPLE } from "./trailing-stop";
@@ -54,7 +57,7 @@ const MIN_SL_DISTANCE_PCT = 0.006;
 // 5 such live entries, mean adverse drift 115 bps on ~130 bps stops). A sweep
 // reversal is a moment, not a level: past this age the setup is skipped and
 // the next candle gets to speak for itself.
-const MAX_SIGNAL_AGE_MIN = 10;
+const MAX_SIGNAL_AGE_MIN = SCAN.maxSignalAgeMin;
 function signalAgeMinutes(candles: OHLCV[], interval: string): number {
   const last = candles[candles.length - 1];
   const ivMs = intervalToMs(interval) ?? 3_600_000;
@@ -69,34 +72,28 @@ function signalAgeMinutes(candles: OHLCV[], interval: string): number {
 // drawdown guards. Ticker-estimated exits keep the full model.
 const LIVE_FILL_COSTS = { takerFeePct: TRADE_COSTS.takerFeePct, slippagePct: 0 } as const;
 
-// ── Drawdown-guard tuning (shared by paper + live engines) ──
-// Calendar daily (−4R) and monthly (−8R) limits reset on their boundaries and
-// can miss a slow multi-day grind. A rolling 7-day window has no blind spot;
-// −6R over a week (1.5× the daily cap across 7× the time) signals a structural
-// problem, not normal R-multiple variance, so it only trips on a real bleed.
-const ROLLING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const ROLLING_DRAWDOWN_MAX_LOSS_R = 6;
-const DAILY_DRAWDOWN_MAX_LOSS_R = 4;
+// ── Portfolio drawdown guard (2026-09-03) ──
+// ONE guard on the realized equity curve in trade-R with hysteresis and a
+// bounded halt (server/engine-config.ts GUARD; implementation in
+// server/portfolio-guards.ts evaluateDrawdownGuard). It replaced the daily −4R /
+// rolling-7d −6R / per-strategy kill-switch trio, which measured the same
+// process three times in two different R units and kept both engines halted
+// for ~10 of 18 days in Aug 2026 (script/audit/AUDIT-NOTES.md, Fases 8-9).
+const GUARD_OPTS = {
+  peakWindowMs: GUARD.peakWindowDays * 86_400_000,
+  haltR: GUARD.haltR,
+  resumeR: GUARD.resumeR,
+  maxHaltMs: GUARD.maxHaltHours * 3_600_000,
+} as const;
 // Position cap is FIXED at 10 (capacity A/B Jul 2026: +55R and lower maxDD than
 // 6; 12 tested worse). The BTC-regime maxOpen is informational only.
 const FIXED_MAX_OPEN = 10;
 const MIN_RISK_REWARD = 1.5;
-// Per-strategy kill-switch: 4-trade floor (was 6). At ~3 min scans most of the
-// suite is low-frequency and never reached 6 closed trades in 7 days, leaving
-// the switch effectively dead for them; 4 keeps random-variance protection
-// while letting it actually fire. Pause when window netR < −3R.
-const KILL_SWITCH_MIN_TRADES = 4;
-const KILL_SWITCH_MAX_NET_R = -3;
 
-// ── MAX-HOLD TIMEOUT — parity with the validation harness (Jul 2026) ──────
-// The pipeline harness (script/validate-pipeline.ts) and every backtest that
-// validated this system force-close any trade still open after maxBars
-// (200×1h ≈ 8.3 days, 60×4h = 10 days). The engines previously had no such
-// exit: positions could linger for weeks (an XRP paper trade once sat open
-// 5+ weeks), blocking the symbol slot and diverging from the validated system.
-// Both engines now close stale positions at market once the age exceeds the
-// strategy interval's budget.
-const MAX_HOLD_HOURS_BY_INTERVAL: Record<string, number> = { "1h": 200, "4h": 240 };
+// ── MAX-HOLD TIMEOUT — parity with the validation harness ──────────────────
+// The pipeline harness force-closes any trade still open after maxBars (200×1h,
+// 60×4h, 200×1d). Both engines close stale positions at market once the age
+// exceeds the strategy interval's budget (table in server/engine-config.ts).
 function maxHoldHoursForStrategy(strategyId: string | null | undefined): number {
   const strat = strategyId ? getAllStrategies().find(s => s.id === strategyId) : undefined;
   return MAX_HOLD_HOURS_BY_INTERVAL[strat?.interval ?? "4h"] ?? 240;
@@ -649,7 +646,6 @@ export async function registerRoutes(server: Server, app: Express) {
   app.get("/api/engine/config", (_req, res) => {
     res.json({
       riskGates: {
-        minVolumeUsdt: MIN_VOLUME_USDT,
         maxSpreadPct: MAX_SPREAD_PCT,
         fundingLongMax: FUNDING_LONG_MAX,
         fundingShortMin: FUNDING_SHORT_MIN,
@@ -660,11 +656,12 @@ export async function registerRoutes(server: Server, app: Express) {
         maxOpenPositions: FIXED_MAX_OPEN,
         maxPerCorrelationGroup: MAX_PER_GROUP,
         onePositionPerSymbol: true,
-        dailyDrawdownHaltR: DAILY_DRAWDOWN_MAX_LOSS_R,
-        rollingWindowDays: ROLLING_WINDOW_MS / 86_400_000,
-        rollingDrawdownHaltR: ROLLING_DRAWDOWN_MAX_LOSS_R,
-        killSwitchMinTrades: KILL_SWITCH_MIN_TRADES,
-        killSwitchMaxNetR: KILL_SWITCH_MAX_NET_R,
+        // Drawdown guard (2026-09-03): realized equity in trade-R vs its peak
+        // over the last `peakWindowDays`; halt ≥ haltR, resume ≤ resumeR, a halt
+        // never lasts more than maxHaltHours. Replaced daily/rolling/kill-switch.
+        drawdownGuard: { ...GUARD },
+        regimeGates: Object.fromEntries(getAllStrategies().filter(s => s.regimeGate).map(s => [s.id, s.regimeGate])),
+        scan: { ...SCAN },
       },
       exits: {
         tp1PartialClosePct: TP1_PARTIAL_CLOSE_PCT,
@@ -1979,25 +1976,37 @@ export async function registerRoutes(server: Server, app: Express) {
   // pre-expansion (PF 1.90, maxDD 37.6%). Cap 3 + maxOpen 12 was worse — keep 10.
   const MAX_PER_GROUP = 3;
 
-  // ── Minimum 24h volume (USDT) to trade — avoids illiquid / manipulated markets ──
-  const MIN_VOLUME_USDT = 30_000_000; // $30M
-  const MAX_SPREAD_PCT = 0.002;       // 0.20% max bid/ask spread for entries
+  // 0.20% max bid/ask spread for entries — measured on the executing venue for
+  // live (Kraken public tickers) and on MEXC for paper. The old $30M 24h-volume
+  // gate was removed 2026-09-03: it exempted "preferred" symbols and every
+  // universe coin is preferred, so it never fired.
+  const MAX_SPREAD_PCT = 0.002;
 
-  // ── Volume cache (5 min) — populated from MEXC ticker ──
-  let cachedVolumes: { map: Record<string, number>; fetchedAt: number } | null = null;
-
-  async function getVolumeMap(): Promise<Record<string, number>> {
-    if (cachedVolumes && Date.now() - cachedVolumes.fetchedAt < 5 * 60 * 1000) {
-      return cachedVolumes.map;
-    }
-    try {
-      const { amount24BySymbol: map } = await fetchMexcContractTickerMaps();
-      cachedVolumes = { map, fetchedAt: Date.now() };
-      return map;
-    } catch (err) {
-      console.error("[volume-map] fetch failed:", err);
-      return cachedVolumes?.map || {};
-    }
+  // ── Portfolio drawdown-guard state, one per engine (transitions happen in the scans) ──
+  let paperGuardState: DrawdownGuardState = emptyDrawdownGuardState();
+  let liveGuardState: DrawdownGuardState = emptyDrawdownGuardState();
+  /** Status-endpoint view of the guard. `rolling` mirrors the drawdown guard so the existing UI keeps working; `daily` is retired. */
+  function guardsPayload(state: DrawdownGuardState, view: DrawdownGuardEval, overrideUntilMs: number | null) {
+    const endsAt = state.halted && state.haltedSinceMs != null ? new Date(state.haltedSinceMs + GUARD_OPTS.maxHaltMs).toISOString() : null;
+    const overrideUntil = overrideUntilMs ? new Date(overrideUntilMs).toISOString() : null;
+    const drawdown = {
+      halted: state.halted,
+      endsAt,
+      overrideUntil,
+      cumR: Math.round(view.cumR * 100) / 100,
+      peakR: Math.round(view.peakR * 100) / 100,
+      ddR: Math.round(view.ddR * 100) / 100,
+      haltR: GUARD.haltR,
+      resumeR: GUARD.resumeR,
+      peakWindowDays: GUARD.peakWindowDays,
+      maxHaltHours: GUARD.maxHaltHours,
+      haltedSince: state.haltedSinceMs != null ? new Date(state.haltedSinceMs).toISOString() : null,
+    };
+    return {
+      drawdown,
+      rolling: { halted: state.halted, endsAt, overrideUntil },
+      daily: { halted: false, endsAt: null, overrideUntil: null },
+    };
   }
 
   // ── Funding rate cache (5 min) — MEXC perpetual futures ──────────────
@@ -2099,24 +2108,31 @@ export async function registerRoutes(server: Server, app: Express) {
     paper: "disabled_strategies_paper",
     live: "disabled_strategies_live",
   } as const;
-  // Single-list key from the first iteration of this feature (2026-08-14) —
-  // read as a fallback so an existing value migrates transparently.
-  const LEGACY_DISABLED_STRATEGIES_KEY = "disabled_strategies";
-  // Audit 2026-08-14 (script/audit/AUDIT-REPORT.md, phase 2): RSI Divergence's
-  // marginal portfolio contribution measured NEGATIVE in both harness windows
-  // (−18.3R ALL / −26.8R 2026) — it displaces higher-expectancy Liquidity Sweep
-  // entries on ATOM/INJ via the one-position-per-symbol guard. Paused by
-  // default on BOTH modes; one click in Settings re-enables it per mode.
-  const DEFAULT_DISABLED_STRATEGIES = ["rsi-divergence"];
+  // Pause defaults live in the REGISTRY (Strategy.defaultPaused) and are written
+  // to storage once, at boot, when a mode has no pause list yet. The previous
+  // scheme — a DEFAULT list applied only when no settings row existed, with a
+  // legacy single-list fallback — silently kept RSI Divergence trading for 18
+  // days on an install that already had a row (audit Fase 8). Reading is now
+  // parse-only: what is stored is what runs.
   async function getDisabledStrategyIds(mode: "paper" | "live"): Promise<Set<string>> {
-    const raw = (await getSetting(DISABLED_STRATEGIES_KEYS[mode]))
-      ?? (await getSetting(LEGACY_DISABLED_STRATEGIES_KEY));
-    if (raw == null) return new Set(DEFAULT_DISABLED_STRATEGIES);
+    const raw = await getSetting(DISABLED_STRATEGIES_KEYS[mode]);
+    if (raw == null) return new Set();
     try {
       const arr = JSON.parse(raw);
       return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []);
-    } catch {
-      return new Set(DEFAULT_DISABLED_STRATEGIES);
+    } catch (err) {
+      console.error(`[strategies] malformed ${DISABLED_STRATEGIES_KEYS[mode]} — treating as empty:`, err);
+      return new Set();
+    }
+  }
+  /** Boot-time: materialise registry defaults for any mode that has no pause list yet. */
+  async function materialiseStrategyDefaults(): Promise<void> {
+    for (const mode of ["paper", "live"] as const) {
+      const existing = await getSetting(DISABLED_STRATEGIES_KEYS[mode]);
+      if (existing != null) continue;
+      const paused = getAllStrategies().filter(s => s.defaultPaused?.[mode]).map(s => s.id);
+      await setSetting(DISABLED_STRATEGIES_KEYS[mode], JSON.stringify(paused));
+      console.log(`[strategies] ${mode}: no pause list found — materialised registry defaults: ${paused.length ? paused.join(", ") : "(none paused)"}`);
     }
   }
   async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
@@ -2433,27 +2449,14 @@ export async function registerRoutes(server: Server, app: Express) {
       const totalPnlUsd   = closedTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
       const currentBalance = initialCapital + totalPnlUsd;
 
-      // ── DRAWDOWN PROTECTION ───────────────────────────────────────
-      // Daily: if today's closed P&L < -4R → pause scanning
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const todayTrades = closedTrades.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart);
-      const daily1R     = currentBalance * baseRiskPct / 100;
-      const dailyPnlUsd = todayTrades.reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (dailyPnlUsd < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R
-          && !(await ddOverrideUntil("paper", "daily"))) return;  // Daily drawdown limit (manual override honoured)
-
-      // NOTE (Jul 2026): the -8R MONTHLY guard was removed after the full-pipeline
-      // harness (script/validate-pipeline.ts) showed it fired on normal variance
-      // (1609 blocked entries in baseline) and then froze the rest of the month:
-      // removing it alone was worth +36R over the window. Daily -4R and rolling-7d
-      // -6R remain — they bind rarely and cut genuine loss streaks.
-
-      // Rolling 7-day: catches a multi-day grind that never trips the daily cap.
-      if (isRollingDrawdownBreached(closedTrades, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })
-          && !(await ddOverrideUntil("paper", "rolling"))) {
-        console.log(`[paper-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
-        return;
+      // ── DRAWDOWN GUARD — realized equity in trade-R, 30d peak, hysteresis ──
+      const guardEval = evaluateDrawdownGuard(closedTrades, paperGuardState, GUARD_OPTS);
+      paperGuardState = guardEval.state;
+      if (guardEval.transition !== "none") {
+        logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `Drawdown guard ${guardEval.transition}: dd ${guardEval.ddR.toFixed(1)}R from 30d peak (halt ≥ ${GUARD.haltR}R, resume ≤ ${GUARD.resumeR}R, max ${GUARD.maxHaltHours}h)` });
+        console.log(`[paper-scan] drawdown guard ${guardEval.transition} (dd ${guardEval.ddR.toFixed(1)}R)`);
       }
+      if (paperGuardState.halted && !(await ddOverrideUntil("paper", "rolling"))) return;
 
       // ── BTC MACRO RISK FILTER ─────────────────────────────────────
       // Adjust risk % based on BTC daily trend
@@ -2501,11 +2504,12 @@ export async function registerRoutes(server: Server, app: Express) {
       // Trigger: ≥KILL_SWITCH_MIN_TRADES closed trades in last 7d AND
       // netR < KILL_SWITCH_MAX_NET_R. Self-healing: re-evaluated each scan —
       // auto-resumes as losses age past the 7d window or wins rebalance netR.
-      const pausedStrategies = strategiesToPause(
-        closedTrades,
-        strategies.map(s => s.id),
-        { windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R },
-      );
+      // Per-strategy kill-switch retired 2026-09-03: it co-fired with the
+      // portfolio guard on 97% of halted hours and, with one strategy carrying
+      // 85% of trades, was a second portfolio halt in a different R unit. The
+      // drawdown guard above is the single circuit breaker; manual pause
+      // switches remain per strategy and per mode.
+      const pausedStrategies = new Set<string>();
 
       // ── Publish engine intelligence snapshot (read-only, for the UI) ──
       paperStatus.intelligence = {
@@ -2603,19 +2607,12 @@ export async function registerRoutes(server: Server, app: Express) {
           continue;
         }
 
-        // ── VOLUME FILTER — skip illiquid coins ──
-        // Backtested preferred symbols are exempt — their liquidity was validated during research.
-        // Volume filter only guards against unknown dynamic coins with no proven edge.
+        // 24h volume is recorded in the journal notes only. The old "$30M minimum"
+        // gate exempted preferred symbols and every universe coin is preferred, so
+        // it never fired once in production (removed 2026-09-03).
         const vol24h = volumeMap[sym] ?? 0;
-        const isPreferred = strategies.some(s => s.preferredSymbols?.includes(sym));
-        if (!isPreferred && vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
-          for (const strat of strategies) {
-            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
-              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
-          }
-          continue;
-        }
 
+        // Paper marks and fills at MEXC prices, so MEXC's book is the right spread to gate on.
         const spreadPct = spreadMap[sym];
         if (spreadPct != null && spreadPct > MAX_SPREAD_PCT) {
           for (const strat of strategies) {
@@ -2710,6 +2707,12 @@ export async function registerRoutes(server: Server, app: Express) {
               const ageMin = signalAgeMinutes(candles, interval);
               if (ageMin > MAX_SIGNAL_AGE_MIN) {
                 logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Stale signal: candle closed ${ageMin.toFixed(0)} min ago (> ${MAX_SIGNAL_AGE_MIN} min) — waiting for the next close`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
+              // ── REGIME GATE — direction × BTC daily trend, declared by the strategy ──
+              if (!regimeAllows(strat, signal.direction, btcDailyTrend as BtcDailyTrend)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${signal.direction} not traded with BTC daily ${btcDailyTrend}`, signal: signal.direction, confidence: signal.confidence });
                 continue;
               }
 
@@ -2848,21 +2851,26 @@ export async function registerRoutes(server: Server, app: Express) {
   const runPaperCheck = () => paperCheck().finally(() => broadcast("paper"));
   const runPaperScan = () => paperScan().finally(() => broadcast("paper"));
 
+  /** Candle intervals the registry trades on — the scan fires at each of their closes. */
+  const scanIntervals = () => Array.from(new Set(getAllStrategies().map(s => s.interval)));
+  let paperScanSchedule: ScanSchedule | null = null;
+
   function startPaperEngine() {
     if (paperStatus.running) return;
     paperStatus.running = true;
-    // Run immediately
+    // Run immediately (the freshness gate rejects anything not just closed)
     runPaperCheck();
     runPaperScan();
-    // Then on intervals: check every 30s, scan every 3min
+    // Position management every 30s; scans at every candle close (+30s, retry +3.5min)
     paperCheckInterval = setInterval(runPaperCheck, 30 * 1000);
-    paperScanInterval = setInterval(runPaperScan, 3 * 60 * 1000);
+    paperScanSchedule = scheduleAtCloses(scanIntervals(), [SCAN.closeOffsetMs, SCAN.retryOffsetMs], runPaperScan);
   }
 
   function stopPaperEngine() {
     paperStatus.running = false;
     if (paperCheckInterval) { clearInterval(paperCheckInterval); paperCheckInterval = null; }
     if (paperScanInterval) { clearInterval(paperScanInterval); paperScanInterval = null; }
+    if (paperScanSchedule) { paperScanSchedule.stop(); paperScanSchedule = null; }
   }
 
   app.post("/api/paper/start", async (_req, res) => {
@@ -2901,30 +2909,17 @@ export async function registerRoutes(server: Server, app: Express) {
       const stTrades = paperTrades.filter(e => e.strategy === s.id);
       strategyCounts[s.id] = { open: stTrades.filter(e => e.outcome === "open").length, total: stTrades.length };
     }
-    // Drawdown-halt state for the UI — computed with the SAME numbers the scan
-    // loop enforces, plus the manual override and a natural-end estimate.
-    const dailyBreached   = todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R;
-    const rollingBreached = isRollingDrawdownBreached(closed, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
-    const rollingClears   = rollingHaltClearsAt(closed, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
-    const [ovDaily, ovRolling] = await Promise.all([ddOverrideUntil("paper", "daily"), ddOverrideUntil("paper", "rolling")]);
+    // Drawdown-guard state for the UI — the SAME evaluation the scan loop runs
+    // (read-only here: the scan owns the state transitions), plus the override.
+    const guardView = evaluateDrawdownGuard(closed, paperGuardState, GUARD_OPTS);
+    const ovRolling = await ddOverrideUntil("paper", "rolling");
 
     res.json({
       ...paperStatus,
       openTrades:       openPaper.length,
       totalPaperTrades: paperTrades.length,
       strategyCounts,
-      guards: {
-        daily: {
-          halted: dailyBreached,
-          endsAt: dailyBreached ? new Date(nextDailyResetMs()).toISOString() : null,
-          overrideUntil: ovDaily ? new Date(ovDaily).toISOString() : null,
-        },
-        rolling: {
-          halted: rollingBreached,
-          endsAt: rollingClears != null ? new Date(rollingClears).toISOString() : null,
-          overrideUntil: ovRolling ? new Date(ovRolling).toISOString() : null,
-        },
-      },
+      guards: guardsPayload(paperGuardState, guardView, ovRolling),
       capital: {
         initial:    initialCapital,
         balance:    Math.round(currentBalance * 100) / 100,
@@ -3524,35 +3519,18 @@ export async function registerRoutes(server: Server, app: Express) {
       if      (btcDailyTrend === "up")   riskMultiplier = 1.25;
       else if (btcDailyTrend === "down") riskMultiplier = 0.75;
 
-      // Drawdown protection (same as paper)
+      // ── DRAWDOWN GUARD (same rule and constants as paper) ──
       const closedLive = liveTrades.filter(e => e.outcome !== "open");
-
-      // Sizing is fixed fractional — live Kelly retired Jul 2026 together with the
-      // paper one (pipeline A/B: Kelly doubled maxDD for <4% extra R).
-      const daily1R    = currentBalance * baseRiskPct / 100;
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const todayPnl   = closedLive.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
-                                   .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
-      if (todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * daily1R
-          && !(await ddOverrideUntil("live", "daily"))) return;  // Daily DD limit (manual override honoured)
-
-      // Monthly -8R guard removed Jul 2026 — same rationale as paper scan.
-
-      // Rolling 7-day portfolio guard — matches paper engine.
-      if (isRollingDrawdownBreached(closedLive, daily1R, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R })
-          && !(await ddOverrideUntil("live", "rolling"))) {
-        console.log(`[live-scan] Rolling 7d drawdown < -${ROLLING_DRAWDOWN_MAX_LOSS_R}R — scanning paused`);
-        return;
+      const liveGuardEval = evaluateDrawdownGuard(closedLive, liveGuardState, GUARD_OPTS);
+      liveGuardState = liveGuardEval.state;
+      if (liveGuardEval.transition !== "none") {
+        logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `LIVE drawdown guard ${liveGuardEval.transition}: dd ${liveGuardEval.ddR.toFixed(1)}R from 30d peak (halt ≥ ${GUARD.haltR}R, resume ≤ ${GUARD.resumeR}R, max ${GUARD.maxHaltHours}h)` });
+        console.log(`[live-scan] drawdown guard ${liveGuardEval.transition} (dd ${liveGuardEval.ddR.toFixed(1)}R)`);
       }
+      if (liveGuardState.halted && !(await ddOverrideUntil("live", "rolling"))) return;
 
-      // ── PER-STRATEGY DRAWDOWN KILL-SWITCH (live) ───────────────────
-      // Same rule as paper: ≥KILL_SWITCH_MIN_TRADES closed trades in last 7d
-      // AND netR < KILL_SWITCH_MAX_NET_R → pause until the window recovers.
-      const pausedStrategiesLive = strategiesToPause(
-        closedLive,
-        strategies.map(s => s.id),
-        { windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R },
-      );
+      // Per-strategy kill-switch retired 2026-09-03 (see paperScan).
+      const pausedStrategiesLive = new Set<string>();
       liveEngineStatus.pausedStrategies = Array.from(pausedStrategiesLive);
 
       const openPairs = new Set(openLive.map(e => `${e.symbol}:${e.strategy}`));
@@ -3574,6 +3552,7 @@ export async function registerRoutes(server: Server, app: Express) {
       const [marketMaps, fundingMap] = await Promise.all([fetchMexcContractTickerMaps(), getFundingMap()]);
       const volumeMap = marketMaps.amount24BySymbol;
       const spreadMap = marketMaps.spreadPctBySymbol;
+      const venueSpreads = client.getSpreads ? await client.getSpreads().catch(() => null) : null;
 
       // Notional already committed. The venue's own snapshot is ground truth
       // here; the journal is only a fallback if the position list came back
@@ -3619,23 +3598,18 @@ export async function registerRoutes(server: Server, app: Express) {
           continue;
         }
 
-        // ── VOLUME FILTER — skip illiquid coins ──
-        // Preferred symbols are exempt — validated via backtest, volume checked separately.
+        // 24h volume (MEXC) is recorded in the journal notes only — the old $30M gate
+        // never fired (every universe coin is "preferred"; removed 2026-09-03).
         const vol24h = volumeMap[sym] ?? 0;
-        const isPreferred = strategies.some(s => s.preferredSymbols?.includes(sym));
-        if (!isPreferred && vol24h > 0 && vol24h < MIN_VOLUME_USDT) {
-          for (const strat of strategies) {
-            if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
-              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Low volume $${(vol24h/1e6).toFixed(0)}M < $30M minimum` });
-          }
-          continue;
-        }
 
-        const spreadPct = spreadMap[sym];
+        // Spread is gated on the venue that EXECUTES: Kraken's own bid/ask when the
+        // adapter publishes it (36/40 universe coins trade < $30M/day there and
+        // several sit above 20 bps), MEXC's book only as a fallback.
+        const spreadPct = venueSpreads?.get(sym) ?? spreadMap[sym];
         if (spreadPct != null && spreadPct > MAX_SPREAD_PCT) {
           for (const strat of strategies) {
             if (!strat.preferredSymbols?.length || strat.preferredSymbols.includes(sym))
-              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Wide futures spread ${(spreadPct * 100).toFixed(2)}% > ${(MAX_SPREAD_PCT * 100).toFixed(2)}%` });
+              logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Wide ${venueSpreads?.has(sym) ? client.id.toUpperCase() : "MEXC"} spread ${(spreadPct * 100).toFixed(2)}% > ${(MAX_SPREAD_PCT * 100).toFixed(2)}%` });
           }
           continue;
         }
@@ -3708,6 +3682,12 @@ export async function registerRoutes(server: Server, app: Express) {
                 continue;
               }
 
+              // ── REGIME GATE — mirrors paperScan ──
+              if (!regimeAllows(strat, signal.direction, btcDailyTrend as BtcDailyTrend)) {
+                logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Regime gate: ${signal.direction} not traded with BTC daily ${btcDailyTrend}`, signal: signal.direction, confidence: signal.confidence });
+                continue;
+              }
+
               // ── WEEKLY TREND FILTER — 4H strategies only (SMC, B&R) ──
               if (interval === "4h") {
                 const weeklyTrend = await getWeeklyTrend(sym);
@@ -3740,6 +3720,25 @@ export async function registerRoutes(server: Server, app: Express) {
               const posSize     = slDistPct > 0 ? riskUsd / slDistPct : 0;
 
               const venueSym = venueSymbol(client.id, sym);
+
+              // ── LOT FEASIBILITY — can this size be opened, split at TP1 and protected? ──
+              // Kraken sizes in base units at a per-instrument precision; a tiny account
+              // can round the 60% partial or the 40% runner to zero (dust that cannot be
+              // protected) or under-size the entry by a large fraction. Refuse up front.
+              if (client.getSizePrecision) {
+                const prec = await client.getSizePrecision(sym).catch(() => null);
+                if (prec != null) {
+                  const rawLot = posSize / signal.entry;
+                  const lot = roundSize(rawLot, prec);
+                  const tp1Lot = roundSize(lot * TP1_PARTIAL_CLOSE_PCT, prec);
+                  const runnerLot = roundSize(lot - tp1Lot, prec);
+                  const underSize = rawLot > 0 ? (rawLot - lot) / rawLot : 1;
+                  if (!(lot > 0) || !(tp1Lot > 0) || !(runnerLot > 0) || underSize > 0.25) {
+                    logScan({ time: new Date().toISOString(), symbol: sym, strategy: strat.id, result: "filtered", reason: `Position too small to manage on ${client.id.toUpperCase()}: lot ${lot} (TP1 ${tp1Lot} / runner ${runnerLot}, under-size ${(underSize * 100).toFixed(0)}%) at $${posSize.toFixed(0)} notional`, signal: signal.direction, confidence: signal.confidence });
+                    continue;
+                  }
+                }
+              }
               const leverage = Math.max(1, Math.min(20, parseInt(await getSetting("live_leverage") || "5", 10) || 5));
 
               // ── MARGIN CAPACITY — check before sending, not after refusal ──
@@ -3928,6 +3927,8 @@ export async function registerRoutes(server: Server, app: Express) {
     }
   }
 
+  let liveScanSchedule: ScanSchedule | null = null;
+
   function startLiveEngine() {
     if (liveEngineStatus.running) return;
     liveEngineStatus.running = true;
@@ -3935,13 +3936,14 @@ export async function registerRoutes(server: Server, app: Express) {
     const runLiveScan = () => liveScan().finally(() => broadcast("live"));
     runLiveCheck();
     liveCheckInterval = setInterval(runLiveCheck, 30 * 1000);
-    liveScanInterval  = setInterval(runLiveScan, 3 * 60 * 1000);
+    liveScanSchedule  = scheduleAtCloses(scanIntervals(), [SCAN.closeOffsetMs, SCAN.retryOffsetMs], runLiveScan);
   }
 
   function stopLiveEngine() {
     liveEngineStatus.running = false;
     if (liveCheckInterval) { clearInterval(liveCheckInterval); liveCheckInterval = null; }
     if (liveScanInterval)  { clearInterval(liveScanInterval);  liveScanInterval  = null; }
+    if (liveScanSchedule)  { liveScanSchedule.stop(); liveScanSchedule = null; }
   }
 
   // Configure the live venue: which exchange, its API keys, risk + leverage.
@@ -4086,13 +4088,10 @@ export async function registerRoutes(server: Server, app: Express) {
       const todayPnl   = closed.filter(e => e.closed_at && new Date(e.closed_at) >= todayStart)
                                .reduce((s, e) => s + (e.pnl_usd ?? 0), 0);
 
-      // Halt state mirrors the live scan's math; oneR needs a balance snapshot
-      // (engine stopped → no basis → guards read as not halted, like the scan).
-      const liveOneR = (liveEngineStatus.balance ?? 0) > 0 ? (liveEngineStatus.balance as number) * riskPct / 100 : 0;
-      const liveDailyBreached   = liveOneR > 0 && todayPnl < -DAILY_DRAWDOWN_MAX_LOSS_R * liveOneR;
-      const liveRollingBreached = isRollingDrawdownBreached(closed, liveOneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
-      const liveRollingClears   = rollingHaltClearsAt(closed, liveOneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R });
-      const [ovDailyL, ovRollingL] = await Promise.all([ddOverrideUntil("live", "daily"), ddOverrideUntil("live", "rolling")]);
+      // Drawdown-guard state mirrors the live scan's evaluation (read-only) — the
+      // guard is in trade-R, so it needs no balance snapshot to be computed.
+      const liveGuardView = evaluateDrawdownGuard(closed, liveGuardState, GUARD_OPTS);
+      const ovRollingL = await ddOverrideUntil("live", "rolling");
 
       res.json({
         ...liveEngineStatus,
@@ -4102,18 +4101,7 @@ export async function registerRoutes(server: Server, app: Express) {
         configured,
         riskPct,
         leverage,
-        guards: {
-          daily: {
-            halted: liveDailyBreached,
-            endsAt: liveDailyBreached ? new Date(nextDailyResetMs()).toISOString() : null,
-            overrideUntil: ovDailyL ? new Date(ovDailyL).toISOString() : null,
-          },
-          rolling: {
-            halted: liveRollingBreached,
-            endsAt: liveRollingClears != null ? new Date(liveRollingClears).toISOString() : null,
-            overrideUntil: ovRollingL ? new Date(ovRollingL).toISOString() : null,
-          },
-        },
+        guards: guardsPayload(liveGuardState, liveGuardView, ovRollingL),
         openTrades:       liveTrades.filter(e => e.outcome === "open").length,
         totalLiveTrades:  liveTrades.length,
         closedLiveTrades: closed.length,
@@ -4130,6 +4118,7 @@ export async function registerRoutes(server: Server, app: Express) {
   // prevents any early /api/paper/start request from racing against this and
   // double-registering the interval (which would double-fire every scan).
   try {
+    await materialiseStrategyDefaults();
     const mode = await getSetting("mode");
     if (mode === "paper") {
       console.log("[auto-start] mode=paper detected — starting paper engine");

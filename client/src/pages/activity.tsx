@@ -181,14 +181,17 @@ export default function ActivityPage() {
             <Panel title="Parâmetros do engine" aside={<SourceTag>código do engine</SourceTag>}>
               <div className="space-y-1.5 text-xs">
                 <div className="flex justify-between"><span className="text-muted-foreground">Posições máx.</span><span className="num">{config.portfolio.maxOpenPositions} · {config.portfolio.maxPerCorrelationGroup}/grupo · 1/símbolo</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Halt diário / rolling {config.portfolio.rollingWindowDays}d</span><span className="num">−{config.portfolio.dailyDrawdownHaltR}R / −{config.portfolio.rollingDrawdownHaltR}R</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Kill-switch</span><span className="num">≥{config.portfolio.killSwitchMinTrades} trades 7d, netR &lt; {config.portfolio.killSwitchMaxNetR}R</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Guard de drawdown (pico {config.portfolio.drawdownGuard.peakWindowDays}d)</span><span className="num">halt ≥{config.portfolio.drawdownGuard.haltR}R · retoma ≤{config.portfolio.drawdownGuard.resumeR}R · máx {config.portfolio.drawdownGuard.maxHaltHours}h</span></div>
+                {Object.entries(config.portfolio.regimeGates ?? {}).map(([id, g]) => (
+                  <div key={id} className="flex justify-between"><span className="text-muted-foreground">Regime {id}</span><span className="num">LONG: {g.long === undefined ? "sempre" : g.long.length ? `BTC ${g.long.join("/")}` : "nunca"} · SHORT: {g.short === undefined ? "sempre" : g.short.length ? `BTC ${g.short.join("/")}` : "nunca"}</span></div>
+                ))}
+                <div className="flex justify-between"><span className="text-muted-foreground">Scan</span><span className="num">fecho da vela +{config.portfolio.scan.closeOffsetMs / 1000}s (retry +{Math.round(config.portfolio.scan.retryOffsetMs / 60000)}m) · sinal ≤{config.portfolio.scan.maxSignalAgeMin}min</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">TP1 fecha</span><span className="num">{config.exits.tp1PartialClosePct * 100}% → SL a break-even</span></div>
                 {config.exits.trailingRMultiple != null && (
                   <div className="flex justify-between"><span className="text-muted-foreground">Trailing do runner</span><span className="num">{config.exits.trailingMode === "fixed_pct" ? "2% fixo" : `r_multiple ${config.exits.trailingRMultiple}R`} · congelado</span></div>
                 )}
                 <div className="flex justify-between"><span className="text-muted-foreground">Max hold</span><span className="num">{Object.entries(config.exits.maxHoldHoursByInterval).map(([k, v]) => `${k}: ${v}h`).join(" · ")}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Volume / spread / R:R</span><span className="num">≥${fmtCompact(config.riskGates.minVolumeUsdt)} · ≤{(config.riskGates.maxSpreadPct * 100).toFixed(2)}% · ≥1:{config.riskGates.minRiskReward}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Spread / R:R</span><span className="num">≤{(config.riskGates.maxSpreadPct * 100).toFixed(2)}% · ≥1:{config.riskGates.minRiskReward}</span></div>
               </div>
             </Panel>
           )}

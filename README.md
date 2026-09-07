@@ -6,7 +6,7 @@ Automated crypto futures trading bot with paper trading, live execution (Kraken 
 
 ## Overview
 
-The bot scans its coin universe on a 3-minute cycle, applies the active strategies, and opens positions when a high-confidence setup passes every engine gate. Paper trading runs in parallel with live trading — both use identical signal logic, gates and exit management, so results are directly comparable.
+The bot scans its coin universe at every candle close (+30s, one retry at +3.5 min), applies the active strategies, and opens positions when a setup passes every engine gate, including the per-strategy regime gate and the portfolio drawdown guard. Paper trading runs in parallel with live trading — both use identical signal logic, gates and exit management, so results are directly comparable.
 
 ### Architecture
 
@@ -41,13 +41,15 @@ The full HTTP surface is documented in [API.md](./API.md).
 
 | Strategy | Timeframe | Universe | Role |
 |----------|-----------|----------|------|
-| **Liquidity Sweep** | 1H | 40 coins | Workhorse by trade count (~85% of trades) — honest expectancy ≈ 0 |
-| **RSI Divergence** | 1H | ATOM, INJ | Mean-reversion complement |
-| **Break & Retest** | 4H | 6 coins | Uncorrelated breakout exposure |
+| **Liquidity Sweep** — SHORT only, BTC daily trend UP | 1H | 40 coins | Stop-hunt reversals against BTC strength (`regimeGate`); LONGs and other regimes are never traded |
+| **Trend Breakout 1D** (TSMOM) | 1D | 40 coins | 55-day Donchian close breakout, 2×ATR stop, multi-week holds — the uncorrelated sleeve |
+| ~~RSI Divergence~~ · ~~Break & Retest~~ | — | — | **Retired 2026-09-03**: their edge did not survive the full-universe selection-bias test (see `server/strategies/registry.ts`) |
+
+> **Status 2026-09-03 — PAPER ONLY.** This set was chosen by the phase-9 research (`script/audit/phase9-report-*.md`) under pre-registered acceptance rules and then **downgraded by adversarial review**: the LS SHORT·BTC-up cell was formed on the last 11 months of data and fails the rules on the prior 17 months alone (exp +0.09R, one negative half); TSMOM's standalone result depends on the same-timestamp tie-break (engine order: exp +0.07R, PF 1.12); the two together are a PAPER-CANDIDATE at best (order-robust median exp ≈ +0.24R over 2.3 years, block-bootstrap CI crossing zero out of sample). On the engine's own feed (MEXC futures, last 11 months, engine scan order) the gated LS sleeve is even negative (T=49, exp −0.05R) while TSMOM is +0.09R — the regime pattern is not feed-robust. Both strategies therefore start **paused on live** (`defaultPaused.live`) and active on paper. Live resumes only when the honest paper journal shows ≥ +0.3R over ≥ 120 trades **on data after 2026-09-02**, tested with a block bootstrap.
 
 The scanner universe is the union of every active strategy's preferred symbols (40 coins after the Aug 2026 LUNC drop), built from `server/strategies/registry.ts` — the Markets page shows exactly what the engine trades.
 
-Current official numbers (`script/validate-pipeline.ts`, entry fix + LS floor 68, 8000×1h, $500, 2% risk, fees 0.05%+0.05%/side): **ENGINE T=770 · WR 33% · PF 1.08 · +45R · exp +0.06R** (2026: PF 1.05, exp +0.04R). The history of how the earlier headline (PF 1.99 · +715R · maxDD 31.2%, Jul 2026) was produced — universe expansion 28→41 via `script/expand-universe-ls.ts`, capacity and exit A/Bs — is preserved in `STRATEGIES.md` and `script/audit/`, but every one of those numbers was measured with the stale entry and must not be quoted as evidence of edge. Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`); TON and BONK were excluded for lacking one; LUNC was dropped because Kraken does not list it. Retired: Confluence Swing (Jul 2026), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
+Official numbers (`script/validate-pipeline-report.md`, regenerated 2026-09-07 on the redesigned engine: honest entry, drawdown guard, regime gates, engine scan order as tie-break, Binance spot 20000×1h ≈ 2.3 years + 1d×1500, $500, 2% risk, fees 0.05%+0.05%/side): **ENGINE T=566 · WR 39% · PF 1.15 · +55R · exp +0.10R** (2026: +0.11R); sleeves LS gated T=146 exp +0.07R, TSMOM T=420 exp +0.11R; balance maxDD 51%. On the engine's own feed (`--feed=mexc`, 8000×1h) exp +0.08R with the LS sleeve at −0.05R. **This is a weak, order-sensitive, positive expectancy — not an edge you can trade live**; with +15 bps of adverse entry slippage (`--slip=15`, `script/audit/validate-pipeline-report-binance-slip15.md`) it falls to **PF 1.08 · exp +0.05R**. For reference, the pre-redesign honest system (LS floor 68 both directions + B&R + RSI) was **PF 1.08 · exp +0.06R** over 8000×1h and **PF 0.92 · exp −0.06R** over 2.3 years. The history of the earlier headline (PF 1.99 · +715R · maxDD 31.2%, Jul 2026) — universe expansion 28→41 via `script/expand-universe-ls.ts`, capacity and exit A/Bs — is preserved in `STRATEGIES.md` and `script/audit/`, but every one of those numbers was measured with the stale entry and must not be quoted as evidence of edge. Every universe coin is verified to have a tradeable MEXC futures contract (`script/check-mexc-symbols.ts`); TON and BONK were excluded for lacking one; LUNC was dropped because Kraken does not list it. Retired: Confluence Swing (Jul 2026), SMC and Bollinger MR (May 2026). Rationale lives in `server/strategies/registry.ts`.
 
 > **Change policy**: strategy parameters and coin universes are FROZEN. Any change requires a pre-stated hypothesis, a full-pipeline A/B (`script/validate-pipeline.ts`, ALL + 2026 windows — the harness enters at the signal candle's close since 2026-09-01; a regression test guards it), and 90 days of frozen paper validation **before live**. Recent-window re-optimization destroyed this project's edge once (Jun 2026); a same-day paper+live rollout of an A/B result did it again (Aug 14 2026, LS floor 60). Paper is the testing ground; live follows paper, never the harness directly.
 
@@ -62,17 +64,16 @@ All values below are the **actual engine constants** — they are exported verba
 | Risk per trade | 2% of balance (paper) / 1% default (live), fixed fractional (Kelly retired Jul 2026 — doubled maxDD) |
 | BTC macro multiplier | ×1.25 bull / ×0.75 bear (BTC daily trend) |
 | Max open positions | 10 (fixed; capacity A/B Jul 2026: +55R and *lower* maxDD than 6; 12 tested worse) |
-| Max hold time | 200h (1H strategies) / 240h (4H) → close at market (backtest parity + slot turnover) |
+| Max hold time | 200h (1H) / 240h (4H) / 200 days (1D) → close at market (backtest parity + slot turnover) |
+| Regime gate | Per strategy, direction × BTC daily trend (EMA50 ±1% on closed daily candles): LS trades SHORT only while BTC is UP, never LONG; TSMOM ungated |
+| Scan timing | At every candle close +30s, one retry at +3.5min (no free-running interval) |
 | Max per correlation group | 3 (raised from 2 with the 41-coin universe in Jul 2026 — measured with the stale entry) |
 | Signal freshness | Setup skipped if its candle closed > 10 min ago (restarts / un-halts no longer enter stale setups at market) |
 | Paper fill | MEXC ticker at scan time (not the signal price); trade re-gated on the fill's R:R |
 | Symbol exposure | 1 position per symbol across all strategies |
-| Daily drawdown halt | −4R |
-| Rolling 7-day halt | −6R |
-| Per-strategy kill-switch | 7d netR < −3R over ≥4 trades → strategy pauses, self-heals |
+| Drawdown guard | ONE guard on realized equity in trade-R: peak over the last 30 days, **halt at ≥ 12R below it, resume at ≤ 6R**, a halt never lasts more than 24h (then the peak is re-based). Replaced the daily −4R / rolling-7d −6R / per-strategy kill-switch trio on 2026-09-03 — they co-fired on 58% of blocked entries and kept both engines halted ~10 of 18 days in Aug 2026 |
 | Minimum R:R | 1.5:1 |
 | Minimum SL distance | 0.6% (round-trip costs ≈ 0.14% — fee-dominance guard) |
-| Min 24h volume | $30M USDT |
 | Max spread | 0.20% |
 | Funding filter | No LONGs above +0.1%, no SHORTs below −0.1% |
 

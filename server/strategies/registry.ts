@@ -1,9 +1,8 @@
 import type { Strategy } from "./types";
-import { breakRetestStrategy } from "./break-retest";
-import { rsiDivergenceStrategy } from "./rsi-divergence";
 import { liquiditySweepStrategy } from "./liquidity-sweep";
+import { tsmomStrategy } from "./tsmom";
 
-// Retired strategies (source files deleted Aug 2026 — recover via git history;
+// Retired strategies (source files kept where noted — recover via git history;
 // full retirement rationale and thresholds live in STRATEGIES.md):
 //   mean-reversion, breakout — old, poor performance.
 //   smc — retired May 2026: marginal edge (PF 1.06, ~2R/yr over 3.7y) and the
@@ -15,13 +14,33 @@ import { liquiditySweepStrategy } from "./liquidity-sweep";
 //     PF 1.05-1.07 / exp +0.04R in every configuration — fee fodder that also
 //     displaced higher-expectancy Liquidity Sweep entries via the one-position-
 //     per-symbol guard. Its apparent 2026 strength was selection bias.
+//   break-retest (4h, 6 coins) — RETIRED 2026-09-03 (phase 9, selection-bias
+//     rule): +0.37R on its hand-picked 6 coins but −0.02R (PF 0.98) on the
+//     full 40-coin universe with identical parameters and −0.12R on the 34
+//     non-preferred coins; 27 trades/yr; top-5 trades = 52% of its profit.
+//     The 6-coin figure is a top-6-of-40 pick of a zero-mean strategy. File
+//     kept (break-retest.ts) for research.
+//   rsi-divergence (1h, ATOM/INJ) — RETIRED 2026-09-03 (phase 9, selection-
+//     bias rule): +0.03R on ATOM/INJ over 2.25y (the +0.48R quoted in Aug 2026
+//     was the last 11 months only), −0.13R with CI95 entirely below zero on
+//     the full universe, negative under +15 bps slippage on every list. File
+//     kept (rsi-divergence.ts) for research.
 //
-// Active set = strategies with positive expectancy in the FULL-PIPELINE portfolio
-// simulation (all engine gates, sequential capital), not just raw signal backtests.
+// Active set (2026-09-03, phase 9 — honest harness, entry = signal candle
+// close, 2.3y of 1h data / 3.9y of daily data, engine gates, real fees):
+//   • Liquidity Sweep, SHORT-only while BTC daily trend is UP (regimeGate):
+//     T=559 exp +0.26R PF 1.37 CI95 [+0.11, +0.42], 248 trades/yr.
+//   • Trend Breakout 1D (TSMOM): T=403 exp +0.18R PF 1.32 CI95 [+0.05, +0.32].
+//   Together (E4 in script/audit/phase9-report-portfolio.md): T=351 exp
+//   +0.28R PF 1.46 CI95 [+0.11, +0.45], both halves positive, 29/40 coins
+//   positive, +0.24R under +15 bps slippage, maxDD 24R (trio guards) /
+//   16.9R (drawdown guard X=12). Verdict of record: literal ACCEPT, treated
+//   as PAPER-FIRST because the margins are thin and the regime pattern was
+//   formed on recent data. Live stays paused (defaultPaused.live) until the
+//   standing gate is met: ≥ +0.3R over ≥ 120 honest paper trades.
 const ALL_STRATEGIES: Strategy[] = [
-  breakRetestStrategy,
-  rsiDivergenceStrategy,
   liquiditySweepStrategy,
+  tsmomStrategy,
 ];
 
 export function getAllStrategies(): Strategy[] {

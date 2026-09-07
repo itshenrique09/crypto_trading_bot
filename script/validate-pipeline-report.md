@@ -1,401 +1,386 @@
-# Full-Pipeline Portfolio Validation — 2026-09-01
-Capital $500 · base risk 2% · candles 8000 · gates mirror server/routes.ts paperScan
-Unmodeled: MEXC volume/spread/funding filters, entry drift, engine downtime.
+# Full-Pipeline Portfolio Validation — 2026-09-07
+Capital $500 · base risk 2% · candles 20000 · feed Binance spot · entry slip 0 bps · gates mirror server/routes.ts (drawdown guard 12/6R over 30d, regime gates from the registry)
+Entry = signal candle close (since 2026-09-01). Unmodeled: spread/funding filters, engine downtime; slippage only via --slip.
 
-Total raw candidates (post minSL+R:R): 3729
+Total raw candidates (post minSL+R:R): 10390
 
 ## ENGINE-CURRENT (shipped Jul 2026)
-  ALL:  T= 770 WR= 33% PF= 1.08 sumR=+45.0 exp=+0.06R pnl=$124  → balance $624 maxDD 67.0%
-  2026: T= 561 WR= 33% PF= 1.05 sumR=+19.9 exp=+0.04R pnl=$-69
-  blocks: exposure=963 ddRolling7d=692 killSwitch=640 cooldown=188 ddDaily=146 maxOpen=140 groupCap=101 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$298  → balance $798 maxDD 50.8%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$94
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## CAP maxOpen=8
-  ALL:  T= 710 WR= 33% PF= 1.09 sumR=+49.7 exp=+0.07R pnl=$174  → balance $674 maxDD 73.9%
-  2026: T= 509 WR= 31% PF= 1.01 sumR=+4.5 exp=+0.01R pnl=$-322
-  blocks: exposure=851 killSwitch=738 ddRolling7d=688 maxOpen=215 cooldown=199 ddDaily=150 weeklyTrend=94 groupCap=84
+  ALL:  T= 667 WR= 37% PF= 1.11 sumR=+47.5 exp=+0.07R pnl=$90  → balance $590 maxDD 70.1%
+  2026: T= 152 WR= 38% PF= 1.13 sumR=+12.9 exp=+0.08R pnl=$94
+  blocks: regimeGate=5529 exposure=2015 maxOpen=1858 cooldown=152 groupCap=107 ddGuard=62
 
 ## CAP maxOpen=10
-  ALL:  T= 781 WR= 34% PF= 1.13 sumR=+74.5 exp=+0.10R pnl=$537  → balance $1037 maxDD 70.5%
-  2026: T= 574 WR= 33% PF= 1.07 sumR=+30.1 exp=+0.05R pnl=$74
-  blocks: exposure=975 ddRolling7d=673 killSwitch=620 cooldown=188 ddDaily=145 maxOpen=132 groupCap=123 weeklyTrend=92
+  ALL:  T= 789 WR= 38% PF= 1.20 sumR=+101.2 exp=+0.13R pnl=$1036  → balance $1536 maxDD 70.9%
+  2026: T= 174 WR= 40% PF= 1.31 sumR=+34.4 exp=+0.20R pnl=$688
+  blocks: regimeGate=5293 exposure=2447 maxOpen=1406 groupCap=192 cooldown=191 ddGuard=72
 
 ## CAP perSymbol=2
-  ALL:  T= 797 WR= 34% PF= 1.14 sumR=+81.4 exp=+0.10R pnl=$751  → balance $1251 maxDD 72.8%
-  2026: T= 588 WR= 33% PF= 1.09 sumR=+39.4 exp=+0.07R pnl=$323
-  blocks: exposure=909 killSwitch=661 ddRolling7d=623 cooldown=215 maxOpen=155 ddDaily=140 groupCap=135 weeklyTrend=94
+  ALL:  T= 799 WR= 38% PF= 1.21 sumR=+110.0 exp=+0.14R pnl=$1252  → balance $1752 maxDD 68.0%
+  2026: T= 175 WR= 39% PF= 1.31 sumR=+34.6 exp=+0.20R pnl=$790
+  blocks: regimeGate=6519 maxOpen=1591 exposure=976 groupCap=219 cooldown=194 ddGuard=92
 
 ## CAP maxOpen=8 + perSymbol=2
-  ALL:  T= 711 WR= 32% PF= 1.03 sumR=+18.7 exp=+0.03R pnl=$-63  → balance $437 maxDD 82.5%
-  2026: T= 508 WR= 30% PF= 0.94 sumR=-24.1 exp=-0.05R pnl=$-523
-  blocks: exposure=791 killSwitch=732 ddRolling7d=725 maxOpen=214 cooldown=207 ddDaily=169 weeklyTrend=94 groupCap=86
+  ALL:  T= 672 WR= 37% PF= 1.14 sumR=+62.5 exp=+0.09R pnl=$339  → balance $839 maxDD 67.5%
+  2026: T= 145 WR= 39% PF= 1.20 sumR=+18.4 exp=+0.13R pnl=$231
+  blocks: regimeGate=6519 maxOpen=2005 exposure=792 cooldown=158 groupCap=129 ddGuard=115
 
 ## CAP LS cooldown 8h
-  ALL:  T= 751 WR= 33% PF= 1.10 sumR=+55.2 exp=+0.07R pnl=$173  → balance $673 maxDD 67.4%
-  2026: T= 542 WR= 33% PF= 1.03 sumR=+12.9 exp=+0.02R pnl=$-259
-  blocks: exposure=941 killSwitch=719 ddRolling7d=691 ddDaily=170 cooldown=149 groupCap=112 maxOpen=104 weeklyTrend=92
+  ALL:  T= 790 WR= 38% PF= 1.20 sumR=+100.9 exp=+0.13R pnl=$1019  → balance $1519 maxDD 71.3%
+  2026: T= 174 WR= 40% PF= 1.31 sumR=+34.4 exp=+0.20R pnl=$680
+  blocks: regimeGate=5294 exposure=2446 maxOpen=1411 groupCap=192 cooldown=184 ddGuard=73
 
 ## CAP LS cooldown 6h
-  ALL:  T= 730 WR= 32% PF= 1.07 sumR=+38.0 exp=+0.05R pnl=$-10  → balance $490 maxDD 67.4%
-  2026: T= 520 WR= 31% PF= 0.99 sumR=-3.2 exp=-0.01R pnl=$-427
-  blocks: exposure=895 ddRolling7d=738 killSwitch=716 ddDaily=187 cooldown=155 groupCap=118 maxOpen=96 weeklyTrend=94
+  ALL:  T= 791 WR= 38% PF= 1.20 sumR=+103.8 exp=+0.13R pnl=$1122  → balance $1622 maxDD 69.3%
+  2026: T= 174 WR= 40% PF= 1.31 sumR=+34.4 exp=+0.20R pnl=$726
+  blocks: regimeGate=5294 exposure=2446 maxOpen=1412 groupCap=192 cooldown=182 ddGuard=73
 
 ## CAP combo (mo8+ps2+LScd8)
-  ALL:  T= 712 WR= 32% PF= 1.09 sumR=+48.2 exp=+0.07R pnl=$157  → balance $657 maxDD 72.6%
-  2026: T= 508 WR= 31% PF= 1.02 sumR=+6.3 exp=+0.01R pnl=$-288
-  blocks: exposure=801 killSwitch=748 ddRolling7d=698 maxOpen=253 cooldown=174 ddDaily=168 weeklyTrend=94 groupCap=81
+  ALL:  T= 675 WR= 37% PF= 1.13 sumR=+59.9 exp=+0.09R pnl=$291  → balance $791 maxDD 69.6%
+  2026: T= 145 WR= 39% PF= 1.20 sumR=+18.4 exp=+0.13R pnl=$218
+  blocks: regimeGate=6525 maxOpen=2009 exposure=794 cooldown=149 groupCap=129 ddGuard=109
 
 ## CAP maxOpen=10 + perSymbol=2
-  ALL:  T= 797 WR= 34% PF= 1.14 sumR=+81.4 exp=+0.10R pnl=$751  → balance $1251 maxDD 72.8%
-  2026: T= 588 WR= 33% PF= 1.09 sumR=+39.4 exp=+0.07R pnl=$323
-  blocks: exposure=909 killSwitch=661 ddRolling7d=623 cooldown=215 maxOpen=155 ddDaily=140 groupCap=135 weeklyTrend=94
+  ALL:  T= 799 WR= 38% PF= 1.21 sumR=+110.0 exp=+0.14R pnl=$1252  → balance $1752 maxDD 68.0%
+  2026: T= 175 WR= 39% PF= 1.31 sumR=+34.6 exp=+0.20R pnl=$790
+  blocks: regimeGate=6519 maxOpen=1591 exposure=976 groupCap=219 cooldown=194 ddGuard=92
 
 ## CAP maxOpen=12
-  ALL:  T= 794 WR= 34% PF= 1.13 sumR=+73.1 exp=+0.09R pnl=$446  → balance $946 maxDD 68.0%
-  2026: T= 585 WR= 33% PF= 1.06 sumR=+26.9 exp=+0.05R pnl=$-28
-  blocks: exposure=988 ddRolling7d=744 killSwitch=572 cooldown=184 groupCap=159 ddDaily=132 weeklyTrend=92 maxOpen=64
+  ALL:  T= 886 WR= 37% PF= 1.13 sumR=+77.3 exp=+0.09R pnl=$95  → balance $595 maxDD 78.4%
+  2026: T= 223 WR= 37% PF= 1.10 sumR=+15.1 exp=+0.07R pnl=$-66
+  blocks: regimeGate=5093 exposure=2761 maxOpen=1001 groupCap=325 cooldown=221 ddGuard=103
 
 ## CAP groupCap=2 (pre-expansion default)
-  ALL:  T= 707 WR= 34% PF= 1.12 sumR=+63.0 exp=+0.09R pnl=$475  → balance $975 maxDD 64.0%
-  2026: T= 498 WR= 33% PF= 1.05 sumR=+17.9 exp=+0.04R pnl=$-7
-  blocks: exposure=882 killSwitch=783 ddRolling7d=625 groupCap=345 cooldown=179 ddDaily=98 weeklyTrend=85 maxOpen=25
+  ALL:  T= 793 WR= 36% PF= 1.12 sumR=+63.3 exp=+0.08R pnl=$96  → balance $596 maxDD 83.8%
+  2026: T= 181 WR= 40% PF= 1.29 sumR=+33.1 exp=+0.18R pnl=$223
+  blocks: regimeGate=5368 exposure=2317 maxOpen=1104 groupCap=547 cooldown=192 ddGuard=69
 
 ## CAP groupCap=3 + maxOpen=12
-  ALL:  T= 794 WR= 34% PF= 1.13 sumR=+73.1 exp=+0.09R pnl=$446  → balance $946 maxDD 68.0%
-  2026: T= 585 WR= 33% PF= 1.06 sumR=+26.9 exp=+0.05R pnl=$-28
-  blocks: exposure=988 ddRolling7d=744 killSwitch=572 cooldown=184 groupCap=159 ddDaily=132 weeklyTrend=92 maxOpen=64
+  ALL:  T= 886 WR= 37% PF= 1.13 sumR=+77.3 exp=+0.09R pnl=$95  → balance $595 maxDD 78.4%
+  2026: T= 223 WR= 37% PF= 1.10 sumR=+15.1 exp=+0.07R pnl=$-66
+  blocks: regimeGate=5093 exposure=2761 maxOpen=1001 groupCap=325 cooldown=221 ddGuard=103
 
 ## EXIT tp1Close=100% (all out at TP1)
-  ALL:  T= 778 WR= 34% PF= 1.15 sumR=+83.0 exp=+0.11R pnl=$630  → balance $1130 maxDD 70.2%
-  2026: T= 547 WR= 33% PF= 1.08 sumR=+33.5 exp=+0.06R pnl=$97
-  blocks: exposure=950 killSwitch=687 ddRolling7d=625 cooldown=196 groupCap=139 maxOpen=133 ddDaily=130 weeklyTrend=91
+  ALL:  T= 841 WR= 37% PF= 1.07 sumR=+36.2 exp=+0.04R pnl=$-134  → balance $366 maxDD 69.1%
+  2026: T= 197 WR= 37% PF= 1.06 sumR=+8.0 exp=+0.04R pnl=$-32
+  blocks: regimeGate=5191 exposure=2395 maxOpen=1313 cooldown=352 groupCap=224 ddGuard=74
 
 ## EXIT tp1Close=50%
-  ALL:  T= 787 WR= 34% PF= 1.13 sumR=+77.0 exp=+0.10R pnl=$560  → balance $1060 maxDD 71.3%
-  2026: T= 580 WR= 33% PF= 1.07 sumR=+32.0 exp=+0.06R pnl=$91
-  blocks: exposure=979 ddRolling7d=681 killSwitch=600 cooldown=188 ddDaily=145 maxOpen=135 groupCap=122 weeklyTrend=92
+  ALL:  T= 789 WR= 38% PF= 1.21 sumR=+110.3 exp=+0.14R pnl=$1254  → balance $1754 maxDD 71.3%
+  2026: T= 174 WR= 40% PF= 1.32 sumR=+35.4 exp=+0.20R pnl=$801
+  blocks: regimeGate=5293 exposure=2447 maxOpen=1406 groupCap=192 cooldown=191 ddGuard=72
 
 ## EXIT tp1Close=75%
-  ALL:  T= 779 WR= 34% PF= 1.15 sumR=+83.9 exp=+0.11R pnl=$867  → balance $1367 maxDD 69.8%
-  2026: T= 572 WR= 33% PF= 1.10 sumR=+40.6 exp=+0.07R pnl=$412
-  blocks: exposure=962 killSwitch=728 ddRolling7d=556 cooldown=195 maxOpen=146 ddDaily=136 groupCap=133 weeklyTrend=94
+  ALL:  T= 788 WR= 38% PF= 1.17 sumR=+85.1 exp=+0.11R pnl=$697  → balance $1197 maxDD 70.3%
+  2026: T= 174 WR= 40% PF= 1.30 sumR=+32.9 exp=+0.19R pnl=$518
+  blocks: regimeGate=5291 exposure=2447 maxOpen=1406 cooldown=191 groupCap=191 ddGuard=76
 
 ## EXIT trail 1.5%
-  ALL:  T= 808 WR= 35% PF= 1.18 sumR=+102.2 exp=+0.13R pnl=$1220  → balance $1720 maxDD 69.9%
-  2026: T= 602 WR= 35% PF= 1.14 sumR=+61.5 exp=+0.10R pnl=$809
-  blocks: exposure=996 ddRolling7d=656 killSwitch=532 cooldown=209 maxOpen=147 ddDaily=145 groupCap=144 weeklyTrend=92
+  ALL:  T= 794 WR= 38% PF= 1.18 sumR=+95.6 exp=+0.12R pnl=$884  → balance $1384 maxDD 71.2%
+  2026: T= 174 WR= 40% PF= 1.32 sumR=+35.3 exp=+0.20R pnl=$635
+  blocks: regimeGate=5293 exposure=2437 maxOpen=1409 cooldown=200 groupCap=185 ddGuard=72
 
 ## EXIT trail 3%
-  ALL:  T= 761 WR= 34% PF= 1.13 sumR=+69.5 exp=+0.09R pnl=$511  → balance $1011 maxDD 67.2%
-  2026: T= 557 WR= 33% PF= 1.07 sumR=+27.9 exp=+0.05R pnl=$95
-  blocks: exposure=940 ddRolling7d=699 killSwitch=644 cooldown=201 ddDaily=150 maxOpen=132 groupCap=110 weeklyTrend=92
+  ALL:  T= 789 WR= 37% PF= 1.16 sumR=+80.5 exp=+0.10R pnl=$516  → balance $1016 maxDD 79.3%
+  2026: T= 172 WR= 39% PF= 1.26 sumR=+28.6 exp=+0.17R pnl=$402
+  blocks: regimeGate=5279 exposure=2463 maxOpen=1423 groupCap=184 cooldown=181 ddGuard=71
 
 ## EXIT trail r_multiple 2R
-  ALL:  T= 770 WR= 33% PF= 1.08 sumR=+45.0 exp=+0.06R pnl=$124  → balance $624 maxDD 67.0%
-  2026: T= 561 WR= 33% PF= 1.05 sumR=+19.9 exp=+0.04R pnl=$-69
-  blocks: exposure=963 ddRolling7d=692 killSwitch=640 cooldown=188 ddDaily=146 maxOpen=140 groupCap=101 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$298  → balance $798 maxDD 50.8%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$94
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## TILT LONG:up 0.75x
-  ALL:  T= 782 WR= 33% PF= 1.08 sumR=+45.8 exp=+0.06R pnl=$317  → balance $817 maxDD 58.4%
-  2026: T= 572 WR= 33% PF= 1.05 sumR=+21.8 exp=+0.04R pnl=$148
-  blocks: exposure=968 killSwitch=673 ddRolling7d=673 cooldown=188 maxOpen=141 ddDaily=116 groupCap=99 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$276  → balance $776 maxDD 49.6%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$64
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## TILT LONG:up 0.5x
-  ALL:  T= 778 WR= 33% PF= 1.07 sumR=+41.1 exp=+0.05R pnl=$378  → balance $878 maxDD 55.7%
-  2026: T= 568 WR= 33% PF= 1.04 sumR=+17.2 exp=+0.03R pnl=$219
-  blocks: exposure=964 killSwitch=807 ddRolling7d=557 cooldown=185 maxOpen=138 ddDaily=114 groupCap=97 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$251  → balance $751 maxDD 48.5%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$33
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## TILT LONG:up blocked
-  ALL:  T= 783 WR= 35% PF= 1.20 sumR=+114.8 exp=+0.15R pnl=$1244  → balance $1744 maxDD 71.8%
-  2026: T= 553 WR= 35% PF= 1.18 sumR=+71.9 exp=+0.13R pnl=$864
-  blocks: exposure=953 ddRolling7d=736 killSwitch=437 cooldown=202 sizeTilt=144 maxOpen=135 groupCap=127 ddDaily=120 weeklyTrend=92
+  ALL:  T= 599 WR= 38% PF= 1.14 sumR=+56.1 exp=+0.09R pnl=$276  → balance $776 maxDD 71.7%
+  2026: T= 106 WR= 42% PF= 1.43 sumR=+26.9 exp=+0.25R pnl=$284
+  blocks: regimeGate=5096 exposure=2505 maxOpen=1598 groupCap=170 sizeTilt=164 cooldown=136 ddGuard=122
 
 ## TILT LONG:up 0.5x + SHORT:up 1.25x
-  ALL:  T= 782 WR= 33% PF= 1.08 sumR=+48.1 exp=+0.06R pnl=$839  → balance $1339 maxDD 58.8%
-  2026: T= 572 WR= 33% PF= 1.06 sumR=+24.2 exp=+0.04R pnl=$663
-  blocks: exposure=968 ddRolling7d=668 killSwitch=648 cooldown=185 ddDaily=149 maxOpen=141 groupCap=99 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$203  → balance $703 maxDD 56.5%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$-0
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## SAMEDIR max 4
-  ALL:  T= 605 WR= 31% PF= 1.00 sumR=-1.1 exp=-0.00R pnl=$-179  → balance $321 maxDD 76.3%
-  2026: T= 399 WR= 29% PF= 0.85 sumR=-47.0 exp=-0.12R pnl=$-720
-  blocks: killSwitch=958 exposure=752 ddRolling7d=530 sameDir=492 cooldown=173 weeklyTrend=85 ddDaily=84 groupCap=50
+  ALL:  T= 367 WR= 41% PF= 1.27 sumR=+60.6 exp=+0.17R pnl=$894  → balance $1394 maxDD 41.1%
+  2026: T=  75 WR= 47% PF= 1.57 sumR=+22.8 exp=+0.30R pnl=$568
+  blocks: regimeGate=5768 sameDir=2356 exposure=1522 groupCap=260 cooldown=97 ddGuard=20
 
 ## SAMEDIR max 5
-  ALL:  T= 667 WR= 33% PF= 1.09 sumR=+43.1 exp=+0.06R pnl=$317  → balance $817 maxDD 67.6%
-  2026: T= 477 WR= 33% PF= 1.02 sumR=+6.8 exp=+0.01R pnl=$-65
-  blocks: killSwitch=933 exposure=825 ddRolling7d=496 sameDir=347 cooldown=173 ddDaily=104 weeklyTrend=93 groupCap=65 maxOpen=26
+  ALL:  T= 435 WR= 40% PF= 1.24 sumR=+63.4 exp=+0.15R pnl=$801  → balance $1301 maxDD 46.5%
+  2026: T=  92 WR= 43% PF= 1.39 sumR=+20.6 exp=+0.22R pnl=$467
+  blocks: regimeGate=5594 sameDir=1829 exposure=1824 groupCap=360 maxOpen=186 cooldown=125 ddGuard=37
 
 ## SAMEDIR max 6
-  ALL:  T= 706 WR= 32% PF= 1.04 sumR=+20.2 exp=+0.03R pnl=$13  → balance $513 maxDD 65.6%
-  2026: T= 518 WR= 32% PF= 1.01 sumR=+3.1 exp=+0.01R pnl=$-141
-  blocks: exposure=886 killSwitch=810 ddRolling7d=617 sameDir=215 cooldown=188 ddDaily=97 groupCap=93 weeklyTrend=89 maxOpen=28
+  ALL:  T= 468 WR= 40% PF= 1.23 sumR=+65.5 exp=+0.14R pnl=$883  → balance $1383 maxDD 51.0%
+  2026: T= 108 WR= 44% PF= 1.46 sumR=+28.8 exp=+0.27R pnl=$621
+  blocks: regimeGate=5483 exposure=2008 sameDir=1520 groupCap=405 maxOpen=355 cooldown=129 ddGuard=22
 
 ## SAMEDIR max 7
-  ALL:  T= 702 WR= 33% PF= 1.06 sumR=+29.1 exp=+0.04R pnl=$46  → balance $546 maxDD 70.0%
-  2026: T= 518 WR= 33% PF= 1.02 sumR=+8.6 exp=+0.02R pnl=$-130
-  blocks: exposure=881 killSwitch=830 ddRolling7d=649 cooldown=179 sameDir=130 ddDaily=115 groupCap=115 weeklyTrend=89 maxOpen=39
+  ALL:  T= 487 WR= 41% PF= 1.25 sumR=+73.9 exp=+0.15R pnl=$870  → balance $1370 maxDD 45.8%
+  2026: T= 121 WR= 40% PF= 1.15 sumR=+11.4 exp=+0.09R pnl=$180
+  blocks: regimeGate=5319 exposure=2233 sameDir=1191 maxOpen=509 groupCap=487 cooldown=124 ddGuard=40
 
 ## VENUE Kraken (−LUNC)
-  ALL:  T= 770 WR= 33% PF= 1.08 sumR=+45.0 exp=+0.06R pnl=$124  → balance $624 maxDD 67.0%
-  2026: T= 561 WR= 33% PF= 1.05 sumR=+19.9 exp=+0.04R pnl=$-69
-  blocks: exposure=963 ddRolling7d=692 killSwitch=640 cooldown=188 ddDaily=146 maxOpen=140 groupCap=101 weeklyTrend=89
+  ALL:  T= 566 WR= 39% PF= 1.15 sumR=+54.8 exp=+0.10R pnl=$298  → balance $798 maxDD 50.8%
+  2026: T= 120 WR= 41% PF= 1.18 sumR=+13.7 exp=+0.11R pnl=$94
+  blocks: regimeGate=5058 exposure=2613 maxOpen=1833 cooldown=138 groupCap=136 ddGuard=46
 
 ## VENUE OKX (−LUNC,FET,RUNE,VET)
-  ALL:  T= 690 WR= 33% PF= 1.09 sumR=+46.6 exp=+0.07R pnl=$262  → balance $762 maxDD 59.8%
-  2026: T= 477 WR= 33% PF= 1.04 sumR=+14.2 exp=+0.03R pnl=$-47
-  blocks: exposure=872 ddRolling7d=773 killSwitch=539 cooldown=186 groupCap=130 maxOpen=130 ddDaily=104 weeklyTrend=92
+  ALL:  T= 574 WR= 39% PF= 1.16 sumR=+59.6 exp=+0.10R pnl=$386  → balance $886 maxDD 50.0%
+  2026: T= 129 WR= 40% PF= 1.21 sumR=+17.4 exp=+0.14R pnl=$171
+  blocks: regimeGate=4601 exposure=2589 maxOpen=1538 groupCap=140 cooldown=133 ddGuard=31
 
 ## TRIAGE minus rsi-divergence
-  ALL:  T= 674 WR= 30% PF= 0.92 sumR=-40.0 exp=-0.06R pnl=$-354  → balance $146 maxDD 89.6%
-  2026: T= 477 WR= 29% PF= 0.85 sumR=-55.4 exp=-0.12R pnl=$-441
-  blocks: killSwitch=749 exposure=741 ddRolling7d=712 ddDaily=145 cooldown=119 maxOpen=111 weeklyTrend=89 groupCap=70
+  ALL:  T= 560 WR= 31% PF= 0.96 sumR=-15.8 exp=-0.03R pnl=$-424  → balance $76 maxDD 95.2%
+  2026: T= 257 WR= 36% PF= 1.17 sumR=+30.4 exp=+0.12R pnl=$9
+  blocks: regimeGate=6341 exposure=528 ddGuard=256 cooldown=109 maxOpen=67 groupCap=46
 
 ## BASELINE (all gates)
-  ALL:  T= 331 WR= 35% PF= 1.27 sumR=+64.3 exp=+0.19R pnl=$1038  → balance $1538 maxDD 54.0%
-  2026: T= 192 WR= 33% PF= 1.05 sumR=+7.2 exp=+0.04R pnl=$-56
-  blocks: maxOpen=892 exposure=419 atrPct=411 ddMonthly=362 ddRolling7d=335 killSwitch=328 dirOverlay=204 shortConf=173 cooldown=98 weeklyTrend=75 ddDaily=60 dailyTrend=36 groupCap=5
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$131  → balance $631 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-317
+  blocks: regimeGate=6052 atrPct=1080 shortConf=946 ddMonthly=525 maxOpen=520 exposure=396 dirOverlay=360 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 dailyTrend=11 groupCap=4
 
 ## minus dirOverlay
-  ALL:  T= 364 WR= 36% PF= 1.29 sumR=+73.8 exp=+0.20R pnl=$1161  → balance $1661 maxDD 55.4%
-  2026: T= 219 WR= 35% PF= 1.12 sumR=+19.4 exp=+0.09R pnl=$88
-  blocks: maxOpen=861 exposure=441 killSwitch=428 ddRolling7d=397 atrPct=387 ddMonthly=382 shortConf=142 cooldown=112 dailyTrend=95 weeklyTrend=82 ddDaily=33 groupCap=5
+  ALL:  T= 223 WR= 33% PF= 0.96 sumR=-6.8 exp=-0.03R pnl=$-56  → balance $444 maxDD 50.7%
+  2026: T=  53 WR= 30% PF= 0.96 sumR=-1.8 exp=-0.03R pnl=$-271
+  blocks: regimeGate=5826 atrPct=956 shortConf=934 ddMonthly=736 maxOpen=552 exposure=445 ddRolling7d=339 killSwitch=218 ddDaily=69 cooldown=63 dailyTrend=16 ddGuard=9 groupCap=4
 
 ## minus dailyTrend
-  ALL:  T= 337 WR= 36% PF= 1.32 sumR=+77.4 exp=+0.23R pnl=$1128  → balance $1628 maxDD 64.0%
-  2026: T= 192 WR= 35% PF= 1.17 sumR=+24.0 exp=+0.13R pnl=$-81
-  blocks: maxOpen=945 ddMonthly=612 exposure=451 atrPct=411 killSwitch=196 dirOverlay=194 ddRolling7d=187 shortConf=186 cooldown=101 weeklyTrend=73 ddDaily=35 groupCap=1
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$131  → balance $631 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-317
+  blocks: regimeGate=6052 atrPct=1080 shortConf=957 ddMonthly=525 maxOpen=520 exposure=396 dirOverlay=360 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 groupCap=4
 
 ## minus weeklyTrend
-  ALL:  T= 367 WR= 38% PF= 1.39 sumR=+98.7 exp=+0.27R pnl=$3651  → balance $4151 maxDD 54.2%
-  2026: T= 200 WR= 34% PF= 1.10 sumR=+14.7 exp=+0.07R pnl=$110
-  blocks: maxOpen=855 exposure=472 atrPct=420 ddRolling7d=363 ddMonthly=339 killSwitch=299 dirOverlay=210 shortConf=186 cooldown=110 ddDaily=62 dailyTrend=41 groupCap=5
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$131  → balance $631 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-317
+  blocks: regimeGate=6052 atrPct=1080 shortConf=946 ddMonthly=525 maxOpen=520 exposure=396 dirOverlay=360 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 dailyTrend=11 groupCap=4
 
 ## minus shortConf
-  ALL:  T= 377 WR= 33% PF= 1.18 sumR=+50.6 exp=+0.13R pnl=$920  → balance $1420 maxDD 41.3%
-  2026: T= 236 WR= 32% PF= 1.04 sumR=+7.8 exp=+0.03R pnl=$-241
-  blocks: maxOpen=988 killSwitch=748 exposure=459 atrPct=394 dirOverlay=210 ddMonthly=157 ddRolling7d=136 cooldown=133 weeklyTrend=75 dailyTrend=37 ddDaily=10 groupCap=5
+  ALL:  T= 211 WR= 39% PF= 1.21 sumR=+28.1 exp=+0.13R pnl=$24  → balance $524 maxDD 17.4%
+  2026: T=  43 WR= 37% PF= 1.22 sumR=+5.9 exp=+0.14R pnl=$-13
+  blocks: regimeGate=6140 maxOpen=1666 atrPct=918 exposure=913 dirOverlay=366 killSwitch=66 cooldown=50 groupCap=37 ddRolling7d=14 dailyTrend=9
 
 ## minus atrPct
-  ALL:  T= 371 WR= 35% PF= 1.24 sumR=+64.4 exp=+0.17R pnl=$832  → balance $1332 maxDD 62.1%
-  2026: T= 222 WR= 32% PF= 1.01 sumR=+1.0 exp=+0.00R pnl=$-438
-  blocks: maxOpen=1086 ddRolling7d=576 exposure=460 ddMonthly=277 dirOverlay=242 killSwitch=206 shortConf=185 cooldown=119 weeklyTrend=83 ddDaily=65 dailyTrend=55 groupCap=4
+  ALL:  T= 308 WR= 39% PF= 1.19 sumR=+37.0 exp=+0.12R pnl=$-58  → balance $442 maxDD 66.3%
+  2026: T=  64 WR= 34% PF= 0.98 sumR=-0.9 exp=-0.01R pnl=$-277
+  blocks: regimeGate=5347 ddMonthly=1150 maxOpen=976 shortConf=902 exposure=679 dirOverlay=387 ddRolling7d=386 ddDaily=99 cooldown=93 killSwitch=56 dailyTrend=7
 
 ## minus btcCap
-  ALL:  T= 388 WR= 39% PF= 1.48 sumR=+125.7 exp=+0.32R pnl=$5502  → balance $6002 maxDD 58.3%
-  2026: T= 236 WR= 39% PF= 1.40 sumR=+64.5 exp=+0.27R pnl=$4197
-  blocks: ddMonthly=810 ddRolling7d=562 exposure=507 atrPct=496 shortConf=237 dirOverlay=201 ddDaily=131 cooldown=122 killSwitch=93 weeklyTrend=75 dailyTrend=62 groupCap=45
+  ALL:  T= 205 WR= 40% PF= 1.33 sumR=+42.6 exp=+0.21R pnl=$238  → balance $738 maxDD 61.4%
+  2026: T=  57 WR= 32% PF= 1.08 sumR=+3.5 exp=+0.06R pnl=$-361
+  blocks: regimeGate=5910 atrPct=1122 shortConf=965 ddMonthly=642 exposure=476 dirOverlay=402 ddRolling7d=338 ddDaily=88 maxOpen=81 cooldown=62 killSwitch=60 groupCap=30 dailyTrend=9
 
 ## minus groupCap
-  ALL:  T= 326 WR= 36% PF= 1.30 sumR=+69.6 exp=+0.21R pnl=$1112  → balance $1612 maxDD 52.3%
-  2026: T= 187 WR= 34% PF= 1.09 sumR=+12.5 exp=+0.07R pnl=$18
-  blocks: maxOpen=844 ddMonthly=473 exposure=424 atrPct=396 ddRolling7d=358 killSwitch=254 dirOverlay=206 shortConf=174 cooldown=101 weeklyTrend=75 ddDaily=61 dailyTrend=37
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$130  → balance $630 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-316
+  blocks: regimeGate=6052 atrPct=1081 shortConf=946 ddMonthly=525 maxOpen=521 exposure=396 dirOverlay=362 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 dailyTrend=11
 
 ## minus killSwitch
-  ALL:  T= 342 WR= 36% PF= 1.32 sumR=+79.1 exp=+0.23R pnl=$1700  → balance $2200 maxDD 66.2%
-  2026: T= 192 WR= 33% PF= 1.11 sumR=+15.8 exp=+0.08R pnl=$311
-  blocks: maxOpen=903 ddMonthly=563 atrPct=436 exposure=424 ddRolling7d=391 dirOverlay=195 shortConf=180 cooldown=105 weeklyTrend=73 ddDaily=67 dailyTrend=49 groupCap=1
+  ALL:  T= 164 WR= 39% PF= 1.24 sumR=+24.7 exp=+0.15R pnl=$128  → balance $628 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-316
+  blocks: regimeGate=6047 atrPct=1080 shortConf=947 maxOpen=557 ddMonthly=525 exposure=404 dirOverlay=361 ddRolling7d=163 ddDaily=69 cooldown=58 dailyTrend=11 groupCap=4
 
 ## minus ddDaily
-  ALL:  T= 319 WR= 34% PF= 1.25 sumR=+57.5 exp=+0.18R pnl=$896  → balance $1396 maxDD 63.4%
-  2026: T= 180 WR= 31% PF= 1.00 sumR=+0.4 exp=+0.00R pnl=$-198
-  blocks: maxOpen=952 ddMonthly=538 atrPct=420 exposure=412 ddRolling7d=270 killSwitch=244 dirOverlay=201 shortConf=173 cooldown=93 weeklyTrend=73 dailyTrend=33 groupCap=1
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$131  → balance $631 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-317
+  blocks: regimeGate=6057 atrPct=1112 shortConf=966 ddMonthly=535 maxOpen=520 exposure=396 dirOverlay=362 ddRolling7d=163 cooldown=54 killSwitch=50 dailyTrend=11 groupCap=4
 
 ## minus ddMonthly
-  ALL:  T= 362 WR= 33% PF= 1.15 sumR=+42.0 exp=+0.12R pnl=$873  → balance $1373 maxDD 65.1%
-  2026: T= 223 WR= 30% PF= 0.92 sumR=-15.1 exp=-0.07R pnl=$-221
-  blocks: maxOpen=930 killSwitch=453 exposure=441 ddRolling7d=426 atrPct=416 dirOverlay=224 shortConf=188 cooldown=121 weeklyTrend=73 ddDaily=57 dailyTrend=38
+  ALL:  T= 170 WR= 39% PF= 1.21 sumR=+23.4 exp=+0.14R pnl=$152  → balance $652 maxDD 48.0%
+  2026: T=  53 WR= 28% PF= 0.87 sumR=-5.2 exp=-0.10R pnl=$-353
+  blocks: regimeGate=6321 atrPct=1104 shortConf=948 maxOpen=522 exposure=426 dirOverlay=364 ddRolling7d=284 killSwitch=104 ddDaily=69 cooldown=57 dailyTrend=17 groupCap=4
 
 ## minus ddRolling
-  ALL:  T= 322 WR= 34% PF= 1.23 sumR=+55.0 exp=+0.17R pnl=$904  → balance $1404 maxDD 62.3%
-  2026: T= 178 WR= 31% PF= 0.98 sumR=-3.2 exp=-0.02R pnl=$-207
-  blocks: maxOpen=942 ddMonthly=565 killSwitch=450 exposure=420 atrPct=394 dirOverlay=198 shortConf=176 cooldown=95 weeklyTrend=75 ddDaily=56 dailyTrend=35 groupCap=1
+  ALL:  T= 169 WR= 40% PF= 1.32 sumR=+34.0 exp=+0.20R pnl=$373  → balance $873 maxDD 41.3%
+  2026: T=  55 WR= 35% PF= 1.20 sumR=+8.0 exp=+0.15R pnl=$-36
+  blocks: regimeGate=5921 atrPct=1098 shortConf=923 ddMonthly=765 maxOpen=531 exposure=401 dirOverlay=375 ddDaily=70 killSwitch=68 cooldown=54 dailyTrend=11 groupCap=4
 
 ## minus kelly
-  ALL:  T= 333 WR= 34% PF= 1.22 sumR=+55.1 exp=+0.17R pnl=$577  → balance $1077 maxDD 53.2%
-  2026: T= 191 WR= 31% PF= 0.99 sumR=-1.9 exp=-0.01R pnl=$-199
-  blocks: maxOpen=946 atrPct=446 exposure=435 killSwitch=413 ddMonthly=308 dirOverlay=221 ddRolling7d=208 shortConf=184 cooldown=104 weeklyTrend=75 dailyTrend=37 ddDaily=18 groupCap=1
+  ALL:  T= 176 WR= 39% PF= 1.25 sumR=+28.3 exp=+0.16R pnl=$316  → balance $816 maxDD 21.0%
+  2026: T=  58 WR= 31% PF= 1.02 sumR=+0.7 exp=+0.01R pnl=$-29
+  blocks: regimeGate=6422 atrPct=1168 shortConf=991 maxOpen=531 exposure=427 dirOverlay=426 killSwitch=118 cooldown=56 ddRolling7d=56 dailyTrend=13 groupCap=4 ddDaily=2
 
 ## minus riskMult
-  ALL:  T= 322 WR= 35% PF= 1.29 sumR=+67.2 exp=+0.21R pnl=$1574  → balance $2074 maxDD 58.6%
-  2026: T= 186 WR= 33% PF= 1.10 sumR=+13.5 exp=+0.07R pnl=$619
-  blocks: maxOpen=870 exposure=427 ddRolling7d=417 ddMonthly=411 atrPct=389 killSwitch=248 dirOverlay=199 shortConf=172 cooldown=99 weeklyTrend=75 ddDaily=58 dailyTrend=41 groupCap=1
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$129  → balance $629 maxDD 41.3%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-268
+  blocks: regimeGate=6052 atrPct=1080 shortConf=946 ddMonthly=525 maxOpen=520 exposure=396 dirOverlay=360 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 dailyTrend=11 groupCap=4
+
+## minus ddGuard
+  ALL:  T= 160 WR= 39% PF= 1.25 sumR=+25.2 exp=+0.16R pnl=$131  → balance $631 maxDD 44.6%
+  2026: T=  47 WR= 30% PF= 0.95 sumR=-1.8 exp=-0.04R pnl=$-317
+  blocks: regimeGate=6052 atrPct=1080 shortConf=946 ddMonthly=525 maxOpen=520 exposure=396 dirOverlay=360 ddRolling7d=163 ddDaily=69 cooldown=54 killSwitch=50 dailyTrend=11 groupCap=4
+
+## minus regimeGate
+  ALL:  T= 740 WR= 30% PF= 0.94 sumR=-36.1 exp=-0.05R pnl=$-38  → balance $462 maxDD 53.0%
+  2026: T= 185 WR= 28% PF= 0.84 sumR=-24.5 exp=-0.13R pnl=$-231
+  blocks: killSwitch=2151 maxOpen=1769 atrPct=1655 shortConf=1302 exposure=842 ddMonthly=819 dirOverlay=352 ddGuard=228 ddRolling7d=224 cooldown=185 ddDaily=71 dailyTrend=39 groupCap=13
 
 ## LEAN (only exposure+cooldown+maxOpen6, opinion filters off)
-  ALL:  T=1427 WR= 33% PF= 1.14 sumR=+143.0 exp=+0.10R pnl=$868  → balance $1368 maxDD 91.3%
-  2026: T=1012 WR= 32% PF= 1.04 sumR=+26.8 exp=+0.03R pnl=$-1048
-  blocks: exposure=1547 maxOpen=431 cooldown=324
+  ALL:  T= 823 WR= 36% PF= 1.09 sumR=+51.6 exp=+0.06R pnl=$48  → balance $548 maxDD 78.4%
+  2026: T= 175 WR= 37% PF= 1.16 sumR=+19.1 exp=+0.11R pnl=$64
+  blocks: regimeGate=5282 exposure=2476 maxOpen=1527 cooldown=190 ddGuard=92
 
 ## LS-only BASELINE
-  ALL:  T= 285 WR= 30% PF= 0.97 sumR=-6.3 exp=-0.02R pnl=$-187  → balance $313 maxDD 45.8%
-  2026: T= 212 WR= 30% PF= 0.93 sumR=-12.5 exp=-0.06R pnl=$-82
-  blocks: killSwitch=791 maxOpen=563 atrPct=433 exposure=236 dirOverlay=197 shortConf=196 ddRolling7d=123 ddMonthly=109 cooldown=62 dailyTrend=39 ddDaily=4 groupCap=4
+  ALL:  T=  69 WR= 29% PF= 0.95 sumR=-3.0 exp=-0.04R pnl=$-28  → balance $472 maxDD 12.1%
+  2026: T=  65 WR= 31% PF= 1.03 sumR=+1.5 exp=+0.02R pnl=$-1
+  blocks: regimeGate=6580 dirOverlay=454 atrPct=391 killSwitch=213 maxOpen=77 exposure=57 shortConf=24 dailyTrend=24 cooldown=14 ddGuard=4
 
 ## LS-only LEAN
-  ALL:  T=1282 WR= 32% PF= 1.04 sumR=+38.6 exp=+0.03R pnl=$-289  → balance $211 maxDD 91.0%
-  2026: T= 981 WR= 32% PF= 1.02 sumR=+12.4 exp=+0.01R pnl=$-272
-  blocks: exposure=1146 maxOpen=353 cooldown=261
+  ALL:  T= 582 WR= 31% PF= 1.02 sumR=+9.2 exp=+0.02R pnl=$-312  → balance $188 maxDD 88.8%
+  2026: T= 264 WR= 36% PF= 1.20 sumR=+38.5 exp=+0.15R pnl=$48
+  blocks: regimeGate=6350 exposure=548 ddGuard=238 cooldown=114 maxOpen=75
 
 ## LS+RSI LEAN
-  ALL:  T=1315 WR= 33% PF= 1.08 sumR=+74.0 exp=+0.06R pnl=$-100  → balance $400 maxDD 90.9%
-  2026: T=1002 WR= 32% PF= 1.04 sumR=+27.6 exp=+0.03R pnl=$-298
-  blocks: exposure=1317 maxOpen=401 cooldown=328
+  ALL:  T= 582 WR= 31% PF= 1.02 sumR=+9.2 exp=+0.02R pnl=$-312  → balance $188 maxDD 88.8%
+  2026: T= 264 WR= 36% PF= 1.20 sumR=+38.5 exp=+0.15R pnl=$48
+  blocks: regimeGate=6350 exposure=548 ddGuard=238 cooldown=114 maxOpen=75
 
 ## PROPOSED-A (LS+RSI+BR, pruned gates)
-  ALL:  T= 799 WR= 35% PF= 1.19 sumR=+111.1 exp=+0.14R pnl=$526  → balance $1026 maxDD 70.6%
-  2026: T= 589 WR= 34% PF= 1.14 sumR=+58.3 exp=+0.10R pnl=$-8
-  blocks: killSwitch=1357 exposure=944 cooldown=208 ddDaily=183 maxOpen=143 weeklyTrend=95
+  ALL:  T= 345 WR= 34% PF= 1.20 sumR=+51.0 exp=+0.15R pnl=$19  → balance $519 maxDD 62.5%
+  2026: T= 169 WR= 43% PF= 1.60 sumR=+66.0 exp=+0.39R pnl=$145
+  blocks: regimeGate=6458 killSwitch=544 exposure=320 ddGuard=132 cooldown=72 maxOpen=25 ddDaily=11
 
 ## PROPOSED-B (LS+RSI, pruned gates)
-  ALL:  T= 707 WR= 34% PF= 1.15 sumR=+79.4 exp=+0.11R pnl=$-96  → balance $404 maxDD 77.1%
-  2026: T= 580 WR= 35% PF= 1.15 sumR=+63.5 exp=+0.11R pnl=$26
-  blocks: killSwitch=1357 exposure=770 cooldown=202 ddDaily=173 maxOpen=152
+  ALL:  T= 345 WR= 34% PF= 1.20 sumR=+51.0 exp=+0.15R pnl=$19  → balance $519 maxDD 62.5%
+  2026: T= 169 WR= 43% PF= 1.60 sumR=+66.0 exp=+0.39R pnl=$145
+  blocks: regimeGate=6458 killSwitch=544 exposure=320 ddGuard=132 cooldown=72 maxOpen=25 ddDaily=11
 
 ## PROPOSED-C (= A + groupCap kept)
-  ALL:  T= 784 WR= 34% PF= 1.15 sumR=+85.6 exp=+0.11R pnl=$310  → balance $810 maxDD 76.0%
-  2026: T= 596 WR= 34% PF= 1.09 sumR=+37.8 exp=+0.06R pnl=$-298
-  blocks: killSwitch=1348 exposure=926 cooldown=213 ddDaily=132 groupCap=126 maxOpen=105 weeklyTrend=95
+  ALL:  T= 338 WR= 34% PF= 1.17 sumR=+42.9 exp=+0.13R pnl=$-55  → balance $445 maxDD 58.5%
+  2026: T= 165 WR= 42% PF= 1.54 sumR=+58.3 exp=+0.35R pnl=$70
+  blocks: regimeGate=6438 killSwitch=530 exposure=312 ddGuard=160 cooldown=74 maxOpen=24 groupCap=20 ddDaily=11
 
 ## PROPOSED-D (= A + ddRolling kept)
-  ALL:  T= 736 WR= 34% PF= 1.17 sumR=+90.6 exp=+0.12R pnl=$483  → balance $983 maxDD 73.0%
-  2026: T= 544 WR= 34% PF= 1.12 sumR=+48.4 exp=+0.09R pnl=$55
-  blocks: ddRolling7d=897 exposure=888 killSwitch=596 cooldown=192 ddDaily=173 maxOpen=153 weeklyTrend=94
+  ALL:  T= 343 WR= 34% PF= 1.21 sumR=+53.2 exp=+0.15R pnl=$64  → balance $564 maxDD 59.2%
+  2026: T= 167 WR= 43% PF= 1.63 sumR=+68.2 exp=+0.41R pnl=$191
+  blocks: regimeGate=6288 killSwitch=424 exposure=318 ddRolling7d=282 ddGuard=134 cooldown=72 maxOpen=25 ddDaily=21
 
 ## PROPOSED-E (= D + groupCap kept)
-  ALL:  T= 709 WR= 32% PF= 1.05 sumR=+28.3 exp=+0.04R pnl=$457  → balance $957 maxDD 70.5%
-  2026: T= 513 WR= 31% PF= 0.96 sumR=-15.2 exp=-0.03R pnl=$-48
-  blocks: killSwitch=977 exposure=870 ddRolling7d=611 cooldown=205 maxOpen=117 groupCap=100 weeklyTrend=88 ddDaily=52
+  ALL:  T= 336 WR= 34% PF= 1.18 sumR=+45.1 exp=+0.13R pnl=$-22  → balance $478 maxDD 55.3%
+  2026: T= 163 WR= 42% PF= 1.57 sumR=+60.5 exp=+0.37R pnl=$103
+  blocks: regimeGate=6269 killSwitch=410 exposure=311 ddRolling7d=280 ddGuard=162 cooldown=74 maxOpen=24 ddDaily=21 groupCap=20
 
 ## PROPOSED-F (= E without kelly)
-  ALL:  T= 781 WR= 34% PF= 1.13 sumR=+74.5 exp=+0.10R pnl=$537  → balance $1037 maxDD 70.5%
-  2026: T= 574 WR= 33% PF= 1.07 sumR=+30.1 exp=+0.05R pnl=$74
-  blocks: exposure=975 ddRolling7d=673 killSwitch=620 cooldown=188 ddDaily=145 maxOpen=132 groupCap=123 weeklyTrend=92
+  ALL:  T= 327 WR= 33% PF= 1.14 sumR=+33.1 exp=+0.10R pnl=$-75  → balance $425 maxDD 82.1%
+  2026: T= 159 WR= 41% PF= 1.44 sumR=+46.9 exp=+0.29R pnl=$215
+  blocks: regimeGate=6017 ddRolling7d=832 exposure=310 ddGuard=148 ddDaily=76 cooldown=76 killSwitch=76 maxOpen=25 groupCap=20
 
 ## Direction × BTC regime — ENGINE-CURRENT (shipped Jul 2026)
-  LONG  · BTC daily up      T=  83 WR= 19% PF= 0.48 sumR=-38.3 exp=-0.46R pnl=$-789
-  LONG  · BTC daily neutral T=  67 WR= 24% PF= 0.74 sumR=-14.1 exp=-0.21R pnl=$-246
-  LONG  · BTC daily down    T= 100 WR= 29% PF= 0.94 sumR=-4.3 exp=-0.04R pnl=$-153
-  SHORT · BTC daily up      T= 126 WR= 52% PF= 2.15 sumR=+77.4 exp=+0.61R pnl=$1256
-  SHORT · BTC daily neutral T=  93 WR= 34% PF= 1.17 sumR=+11.2 exp=+0.12R pnl=$52
-  SHORT · BTC daily down    T= 301 WR= 32% PF= 1.06 sumR=+13.2 exp=+0.04R pnl=$4
+  LONG  · BTC daily up      T=  53 WR= 40% PF= 1.14 sumR=+4.6 exp=+0.09R pnl=$86
+  LONG  · BTC daily neutral T= 213 WR= 40% PF= 1.14 sumR=+18.8 exp=+0.09R pnl=$83
+  LONG  · BTC daily down    T=   7 WR= 14% PF= 0.26 sumR=-4.5 exp=-0.64R pnl=$-77
+  SHORT · BTC daily up      T= 151 WR= 34% PF= 1.14 sumR=+15.2 exp=+0.10R pnl=$47
+  SHORT · BTC daily neutral T=  97 WR= 43% PF= 1.07 sumR=+4.1 exp=+0.04R pnl=$18
+  SHORT · BTC daily down    T=  45 WR= 49% PF= 1.72 sumR=+16.6 exp=+0.37R pnl=$140
   --- by BTC weekly ---
-  LONG  · BTC weekly up      T=  41 WR= 27% PF= 0.98 sumR=-0.5 exp=-0.01R pnl=$18
-  LONG  · BTC weekly neutral T=  13 WR= 23% PF= 0.69 sumR=-3.4 exp=-0.26R pnl=$-62
-  LONG  · BTC weekly down    T= 196 WR= 24% PF= 0.68 sumR=-52.8 exp=-0.27R pnl=$-1145
-  SHORT · BTC weekly up      T=  81 WR= 43% PF= 1.58 sumR=+28.4 exp=+0.35R pnl=$348
-  SHORT · BTC weekly neutral T=  54 WR= 48% PF= 2.15 sumR=+36.2 exp=+0.67R pnl=$577
-  SHORT · BTC weekly down    T= 385 WR= 35% PF= 1.13 sumR=+37.1 exp=+0.10R pnl=$387
+  LONG  · BTC weekly up      T= 215 WR= 39% PF= 1.09 sumR=+11.8 exp=+0.05R pnl=$83
+  LONG  · BTC weekly neutral T=  22 WR= 36% PF= 1.16 sumR=+2.3 exp=+0.11R pnl=$-21
+  LONG  · BTC weekly down    T=  36 WR= 42% PF= 1.22 sumR=+4.8 exp=+0.13R pnl=$31
+  SHORT · BTC weekly up      T= 206 WR= 40% PF= 1.20 sumR=+27.1 exp=+0.13R pnl=$60
+  SHORT · BTC weekly neutral T=  26 WR= 65% PF= 3.47 sumR=+24.2 exp=+0.93R pnl=$482
+  SHORT · BTC weekly down    T=  61 WR= 28% PF= 0.66 sumR=-15.5 exp=-0.25R pnl=$-337
 
 ## Per-strategy — ENGINE-CURRENT (shipped Jul 2026)
-  break-retest       ALL:  T=  92 WR= 42% PF= 1.74 sumR=+41.7 exp=+0.45R pnl=$514
-                     2026: T=  20 WR= 45% PF= 1.61 sumR=+7.2 exp=+0.36R pnl=$111
-  rsi-divergence     ALL:  T=  46 WR= 46% PF= 1.79 sumR=+22.1 exp=+0.48R pnl=$367
-                     2026: T=  33 WR= 45% PF= 1.68 sumR=+13.6 exp=+0.41R pnl=$229
-  liquidity-sweep    ALL:  T= 632 WR= 31% PF= 0.96 sumR=-18.8 exp=-0.03R pnl=$-757
-                     2026: T= 508 WR= 32% PF= 1.00 sumR=-0.8 exp=-0.00R pnl=$-409
+  liquidity-sweep    ALL:  T= 146 WR= 34% PF= 1.10 sumR=+10.4 exp=+0.07R pnl=$-27
+                     2026: T=  63 WR= 38% PF= 1.13 sumR=+5.7 exp=+0.09R pnl=$-46
+  tsmom-daily        ALL:  T= 420 WR= 41% PF= 1.18 sumR=+44.4 exp=+0.11R pnl=$325
+                     2026: T=  57 WR= 44% PF= 1.25 sumR=+8.0 exp=+0.14R pnl=$140
 
 ## Per-strategy — BASELINE (all gates)
-  break-retest       ALL:  T=  75 WR= 44% PF= 1.91 sumR=+40.8 exp=+0.54R pnl=$1141
-                     2026: T=  14 WR= 36% PF= 1.22 sumR=+2.2 exp=+0.16R pnl=$45
-  rsi-divergence     ALL:  T=  27 WR= 33% PF= 1.46 sumR=+9.1 exp=+0.34R pnl=$150
-                     2026: T=  16 WR= 31% PF= 0.99 sumR=-0.2 exp=-0.01R pnl=$-125
-  liquidity-sweep    ALL:  T= 229 WR= 32% PF= 1.08 sumR=+14.4 exp=+0.06R pnl=$-253
-                     2026: T= 162 WR= 33% PF= 1.04 sumR=+5.2 exp=+0.03R pnl=$25
+  liquidity-sweep    ALL:  T=  32 WR= 34% PF= 1.20 sumR=+4.9 exp=+0.15R pnl=$-22
+                     2026: T=  28 WR= 39% PF= 1.48 sumR=+9.4 exp=+0.33R pnl=$13
+  tsmom-daily        ALL:  T= 128 WR= 41% PF= 1.26 sumR=+20.3 exp=+0.16R pnl=$154
+                     2026: T=  19 WR= 16% PF= 0.32 sumR=-11.1 exp=-0.59R pnl=$-330
 
 ## Per-strategy — LEAN (only exposure+cooldown+maxOpen6, opinion filters off)
-  break-retest       ALL:  T= 135 WR= 44% PF= 1.93 sumR=+73.7 exp=+0.55R pnl=$1504
-                     2026: T=  28 WR= 36% PF= 1.12 sumR=+2.3 exp=+0.08R pnl=$221
-  rsi-divergence     ALL:  T=  55 WR= 44% PF= 1.79 sumR=+26.8 exp=+0.49R pnl=$1968
-                     2026: T=  38 WR= 42% PF= 1.43 sumR=+10.6 exp=+0.28R pnl=$1359
-  liquidity-sweep    ALL:  T=1237 WR= 32% PF= 1.05 sumR=+42.5 exp=+0.03R pnl=$-2605
-                     2026: T= 946 WR= 32% PF= 1.02 sumR=+13.9 exp=+0.01R pnl=$-2629
+  liquidity-sweep    ALL:  T= 240 WR= 30% PF= 0.97 sumR=-6.4 exp=-0.03R pnl=$-201
+                     2026: T=  95 WR= 38% PF= 1.34 sumR=+22.7 exp=+0.24R pnl=$128
+  tsmom-daily        ALL:  T= 583 WR= 38% PF= 1.16 sumR=+58.1 exp=+0.10R pnl=$249
+                     2026: T=  80 WR= 35% PF= 0.93 sumR=-3.6 exp=-0.05R pnl=$-64
 
 ## Per-strategy — PROPOSED-A (LS+RSI+BR, pruned gates)
-  break-retest       ALL:  T=  97 WR= 41% PF= 1.67 sumR=+40.9 exp=+0.42R pnl=$1133
-                     2026: T=  23 WR= 39% PF= 1.30 sumR=+4.6 exp=+0.20R pnl=$231
-  rsi-divergence     ALL:  T=  56 WR= 46% PF= 1.91 sumR=+29.8 exp=+0.53R pnl=$1128
-                     2026: T=  39 WR= 46% PF= 1.60 sumR=+14.1 exp=+0.36R pnl=$711
-  liquidity-sweep    ALL:  T= 646 WR= 33% PF= 1.08 sumR=+40.4 exp=+0.06R pnl=$-1735
-                     2026: T= 527 WR= 33% PF= 1.10 sumR=+39.6 exp=+0.08R pnl=$-950
+  liquidity-sweep    ALL:  T= 345 WR= 34% PF= 1.20 sumR=+51.0 exp=+0.15R pnl=$19
+                     2026: T= 169 WR= 43% PF= 1.60 sumR=+66.0 exp=+0.39R pnl=$145
 
 ## Per-strategy — PROPOSED-B (LS+RSI, pruned gates)
-  rsi-divergence     ALL:  T=  57 WR= 47% PF= 1.96 sumR=+31.4 exp=+0.55R pnl=$422
-                     2026: T=  40 WR= 48% PF= 1.67 sumR=+15.8 exp=+0.39R pnl=$274
-  liquidity-sweep    ALL:  T= 650 WR= 33% PF= 1.10 sumR=+48.0 exp=+0.07R pnl=$-518
-                     2026: T= 540 WR= 34% PF= 1.12 sumR=+47.7 exp=+0.09R pnl=$-248
+  liquidity-sweep    ALL:  T= 345 WR= 34% PF= 1.20 sumR=+51.0 exp=+0.15R pnl=$19
+                     2026: T= 169 WR= 43% PF= 1.60 sumR=+66.0 exp=+0.39R pnl=$145
 
 ## Per-strategy — PROPOSED-C (= A + groupCap kept)
-  break-retest       ALL:  T=  96 WR= 42% PF= 1.71 sumR=+42.1 exp=+0.44R pnl=$1004
-                     2026: T=  22 WR= 41% PF= 1.41 sumR=+5.7 exp=+0.26R pnl=$104
-  rsi-divergence     ALL:  T=  55 WR= 47% PF= 1.98 sumR=+31.8 exp=+0.58R pnl=$1366
-                     2026: T=  40 WR= 45% PF= 1.60 sumR=+14.8 exp=+0.37R pnl=$889
-  liquidity-sweep    ALL:  T= 633 WR= 32% PF= 1.02 sumR=+11.8 exp=+0.02R pnl=$-2061
-                     2026: T= 534 WR= 32% PF= 1.04 sumR=+17.3 exp=+0.03R pnl=$-1292
+  liquidity-sweep    ALL:  T= 338 WR= 34% PF= 1.17 sumR=+42.9 exp=+0.13R pnl=$-55
+                     2026: T= 165 WR= 42% PF= 1.54 sumR=+58.3 exp=+0.35R pnl=$70
 
 ## Per-strategy — PROPOSED-D (= A + ddRolling kept)
-  break-retest       ALL:  T=  88 WR= 42% PF= 1.80 sumR=+42.8 exp=+0.49R pnl=$1253
-                     2026: T=  15 WR= 47% PF= 2.02 sumR=+8.4 exp=+0.56R pnl=$412
-  rsi-divergence     ALL:  T=  44 WR= 41% PF= 1.67 sumR=+19.1 exp=+0.43R pnl=$445
-                     2026: T=  30 WR= 40% PF= 1.31 sumR=+6.4 exp=+0.21R pnl=$168
-  liquidity-sweep    ALL:  T= 604 WR= 32% PF= 1.06 sumR=+28.7 exp=+0.05R pnl=$-1215
-                     2026: T= 499 WR= 33% PF= 1.09 sumR=+33.7 exp=+0.07R pnl=$-526
+  liquidity-sweep    ALL:  T= 343 WR= 34% PF= 1.21 sumR=+53.2 exp=+0.15R pnl=$64
+                     2026: T= 167 WR= 43% PF= 1.63 sumR=+68.2 exp=+0.41R pnl=$191
 
 ## Per-strategy — PROPOSED-E (= D + groupCap kept)
-  break-retest       ALL:  T=  93 WR= 43% PF= 1.82 sumR=+46.1 exp=+0.50R pnl=$1297
-                     2026: T=  20 WR= 50% PF= 2.09 sumR=+11.7 exp=+0.59R pnl=$461
-  rsi-divergence     ALL:  T=  48 WR= 40% PF= 1.56 sumR=+18.1 exp=+0.38R pnl=$598
-                     2026: T=  36 WR= 36% PF= 1.16 sumR=+4.1 exp=+0.11R pnl=$271
-  liquidity-sweep    ALL:  T= 568 WR= 30% PF= 0.92 sumR=-36.0 exp=-0.06R pnl=$-1438
-                     2026: T= 457 WR= 30% PF= 0.91 sumR=-31.1 exp=-0.07R pnl=$-781
+  liquidity-sweep    ALL:  T= 336 WR= 34% PF= 1.18 sumR=+45.1 exp=+0.13R pnl=$-22
+                     2026: T= 163 WR= 42% PF= 1.57 sumR=+60.5 exp=+0.37R pnl=$103
 
 ## Per-strategy — PROPOSED-F (= E without kelly)
-  break-retest       ALL:  T=  92 WR= 42% PF= 1.77 sumR=+43.3 exp=+0.47R pnl=$621
-                     2026: T=  20 WR= 45% PF= 1.66 sumR=+7.9 exp=+0.39R pnl=$195
-  rsi-divergence     ALL:  T=  46 WR= 48% PF= 2.13 sumR=+30.5 exp=+0.66R pnl=$653
-                     2026: T=  33 WR= 45% PF= 1.71 sumR=+14.2 exp=+0.43R pnl=$395
-  liquidity-sweep    ALL:  T= 643 WR= 32% PF= 1.00 sumR=+0.7 exp=+0.00R pnl=$-736
-                     2026: T= 521 WR= 32% PF= 1.02 sumR=+8.1 exp=+0.02R pnl=$-516
+  liquidity-sweep    ALL:  T= 327 WR= 33% PF= 1.14 sumR=+33.1 exp=+0.10R pnl=$-75
+                     2026: T= 159 WR= 41% PF= 1.44 sumR=+46.9 exp=+0.29R pnl=$215
 
 NOTE: pnl/balance columns assume unlimited liquidity at fixed-fractional sizing —
 they are directionally useful, NOT projections. Decide on R metrics (sumR/exp/PF/maxDD).
 4h streams (break-retest) span ~3.7y; 1h streams span ~1y — ALL windows differ per strategy.
 ## Monthly P&L — ENGINE-CURRENT (shipped Jul 2026)
-  2023-02  $-10.45
-  2023-03  +$28.90
-  2023-04  $-33.19
-  2023-05  +$0.85
-  2023-06  +$16.99
-  2023-07  $-24.17
-  2023-08  +$125.68
-  2023-09  +$26.13
-  2023-10  $-13.53
-  2023-11  +$61.33
-  2023-12  +$51.90
-  2024-01  $-15.65
-  2024-02  +$26.25
-  2024-03  +$88.10
-  2024-04  $-34.86
-  2024-05  $-33.14
-  2024-06  +$88.18
-  2024-07  $-56.62
-  2024-08  $-16.41
-  2024-10  $-33.38
-  2024-11  $-5.81
-  2024-12  $-15.73
-  2025-01  $-15.02
-  2025-03  +$35.11
-  2025-04  +$84.30
-  2025-06  $-42.96
-  2025-07  +$57.67
-  2025-08  $-13.44
-  2025-09  +$79.43
-  2025-10  $-263.47
-  2025-11  +$203.54
-  2025-12  $-151.19
-  2026-01  +$382.84
-  2026-02  +$144.54
-  2026-03  $-139.53
-  2026-04  $-313.73
-  2026-05  +$126.39
-  2026-06  +$330.70
-  2026-07  $-453.22
-  2026-08  $-181.43
-  2026-09  +$31.92
+  2022-10  $-20.37
+  2022-11  $-41.89
+  2022-12  $-8.89
+  2023-01  +$107.98
+  2023-02  $-79.13
+  2023-03  $-140.12
+  2023-04  $-3.01
+  2023-05  $-12.83
+  2023-06  +$44.37
+  2023-07  $-12.11
+  2023-08  $-25.07
+  2023-09  +$16.81
+  2023-10  +$9.60
+  2023-11  +$61.97
+  2023-12  +$172.83
+  2024-01  $-3.97
+  2024-02  +$23.47
+  2024-03  $-56.23
+  2024-04  $-32.73
+  2024-05  $-29.93
+  2024-06  $-9.72
+  2024-07  $-10.11
+  2024-08  +$2.30
+  2024-09  $-9.12
+  2024-10  +$69.20
+  2024-11  $-80.00
+  2024-12  +$43.22
+  2025-01  $-29.00
+  2025-05  $-40.64
+  2025-06  +$8.01
+  2025-07  +$56.46
+  2025-08  $-56.49
+  2025-09  +$30.92
+  2025-10  +$123.66
+  2025-11  +$25.65
+  2026-01  +$158.34
+  2026-02  +$55.37
+  2026-03  $-47.69
+  2026-04  +$14.99
+  2026-05  +$433.21
+  2026-06  $-48.31
+  2026-07  +$60.20
+  2026-08  $-380.55
+  2026-09  $-42.28

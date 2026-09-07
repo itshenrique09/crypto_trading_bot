@@ -173,8 +173,8 @@ export default function SymbolPage() {
                 <GateRow
                   label="Volume 24h"
                   value={`$${fmtCompact(coin.volume24h)}`}
-                  pass={coin.volume24h >= gates.minVolumeUsdt}
-                  detail={`mínimo $${fmtCompact(gates.minVolumeUsdt)}`}
+                  pass={null}
+                  detail="informativo — sem gate de volume (o antigo mínimo de $30M nunca disparava)"
                 />
                 <GateRow
                   label="Spread"

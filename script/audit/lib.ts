@@ -8,8 +8,10 @@ import { simulateManagedExit, type ManagedExitConfig, type ManagedExitResult } f
 import { dropOpenCandle } from "../../server/candles";
 import { type OHLCV } from "../../server/analysis";
 import { classifyBtcRegime, defaultBtcContext, type BtcTrend } from "../../server/btc-regime-gate";
-import { isRollingDrawdownBreached, strategiesToPause } from "../../server/portfolio-guards";
-import type { Strategy } from "../../server/strategies/types";
+import { isRollingDrawdownBreached, strategiesToPause, evaluateDrawdownGuard, emptyDrawdownGuardState, type DrawdownGuardState } from "../../server/portfolio-guards";
+import { regimeAllows, type Strategy, type BtcDailyTrend } from "../../server/strategies/types";
+import { GUARD } from "../../server/engine-config";
+import { feedFromEnvOrArgv, fetchMexcPaginated } from "./feed";
 
 // ── Engine constants (mirror validate-pipeline.ts / server/routes.ts) ──────
 export const MIN_SL_DISTANCE_PCT = 0.006;
@@ -54,6 +56,9 @@ async function fetchJSON(url: string, retries = 3): Promise<any> {
 }
 
 export async function fetchPaginated(symbol: string, interval: string, total: number): Promise<OHLCV[]> {
+  // AUDIT_FEED=mexc switches every research script to the engine's own candle
+  // feed (see feed.ts); unset → Binance spot, byte-identical to before.
+  if (feedFromEnvOrArgv() === "mexc") return fetchMexcPaginated(symbol, interval, total, CACHE_DIR, DAY_KEY);
   const cachePath = `${CACHE_DIR}/pl_${symbol}_${interval}_${total}_${DAY_KEY}.json`;
   if (existsSync(cachePath)) {
     return JSON.parse(readFileSync(cachePath, "utf-8")) as OHLCV[];
@@ -96,7 +101,7 @@ export async function loadMarketData(strategies: Strategy[], totalCandles: numbe
       symbols.add(sym);
       const key = `${sym}:${strat.interval}`;
       if (!streams.has(key)) {
-        try { streams.set(key, await fetchPaginated(sym, strat.interval, totalCandles)); }
+        try { streams.set(key, await fetchPaginated(sym, strat.interval, strat.interval === "1d" ? Math.min(totalCandles, 1500) : totalCandles)); }
         catch (e: any) { console.error(`fetch failed ${key}: ${e?.message ?? e}`); }
       }
     }
@@ -496,6 +501,10 @@ export interface SimOptions {
    *  the TP1 partial reduction is ignored, which is slightly conservative.
    *  Undefined = no margin model (parity with the official harness). */
   marginLeverage?: number;
+  /** "dd" (default, engine since 2026-09-03): drawdown guard in trade-R; "trio": the legacy daily/rolling/kill-switch set. */
+  guard?: "dd" | "trio";
+  /** Apply Strategy.regimeGate (default true — the engines do). */
+  regimeGate?: boolean;
 }
 
 export function simulateEngineCurrent(
@@ -507,8 +516,16 @@ export function simulateEngineCurrent(
   baseRiskPct: number,
   simOpts: SimOptions = {},
 ): SimOutput {
-  const cands = [...candidates].sort((a, b) => a.tsSec - b.tsSec || a.symbol.localeCompare(b.symbol));
+  // Same-timestamp tie-break = the engine's scan order (union of preferredSymbols in
+  // registry order), not A→Z — the order decides which coincident signals get the
+  // last free slots, and it must be the one the engine actually uses.
+  const scanOrder = new Map(Array.from(new Set(strategies.flatMap(s => s.preferredSymbols ?? []))).map((s, i) => [s, i] as [string, number]));
+  const cands = [...candidates].sort((a, b) => a.tsSec - b.tsSec || (scanOrder.get(a.symbol) ?? 9999) - (scanOrder.get(b.symbol) ?? 9999) || a.symbol.localeCompare(b.symbol));
   const cooldownH = new Map(strategies.map(s => [s.id, s.cooldownHours ?? 0]));
+  const stratById = new Map(strategies.map(s => [s.id, s]));
+  const guardMode = simOpts.guard ?? "dd";
+  const useRegimeGate = simOpts.regimeGate ?? true;
+  let ddState: DrawdownGuardState = emptyDrawdownGuardState();
 
   let balance = startCapital;
   let peakBalance = startCapital;
@@ -586,16 +603,26 @@ export function simulateEngineCurrent(
     }
 
     const oneR = balance * baseRiskPct / 100;
-    {
-      const dayStart = new Date(nowMs); dayStart.setUTCHours(0, 0, 0, 0);
-      const dayPnl = closedLog.reduce((s, e) => new Date(e.closed_at).getTime() >= dayStart.getTime() ? s + e.pnl_usd : s, 0);
-      if (dayPnl < -4 * oneR) { block("ddDaily"); continue; }
-    }
-    if (isRollingDrawdownBreached(closedLog, oneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R, now: nowMs })) {
-      block("ddRolling7d"); continue;
+    if (guardMode === "dd") {
+      const ev = evaluateDrawdownGuard(closedLog, ddState, { peakWindowMs: GUARD.peakWindowDays * 86_400_000, haltR: GUARD.haltR, resumeR: GUARD.resumeR, maxHaltMs: GUARD.maxHaltHours * 3_600_000, now: nowMs });
+      ddState = ev.state;
+      if (ddState.halted) { block("ddGuard"); continue; }
+    } else {
+      {
+        const dayStart = new Date(nowMs); dayStart.setUTCHours(0, 0, 0, 0);
+        const dayPnl = closedLog.reduce((s, e) => new Date(e.closed_at).getTime() >= dayStart.getTime() ? s + e.pnl_usd : s, 0);
+        if (dayPnl < -4 * oneR) { block("ddDaily"); continue; }
+      }
+      if (isRollingDrawdownBreached(closedLog, oneR, { windowMs: ROLLING_WINDOW_MS, maxLossR: ROLLING_DRAWDOWN_MAX_LOSS_R, now: nowMs })) {
+        block("ddRolling7d"); continue;
+      }
     }
 
     const btcDailyTrend = dTrend("BTC", nowSec) as BtcTrend;
+    if (useRegimeGate) {
+      const strat = stratById.get(c.stratId);
+      if (strat && !regimeAllows(strat, c.dir, btcDailyTrend as BtcDailyTrend)) { block("regimeGate"); continue; }
+    }
     let riskMultiplier = 1.0;
     if (btcDailyTrend === "up") riskMultiplier = 1.25;
     else if (btcDailyTrend === "down") riskMultiplier = 0.75;
@@ -610,7 +637,7 @@ export function simulateEngineCurrent(
       if (inGroup >= MAX_PER_GROUP) { block("groupCap"); continue; }
     }
 
-    {
+    if (guardMode === "trio") {
       const paused = strategiesToPause(closedLog, [c.stratId], {
         windowMs: ROLLING_WINDOW_MS, minTrades: KILL_SWITCH_MIN_TRADES, maxNetR: KILL_SWITCH_MAX_NET_R, now: nowMs,
       });

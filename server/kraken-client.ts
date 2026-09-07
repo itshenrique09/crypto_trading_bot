@@ -63,6 +63,9 @@ export interface KrakenTicker {
   /** Predicted next funding rate, when the venue publishes one. */
   fundingRatePrediction: number | null;
   vol24h: number;
+  /** Best bid/ask on the venue that EXECUTES — the spread gate must read these, not MEXC's book. */
+  bid: number | null;
+  ask: number | null;
 }
 
 export interface KrakenInstrument {
@@ -353,6 +356,8 @@ export class KrakenClient {
         fundingRate: t.fundingRate != null ? Number(t.fundingRate) : null,
         fundingRatePrediction: t.fundingRatePrediction != null ? Number(t.fundingRatePrediction) : null,
         vol24h: Number(t.vol24h ?? 0),
+        bid: t.bid != null && Number.isFinite(Number(t.bid)) ? Number(t.bid) : null,
+        ask: t.ask != null && Number.isFinite(Number(t.ask)) ? Number(t.ask) : null,
       });
     }
     this.tickerCache = { at: Date.now(), map };
