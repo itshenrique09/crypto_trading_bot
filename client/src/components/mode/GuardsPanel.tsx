@@ -118,15 +118,14 @@ export default function GuardsPanel({
   const pending = overrideGuard.isPending || rearmGuard.isPending;
   const trades = journal.filter(t => t.mode === mode);
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const dailyPnl = sumPnlUsdSince(trades, todayStart.getTime());
-
-  const rollingDays = config?.portfolio.rollingWindowDays ?? 7;
-  const rollingPnl = sumPnlUsdSince(trades, Date.now() - rollingDays * 86_400_000);
-
-  const dailyLimit = oneR && config ? -config.portfolio.dailyDrawdownHaltR * oneR : null;
-  const rollingLimit = oneR && config ? -config.portfolio.rollingDrawdownHaltR * oneR : null;
+  // The guard runs in trade-R (Σ pnl/risk), so the server's evaluation is the
+  // source of truth; the USD figures here are the same numbers × 1R for display.
+  const dd = guards?.drawdown;
+  const haltR = dd?.haltR ?? config?.portfolio.drawdownGuard.haltR ?? 12;
+  const resumeR = dd?.resumeR ?? config?.portfolio.drawdownGuard.resumeR ?? 6;
+  const peakDays = dd?.peakWindowDays ?? config?.portfolio.drawdownGuard.peakWindowDays ?? 30;
+  const ddUsd = dd && oneR ? -dd.ddR * oneR : sumPnlUsdSince(trades, Date.now() - peakDays * 86_400_000);
+  const ddLimit = oneR ? -haltR * oneR : null;
 
   const maxOpen = config?.portfolio.maxOpenPositions ?? 10;
   const anyPaused = (pausedStrategies?.length ?? 0) > 0;
@@ -147,23 +146,20 @@ export default function GuardsPanel({
     >
       <div className="space-y-4">
         <GuardRow
-          label="P&L de hoje vs halt diário"
-          valueUsd={dailyPnl} limitUsd={dailyLimit} oneR={oneR}
-          state={guards?.daily}
-          confirmText={`Ignorar o halt diário (${mode})? O bot volta a abrir posições apesar do drawdown de hoje. O guard rearma-se sozinho à meia-noite.`}
-          onOverride={() => overrideGuard.mutate({ mode, guard: "daily" })}
-          onRearm={() => rearmGuard.mutate({ mode, guard: "daily" })}
-          pending={pending}
-        />
-        <GuardRow
-          label={`P&L ${rollingDays} dias vs halt rolling`}
-          valueUsd={rollingPnl} limitUsd={rollingLimit} oneR={oneR}
-          state={guards?.rolling}
-          confirmText={`Ignorar o halt rolling de ${rollingDays} dias (${mode})? O bot volta a abrir posições apesar do drawdown da semana. O override dura 24h — se o drawdown persistir, terás de reconfirmar.`}
+          label={`Drawdown vs pico ${peakDays}d (halt ≥ ${haltR}R · retoma ≤ ${resumeR}R)`}
+          valueUsd={ddUsd} limitUsd={ddLimit} oneR={oneR}
+          state={guards?.drawdown ?? guards?.rolling}
+          confirmText={`Ignorar o halt de drawdown (${mode})? O bot volta a abrir posições apesar de estar ${dd ? dd.ddR.toFixed(1) : "—"}R abaixo do pico dos últimos ${peakDays} dias. O override dura 24h — se o drawdown persistir, terás de reconfirmar.`}
           onOverride={() => overrideGuard.mutate({ mode, guard: "rolling" })}
           onRearm={() => rearmGuard.mutate({ mode, guard: "rolling" })}
           pending={pending}
         />
+        {dd && (
+          <div className="flex justify-between text-[10px] text-muted-foreground/70">
+            <span>equity realizada {dd.cumR >= 0 ? "+" : ""}{dd.cumR.toFixed(1)}R · pico {dd.peakR >= 0 ? "+" : ""}{dd.peakR.toFixed(1)}R</span>
+            <span>halt máx. {dd.maxHaltHours}h, depois o pico é rebaseado</span>
+          </div>
+        )}
 
         <div className="flex items-center justify-between border-t border-border pt-3 text-xs">
           <span className="text-muted-foreground">Posições usadas</span>
@@ -176,10 +172,7 @@ export default function GuardsPanel({
         {pausedStrategies && (
           <div className="border-t border-border pt-3">
             <div className="mb-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-              Kill-switch por estratégia
-              {config && (
-                <span className="normal-case tracking-normal"> (≥{config.portfolio.killSwitchMinTrades} trades 7d e netR &lt; {config.portfolio.killSwitchMaxNetR}R)</span>
-              )}
+              Estratégias pausadas pelo engine
             </div>
             {pausedStrategies.length === 0 ? (
               <p className="text-xs text-up">Nenhuma estratégia pausada</p>

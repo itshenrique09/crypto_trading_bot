@@ -188,3 +188,89 @@ export function strategiesToPause(
   }
   return paused;
 }
+
+// ─── PORTFOLIO DRAWDOWN GUARD (2026-09-03) ──────────────────────────────────
+// One guard on one process: the realized equity curve in trade-R (Σ pnl/risk,
+// one point per closed trade), its peak inside a rolling window, and the
+// drawdown from that peak. Hysteresis — halt at ≥ haltR, resume at ≤ resumeR —
+// so a halt does not flicker; a bounded halt — on `maxHaltMs` expiry the peak
+// is re-based to the current level — so a slow bleed cannot freeze the engine
+// until the peak ages out of the window (pure hysteresis on a zero-edge stream
+// halted 17–23% of the calendar; bounded halts 3–4%). Replaces the daily /
+// rolling-7d / kill-switch trio (see server/engine-config.ts GUARD).
+// Reference implementation validated in script/audit/phase9-design.ts and
+// phase9-portfolio.ts; this is a verbatim port.
+
+export interface DrawdownGuardOpts {
+  /** Rolling window that a peak must fall inside to count (e.g. 30 days). */
+  peakWindowMs: number;
+  /** Halt when drawdown from the peak reaches this many trade-R. */
+  haltR: number;
+  /** Resume once the drawdown has recovered to this many trade-R or less. */
+  resumeR: number;
+  /** A halt never lasts longer than this; on expiry the peak is re-based. */
+  maxHaltMs: number;
+  /** Override "now" for deterministic tests. */
+  now?: number;
+}
+
+export interface DrawdownGuardState {
+  halted: boolean;
+  haltedSinceMs: number | null;
+  /** Level the peak was pinned to when the last halt expired (ages out with the window). */
+  rebasedAtCumR?: number | null;
+  rebasedAtMs?: number | null;
+}
+
+export interface DrawdownGuardEval {
+  state: DrawdownGuardState;
+  /** Σ pnl/risk over every closed trade (realized equity in trade-R). */
+  cumR: number;
+  /** Reference peak (trade-R) the drawdown is measured from. */
+  peakR: number;
+  /** peakR − cumR, ≥ 0. */
+  ddR: number;
+  transition: "none" | "halt" | "resume" | "expire";
+}
+
+export function emptyDrawdownGuardState(): DrawdownGuardState {
+  return { halted: false, haltedSinceMs: null, rebasedAtCumR: null, rebasedAtMs: null };
+}
+
+export function evaluateDrawdownGuard(
+  trades: ClosedTradeLite[],
+  prev: DrawdownGuardState,
+  opts: DrawdownGuardOpts,
+): DrawdownGuardEval {
+  const now = opts.now ?? Date.now();
+  const closed = trades
+    .filter(e => e.closed_at && e.risk_usd && e.risk_usd > 0)
+    .map(e => ({ t: new Date(e.closed_at as string).getTime(), r: (e.pnl_usd ?? 0) / (e.risk_usd as number) }))
+    .sort((a, b) => a.t - b.t);
+  const points: Array<{ t: number; cum: number }> = [];
+  let cum = 0;
+  for (const c of closed) { cum += c.r; points.push({ t: c.t, cum }); }
+  // Reference peak = highest point that is BOTH inside the rolling window AND at
+  // or after the last re-base. The current point always qualifies (dd ≥ 0). The
+  // origin (cum 0 before the first trade) qualifies only if the curve started
+  // inside that span. A re-base pins the peak at the re-base level until it ages
+  // out of the window like any other point.
+  const since = Math.max(now - opts.peakWindowMs, prev.rebasedAtMs ?? -Infinity);
+  let peak = cum;
+  for (const p of points) if (p.t >= since && p.cum > peak) peak = p.cum;
+  if (closed.length === 0 || closed[0].t >= since) peak = Math.max(peak, 0);
+  if (prev.rebasedAtMs != null && prev.rebasedAtCumR != null && prev.rebasedAtMs >= now - opts.peakWindowMs) {
+    peak = Math.max(peak, prev.rebasedAtCumR);
+  }
+  const dd = peak - cum;
+  let state: DrawdownGuardState = { ...prev };
+  let transition: DrawdownGuardEval["transition"] = "none";
+  if (!prev.halted) {
+    if (dd >= opts.haltR) { state = { ...state, halted: true, haltedSinceMs: now }; transition = "halt"; }
+  } else {
+    const expired = prev.haltedSinceMs != null && now - prev.haltedSinceMs >= opts.maxHaltMs;
+    if (dd <= opts.resumeR) { state = { ...state, halted: false, haltedSinceMs: null }; transition = "resume"; }
+    else if (expired) { state = { halted: false, haltedSinceMs: null, rebasedAtCumR: cum, rebasedAtMs: now }; transition = "expire"; }
+  }
+  return { state, cumR: cum, peakR: peak, ddR: dd, transition };
+}

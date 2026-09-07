@@ -214,3 +214,70 @@ test("margin capacity degrades safely on nonsense inputs", () => {
   assert.equal(over.freeUsd, 0);
   assert.equal(over.fits, false);
 });
+
+// ── Drawdown guard (2026-09-03) ─────────────────────────────────────────────
+import { evaluateDrawdownGuard, emptyDrawdownGuardState } from "./portfolio-guards";
+
+const DAY_MS = 86_400_000;
+const ddOpts = { peakWindowMs: 30 * DAY_MS, haltR: 12, resumeR: 6, maxHaltMs: 24 * 3_600_000 };
+function tradesFromR(rs: number[], startMs: number, stepMs = 3_600_000) {
+  return rs.map((r, i) => ({ closed_at: new Date(startMs + i * stepMs).toISOString(), pnl_usd: r * 10, risk_usd: 10, strategy: "x", outcome: r >= 0 ? "win" : "loss" }));
+}
+
+test("drawdown guard halts at ≥ haltR below the rolling peak and resumes with hysteresis", () => {
+  const t0 = Date.UTC(2026, 8, 1);
+  // climb +8R, then bleed −12R → dd 12R from the peak → halt
+  const rs = [2, 2, 2, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+  const trades = tradesFromR(rs, t0);
+  let state = emptyDrawdownGuardState();
+  const now = t0 + rs.length * 3_600_000;
+  const ev = evaluateDrawdownGuard(trades, state, { ...ddOpts, now });
+  assert.equal(ev.peakR, 8);
+  assert.equal(ev.cumR, -4);
+  assert.equal(ev.ddR, 12);
+  assert.equal(ev.transition, "halt");
+  assert.equal(ev.state.halted, true);
+  state = ev.state;
+  // recovering to dd 7R is not enough (resume ≤ 6R)
+  const recovering = [...trades, ...tradesFromR([5], now)];
+  const ev2 = evaluateDrawdownGuard(recovering, state, { ...ddOpts, now: now + 3_600_000 });
+  assert.equal(ev2.ddR, 7);
+  assert.equal(ev2.state.halted, true);
+  assert.equal(ev2.transition, "none");
+  // dd 5R → resume
+  const recovered = [...recovering, ...tradesFromR([2], now + 3_600_000)];
+  const ev3 = evaluateDrawdownGuard(recovered, ev2.state, { ...ddOpts, now: now + 2 * 3_600_000 });
+  assert.equal(ev3.ddR, 5);
+  assert.equal(ev3.transition, "resume");
+  assert.equal(ev3.state.halted, false);
+});
+
+test("a halt expires after maxHaltMs and re-bases the peak so a slow bleed cannot freeze the engine", () => {
+  const t0 = Date.UTC(2026, 8, 1);
+  const trades = tradesFromR([-2, -2, -2, -2, -2, -2], t0);
+  const now = t0 + 6 * 3_600_000;
+  const halted = evaluateDrawdownGuard(trades, emptyDrawdownGuardState(), { ...ddOpts, now });
+  assert.equal(halted.transition, "halt");        // origin peak 0 → dd 12
+  // 25h later, no recovery: the halt expires and the peak is pinned at the current level
+  const later = now + 25 * 3_600_000;
+  const expired = evaluateDrawdownGuard(trades, halted.state, { ...ddOpts, now: later });
+  assert.equal(expired.transition, "expire");
+  assert.equal(expired.state.halted, false);
+  assert.equal(expired.state.rebasedAtCumR, -12);
+  // after the re-base the drawdown is measured from −12, not from 0
+  const after = evaluateDrawdownGuard(trades, expired.state, { ...ddOpts, now: later + 1000 });
+  assert.equal(after.ddR, 0);
+  assert.equal(after.state.halted, false);
+});
+
+test("peaks older than the window no longer count", () => {
+  const t0 = Date.UTC(2026, 6, 1);
+  const old = tradesFromR([10, 10], t0);                                  // +20R two months ago
+  const recent = tradesFromR([-1, -1, -1, -1, -1], t0 + 60 * DAY_MS);     // −5R now
+  const now = t0 + 60 * DAY_MS + 6 * 3_600_000;
+  const ev = evaluateDrawdownGuard([...old, ...recent], emptyDrawdownGuardState(), { ...ddOpts, now });
+  assert.equal(ev.cumR, 15);
+  assert.equal(ev.peakR, 20 - 1);   // highest point INSIDE the window = after the first recent loss
+  assert.equal(ev.ddR, 4);
+  assert.equal(ev.state.halted, false);
+});

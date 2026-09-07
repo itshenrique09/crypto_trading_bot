@@ -111,6 +111,10 @@ export interface ExchangeAdapter {
   getProtection?(): Promise<ExchangeProtection[]>;
   /** Recent executions — the only source of a real fill price. */
   getFills?(since?: Date): Promise<ExchangeFill[]>;
+  /** Bid/ask spread per bot symbol on the EXECUTING venue (fraction of price), when the venue publishes it. */
+  getSpreads?(): Promise<Map<string, number>>;
+  /** Order-size decimals for a symbol (may be negative — round to 10^-precision), for lot feasibility checks. */
+  getSizePrecision?(botSymbol: string): Promise<number>;
 }
 
 // ── Fill reconstruction ───────────────────────────────────────────────────
@@ -401,6 +405,22 @@ export class KrakenAdapter implements ExchangeAdapter {
 
   async setProtection(position: ExchangePosition, stopLossPrice: number, takeProfitPrice?: number): Promise<void> {
     await this.client.setProtection(position.botSymbol, position.direction, position.size, stopLossPrice, takeProfitPrice);
+  }
+
+  /** Kraken public /tickers carries bid/ask — the spread where the order will actually fill. */
+  async getSpreads(): Promise<Map<string, number>> {
+    const tickers = await this.client.getTickers();
+    const out = new Map<string, number>();
+    for (const t of Array.from(tickers.values())) {
+      if (t.bid == null || t.ask == null || !(t.bid > 0) || t.ask < t.bid) continue;
+      const mid = t.last > 0 ? t.last : (t.bid + t.ask) / 2;
+      out.set(fromKrakenSymbol(t.symbol), (t.ask - t.bid) / mid);
+    }
+    return out;
+  }
+
+  async getSizePrecision(botSymbol: string): Promise<number> {
+    return (await this.client.getInstrument(botSymbol)).sizePrecision;
   }
 }
 
