@@ -94,6 +94,20 @@ export const liquiditySweepStrategy: Strategy = {
   preferredSymbols: ["UNI", "ICP", "AAVE", "PEPE", "INJ", "BCH", "FIL", "LTC", "ATOM", "AVAX", "XRP", "DOGE", "SOL", "ETC", "NEAR", "DOT", "SAND", "LINK", "APT", "HBAR", "SEI", "ETH", "SUI", "BNB", "ARB", "TIA", "BTC", "FET", "RENDER", "ONDO", "ENA", "WLD", "CRV", "GALA", "RUNE", "GRT", "IMX", "POL", "VET", "ADA"],
   cooldownHours: 12,  // matches backtest COOLDOWN=12h
 
+  // ── REGIME GATE (2026-09-03, phase 9) — SHORT only, and only while the BTC
+  // daily trend is UP. Honest 2.3-year harness (entry = signal close, 40
+  // coins): the unconditional LS book is exp −0.09R (PF 0.89, maxDD 195R);
+  // LONGs are negative in every BTC regime (LONG·BTC-up −0.57R, the worst cell
+  // in the book); SHORT·BTC-up is +0.26R PF 1.37 CI95 [+0.11, +0.42], both
+  // halves positive, 29/40 coins positive, +0.16R under +15 bps slippage. The
+  // mechanism: alt rallies fade against BTC strength — a sweep of a local high
+  // while BTC leads is a liquidity grab, not a breakout. Declared fragility:
+  // the pattern was formed on the last 11 months; on the prior 17 months alone
+  // it is +0.09R with one negative half, so this is PAPER-FIRST under the
+  // standing gate (≥ +0.3R over ≥ 120 honest paper trades) before any live.
+  regimeGate: { long: [], short: ["up"] },
+  defaultPaused: { paper: false, live: true },
+
   analyze(candles: OHLCV[]): StrategySignal | null {
     const sig = liquiditySweepSignal(candles);
 
