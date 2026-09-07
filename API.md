@@ -85,19 +85,22 @@ The **real constants the engines run with** — same identifiers the scan/check 
 
 ```jsonc
 {
-  "riskGates":  { "minVolumeUsdt": 30000000, "maxSpreadPct": 0.002, "fundingLongMax": 0.001,
+  "riskGates":  { "maxSpreadPct": 0.002, "fundingLongMax": 0.001,
                   "fundingShortMin": -0.001, "minSlDistancePct": 0.006, "minRiskReward": 1.5 },
   "portfolio":  { "maxOpenPositions": 10, "maxPerCorrelationGroup": 3, "onePositionPerSymbol": true,
-                  "dailyDrawdownHaltR": 4, "rollingWindowDays": 7, "rollingDrawdownHaltR": 6,
-                  "killSwitchMinTrades": 4, "killSwitchMaxNetR": -3 },
-  "exits":      { "tp1PartialClosePct": 0.6, "maxHoldHoursByInterval": { "1h": 200, "4h": 240 } },
+                  "drawdownGuard": { "peakWindowDays": 30, "haltR": 12, "resumeR": 6, "maxHaltHours": 24 },
+                  "regimeGates": { "liquidity-sweep": { "long": [], "short": ["up"] } },
+                  "scan": { "closeOffsetMs": 30000, "retryOffsetMs": 210000, "maxSignalAgeMin": 10 } },
+  "exits":      { "tp1PartialClosePct": 0.6, "maxHoldHoursByInterval": { "1h": 200, "4h": 240, "1d": 4800 } },
   "scan":       { "checkEverySeconds": 30, "scanEveryMinutes": 3 }
 }
 ```
 
+2026-09-03: the `$30M` volume gate was removed (it never fired — every universe coin was "preferred"); the daily/rolling/kill-switch trio was replaced by **one drawdown guard** in trade-R (Σ pnl/risk vs its peak over `peakWindowDays`; halt at ≥ `haltR`, resume at ≤ `resumeR`, a halt never outlives `maxHaltHours`); `regimeGates` lists, per strategy, the BTC daily trends in which each direction is traded (`[]` = never, absent = always); scans now fire at each candle close + `closeOffsetMs` with one retry at `retryOffsetMs` — `scan.scanEveryMinutes` is kept for old clients but no longer describes the cadence.
+
 ### `GET /api/strategies`
 Active registry: `[{ id, name, description, interval, preferredSymbols: string[], minCandles, cooldownHours, enabled, paperEnabled, liveEnabled, killSwitchPaused: { paper, live } }]`.
-`paperEnabled`/`liveEnabled` are the **manual pause switches per mode** (Settings UI; persisted in `bot_settings.disabled_strategies_paper` / `disabled_strategies_live`, with the legacy single-list `disabled_strategies` read as fallback) — paper can keep testing a strategy that live has paused. `enabled` = enabled on at least one mode (backward compat). `killSwitchPaused` is the automatic −3R/7d drawdown kill-switch state per engine (read-only, self-healing). Signal selection among enabled strategies stays automatic.
+`paperEnabled`/`liveEnabled` are the **manual pause switches per mode** (Settings UI; persisted in `bot_settings.disabled_strategies_paper` / `disabled_strategies_live`). On first boot with no pause list for a mode, the engine materialises the registry's `defaultPaused` (2026-09-03: both active strategies start paused on LIVE and active on PAPER); the legacy single-list fallback was removed. `enabled` = enabled on at least one mode (backward compat). `killSwitchPaused` is always empty since 2026-09-03 (the per-strategy kill-switch was retired in favour of the portfolio drawdown guard); the field is kept for old clients. Signal selection among enabled strategies stays automatic.
 Default: `rsi-divergence` starts paused on both modes (Aug 2026 audit — negative marginal portfolio contribution in both harness windows).
 
 ### `PUT /api/strategies/:id/toggle`
@@ -110,7 +113,7 @@ Body `{ enabled: boolean, mode?: "paper" | "live" | "both" }` (default `both`). 
 Body `{ enabled: boolean }`. Symbol must belong to the validated universe. Blocks **new entries only**, both engines. Returns `{ symbol, enabled, disabled: string[] }`.
 
 ### `POST /api/guards/override` · `DELETE /api/guards/override`
-Body `{ mode: "paper"|"live", guard: "daily"|"rolling" }`. **One-shot resume of an active drawdown halt** — the guard itself stays armed for future breaches: a daily override expires at the next daily reset, a rolling override lasts 24h (must be re-confirmed while the breach persists). DELETE re-arms immediately. Every use is written to the scan log for auditability. Halt state (breach, natural end estimate, active override) is served in `/api/paper/status` and `/api/live/status` under `guards.{daily,rolling} = { halted, endsAt, overrideUntil }`.
+Body `{ mode: "paper"|"live", guard: "rolling" }` (`"daily"` is still accepted but retired — it never halts). **One-shot resume of an active drawdown-guard halt** — the guard stays armed; the override lasts 24h and must be re-confirmed while the drawdown persists. DELETE re-arms immediately. Every use is written to the scan log. Guard state is served in `/api/paper/status` and `/api/live/status` under `guards.drawdown = { halted, endsAt, overrideUntil, cumR, peakR, ddR, haltR, resumeR, peakWindowDays, maxHaltHours, haltedSince }`; `guards.rolling` mirrors it and `guards.daily` is always `halted: false` (kept for old clients).
 
 ---
 

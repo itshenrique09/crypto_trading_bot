@@ -512,3 +512,60 @@ Aviso: `phase8-report-core/guards/drift/honest.md` foram corridos com o código 
 **Não feito**: recalibrar guards (não há edge para calibrar); remover RSI do registry (honesto: é positiva); nova estratégia; deploy no VPS.
 
 **Recomendação**: live OFF até o paper HONESTO (fill ao ticker, entrada corrigida) mostrar ≥ +0.3R sobre ≥ 120 trades. O bot, como está, não tem edge demonstrado; o que existia era um artefacto de simulação.
+
+---
+
+## Fase 9 — redesenho (2026-09-02) — PRÉ-REGISTO (escrito antes de ver resultados)
+
+**Mandato do utilizador**: melhorar o bot, não seguir o desenho actual à letra; pode-se mudar, acrescentar e remover.
+**Ferramentas**: harness honesto (entrada = fecho da vela de sinal) em Binance spot e, novo, no feed do engine (`--feed=mexc`, `script/audit/feed.ts`); `script/audit/phase8-collapse.ts` como base dos scripts `phase9-*.ts`; caches do dia pré-aquecidas (1h×20000, 4h×8000, 1d×1500 para as 40 moedas).
+**Paridade de feed (ENGINE honesto floor 68, 8000×1h)**: Binance PF 1.08 / +0.06R; MEXC futures PF 1.11 / +0.08R (LS −0.01R, B&R +0.70R T=85, RSI +0.21R T=49). Basis MEXC↔Binance no fecho ≈ −4 a −8 bps; MEXC com range maior em 78% das velas BTC, 31% GALA.
+
+**Hipóteses (fixadas antes de correr):**
+- H-regime: LS SHORT só com BTC diário em alta tem exp > 0 em 2.3 anos e em ambas as metades; SHORT-only > ambas direcções; bloquear LONG com BTC em alta melhora o livro LS.
+- H-brrsi: B&R e RSI têm edge real, i.e. mantêm exp ≥ +0.15R no universo completo de 40 moedas (regra anti-viés de selecção); estáveis por metades.
+- H-tsmom: TSMOM 1d (spec da Fase 6) tem exp ≥ +0.25R standalone em ~4 anos e melhora o portfólio B&R+RSI sem LS; sobrevive a funding drag (−0.03%/dia) e +15 bps.
+- H-design: os guards (diário/rolling/kill-switch) são redundantes e medidos na unidade errada; scan por intervalo livre em vez de alinhado ao fecho; "default paused" ineficaz; filtro de volume morto; conta de $110 não suporta parte do universo por arredondamento de lotes.
+
+**Critérios de aceitação (aplicados literalmente, por componente e por portfólio):**
+- ACCEPT-LIVE-CANDIDATE: exp ≥ +0.25R; PF ≥ 1.30; IC95 inferior > 0 na janela completa; ≥ 50 trades/ano (ou ≥ 100 no total para 4h/1d); mesmo sinal e ≥ +0.10R em ambas as metades; top-5 ≤ 30% do sumR; ≥ 55% das moedas positivas; exp com +15 bps ≥ +0.10R.
+- PAPER-CANDIDATE: exp ≥ +0.15R; PF ≥ 1.15; IC95 inferior > −0.05R; ambas as metades positivas; ≥ 30 trades/ano.
+- Regra anti-selecção: estratégia com lista de moedas escolhida à mão tem de atingir ≥ +0.15R no universo de 40; senão REJECT.
+- Portfólio para PAPER: exp ≥ +0.20R, PF ≥ 1.30, IC95 inferior > 0, metades ≥ +0.10R, ≥ 80 trades/ano, maxDD(R) ≤ 25R a 2%, +15 bps ≥ +0.10R.
+- Diagnósticos pós-hoc são permitidos mas rotulados e nunca usados para promover.
+- Nenhum braço é acrescentado depois de ver resultados; a janela Aug14→Sep1 é só verificação de paridade com o realizado.
+
+### Fase 9 — RESULTADOS (2026-09-02/03)
+
+**Componentes (scripts `phase9-regime/brrsi/tsmom/portfolio/design.ts`, relatórios `phase9-report-*.md`):**
+| Componente | Janela | T | exp | PF | IC95 | Veredito literal | Revisão adversarial (2 lentes) |
+|---|---|---|---|---|---|---|---|
+| LS ambas direcções (baseline) | 2.3y | 1486 | −0.09R | 0.89 | [−0.17, −0.00] | REJECT | — |
+| LS SHORT-only | 2.3y | 1177 | +0.01R | 1.02 | [−0.09, +0.11] | REJECT | — |
+| **LS SHORT & BTC diário UP (A2)** | 2.3y | 559 | +0.26R | 1.37 | [+0.11, +0.42] | ACCEPT (literal, margens <0.01R) | **REFUTADO → REJECT**: hipótese formada nos últimos 8000 candles (33% dos trades, 77% do sumR); na fatia OOS limpa (2024-05→2025-10, T=376) exp +0.09R, PF 1.12, metades +0.32/−0.29; IC por blocos semanais [−0.03, +0.53]. Fica como hipótese *forward* para paper. Robusto apenas a remoção: LONG·BTC-up é negativo em todas as janelas (−0.24 a −0.57R). |
+| B&R 6 moedas / 40 moedas | 3.6y | 98 / 430 | +0.37R / −0.02R | 1.58 / 0.98 | — | REJECT (regra anti-selecção) | mantido |
+| RSI 2 moedas / 40 moedas | 2.25y | 169 / 1207 | +0.03R / −0.13R | 1.05 / 0.84 | IC40 <0 | REJECT (regra anti-selecção) | mantido |
+| TSMOM 1d standalone | 3.9y | 403 | +0.18R | 1.32 | [+0.05, +0.32] | PAPER-CANDIDATE | **REFUTADO → REJECT**: resultado depende do tie-break de mesmo timestamp (A→Z é o máximo de 23 ordens; ordem do engine: T=407 exp +0.07R PF 1.12); IC por clusters cruza 0; edge concentrado em holds >10 barras (o engine tinha max-hold 240h — agora 200 dias para 1d). |
+| B&R+RSI+TSMOM (sem LS) | mistas | 499 | +0.19R | 1.33 | [+0.06, +0.33] | PAPER-CANDIDATE | **REFUTADO → REJECT** (contém componentes rejeitados; ordem do engine +0.15R; com funding +0.12R). |
+| **E4 = LS SHORT·BTC-up + TSMOM** | 2.3y | 351 | +0.28R | 1.46 | [+0.11, +0.45] | ACCEPT (literal; trio guards maxDD 24.0R vs bar 25R) | **REBAIXADO → PAPER-CANDIDATE (frágil)**: mediana sobre ordens aleatórias +0.24R (3/10 passam o bar ACCEPT); OOS PRE-8000 +0.24R nominal / ≈+0.18R com o sleeve LS à sua expectativa OOS; bootstrap por blocos FULL [+0.02, +0.51], OOS [−0.12, +0.53]; com funding e +15 bps +0.18R. Não é candidato a live. |
+| E4 com dd-guard X=12 (calibração) | 2.3y | 430 | +0.29R | 1.48 | [+0.14, +0.45] | PAPER (calibração) | não revisto (limite de sessão) — maxDD 16.9R vs 24.0R trio, 0.3% do calendário parado |
+
+**Paridade de feed (engine redesenhado, MEXC futures 8000×1h, 1d×1500, dados até 2026-09-07)**: com tie-break A→Z (o que os scripts de investigação usavam) ENGINE T=471 exp +0.15R PF 1.25; **com a ordem de scan real do engine** ENGINE T=463 exp +0.08R PF 1.12, LS gated T=49 exp −0.05R PF 0.94, TSMOM T=414 exp +0.09R PF 1.15 (2026: −0.02R). O sleeve LS SHORT·BTC-up é NEGATIVO no feed MEXC nos últimos 11 meses, a mesma janela em que era +0.37R em Binance — o padrão não é sequer robusto ao feed. A ordem de tie-break vale ~0.07R/trade neste livro; o harness passou a usar a ordem do engine. Relatório oficial Binance 2.3y em `script/validate-pipeline-report.md`; braços `--slip=15` e `--feed=mexc` em `script/audit/validate-pipeline-report-*.md`.
+
+**Conclusão honesta**: nenhum componente atinge ACCEPT-LIVE depois da revisão; o livro E4 é a melhor configuração disponível e é um candidato a PAPER, com IC OOS a cruzar zero. Live continua OFF até ≥ +0.3R sobre ≥ 120 trades de paper honesto em dados posteriores a 2026-09-02, com bootstrap por blocos (não iid) no teste de aceitação.
+
+**Implementado (branch `fix/ls-lookahead-entry`, tsc limpo, 179 testes):**
+1. `server/strategies/tsmom.ts` (novo) — TSMOM 1d, spec da Fase 6, `defaultPaused.live`.
+2. `server/strategies/types.ts` — `regimeGate`, `defaultPaused`, `regimeAllows()`; `liquidity-sweep.ts` — `regimeGate: { long: [], short: ["up"] }`.
+3. `server/strategies/registry.ts` — activo: LS gated + TSMOM; B&R e RSI retirados (ficheiros mantidos).
+4. `server/engine-config.ts` (novo) — GUARD (30d / 12R / 6R / 24h), MAX_HOLD (1d = 200 dias), SCAN; importado por engines e harness.
+5. `server/portfolio-guards.ts` — `evaluateDrawdownGuard` (histerese + halt limitado + rebase); engines usam-no e o trio diário/rolling/kill-switch saiu (funções antigas mantidas para o harness legado). UI: `GuardsPanel` mostra o novo guard; payload `guards.drawdown`.
+6. `server/scan-scheduler.ts` (novo) — scans ao fecho da vela +30s / retry +3.5 min (setTimeout encadeado, sem sobreposição).
+7. `server/routes.ts` — gate de regime nos dois scans; defaults de pausa materializados no boot a partir do registry (fallback legado removido); filtro de volume $30M removido; spread do live lido nos tickers da Kraken (`getSpreads`); verificação de lotes antes de abrir (`getSizePrecision`, TP1/runner > 0, under-size ≤ 25%); `/api/engine/config` expõe `drawdownGuard`, `regimeGates`, `scan`.
+8. Harness — `--slip=bps` com re-gate no fill, gate `ddGuard` + `regimeGate`, tie-break = ordem de scan do engine, suporte 1d (1500 velas), `--feed=mexc` (`script/audit/feed.ts`); `lib.ts` idem (`guard: "dd"|"trio"`, `regimeGate`).
+9. Testes novos: `scan-scheduler.test.ts`, `tsmom-strategy.test.ts`, dd-guard em `portfolio-guards.test.ts`.
+
+**Não feito / em aberto**: remoção do multiplicador BTC ×1.25/×0.75 (A/B pendente; LONG·BTC-up já não é negociado, o multiplicador só afecta SHORT·up e TSMOM); marks do paper/live no mark da Kraken (P7); módulo único de constantes completo (P6, parcial); coluna `engine_version` no journal; bootstrap por blocos no gate de aceitação.
+
+**Validação oficial do engine redesenhado (2026-09-07, `script/validate-pipeline.ts`, Binance 20000×1h ≈ 2.3 anos + 1d×1500, ordem de scan do engine como tie-break, guard de drawdown, gates de regime, $500/2%)**: ENGINE T=566 WR 39% PF 1.15 sumR +54.8 exp **+0.10R** (2026: T=120, +0.11R), balance maxDD 50.8%; sleeves: LS SHORT·BTC-up T=146 exp +0.07R PF 1.10; TSMOM T=420 exp +0.11R PF 1.18. Feed MEXC (8000×1h): exp +0.08R, LS −0.05R, TSMOM +0.09R. Comparação com o engine anterior honesto na mesma janela: PF 0.92, exp −0.06R, maxDD 203R. O redesenho passa de negativo a marginalmente positivo, mas fica ABAIXO do bar PAPER (+0.15R) e é sensível à ordem de tie-break (a investigação, com A→Z, dava +0.28R para o mesmo livro). Veredito: hipótese de paper, live OFF. Braço `--slip=15` em `script/audit/validate-pipeline-report-binance-slip15.md`.
+**Braço --slip=15 (mesma corrida, +15 bps adversos em cada fill, SL/TP fixos, re-gate no fill)**: ENGINE T=559 WR 39% PF 1.08 sumR +26.8 exp **+0.05R** (2026: T=113, +0.05R), balance maxDD 52.1%.

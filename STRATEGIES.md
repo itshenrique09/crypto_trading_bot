@@ -19,7 +19,7 @@ Full technical reference for all trading strategies implemented in the bot.
 
 ## Overview
 
-**Active set (frozen 2026-07-02)**: Liquidity Sweep (1H, 40 coins) · RSI Divergence (1H) · Break & Retest (4H).
+**Active set (redesigned 2026-09-03, PAPER ONLY)**: Liquidity Sweep (1H, 40 coins, **SHORT only while BTC daily trend is UP**) · Trend Breakout 1D / TSMOM (1D, 40 coins). RSI Divergence and Break & Retest were **retired** the same day (selection-bias rule, section 6). Both active strategies start paused on live; see README "Status 2026-09-03".
 
 > **2026-09-01 — every number below this line that predates Sep 2026 was measured with a look-ahead entry.** `liquiditySweepSignal` returned the sweep candle's close as `entry`; with the confirmation-bar rule (Apr 2026) 93% of signals are decided 1–2 bars later, when price had already moved a median 57 bps (mean 79, p90 190) in the trade's favour on a ~145 bps stop. Harness, paper engine and R math all booked that phantom fill. Honest re-measurement (entry = signal candle's close, `script/validate-pipeline.ts` 2026-09-01, 8000×1h): **ENGINE PF 1.08 · +45R · exp +0.06R**; **Liquidity Sweep PF 0.96 · exp −0.03R** (was PF 1.85 / +0.54R); Break & Retest PF 1.74 · exp +0.45R (T=92); RSI Divergence PF 1.79 · exp +0.48R (T=46). Over 2.3 years (20000×1h) the honest system is exp +0.04R with a 161R drawdown. Honest variants of LS tested in `script/audit/phase8-collapse.ts` — floors 60–80, EQ-pool only, wick/vol gates, same-bar sweeps only, entering at the sweep bar without confirmation, a resting limit at the sweep close — none has edge; only "block LONG when BTC daily is up" improves the portfolio (PF 1.20, exp +0.15R) and it remains a hypothesis for paper. The Apr 2026 "+18.4% netR" credited to the confirmation-bar rule was the look-ahead itself: waiting for confirmation while keeping the pre-confirmation price is free favourable drift.
 
@@ -302,6 +302,8 @@ Alternative: prior bar rejected AND current close confirms continuation.
 
 ## 3. Break & Retest
 
+> **RETIRED — 2026-09-03 (phase 9, selection-bias rule).** On its 6 hand-picked coins the honest harness gives +0.37R (T=98, 27 trades/yr, top-5 trades = 52% of the profit); on the full 40-coin universe with identical parameters it is −0.02R (PF 0.98, 430 trades, years alternating sign) and −0.12R on the 34 non-preferred coins. The 6-coin result is a top-6-of-40 pick of a zero-mean strategy. File kept for research (`server/strategies/break-retest.ts`).
+
 **File**: `server/strategies/break-retest.ts`  
 **Timeframe**: 4H  
 **Philosophy**: Institutional money is responsible for the initial break. After the break, price often returns to the breakout level where weak hands get stopped out and strong hands add. Enter the retest with price showing rejection, riding the continuation.
@@ -399,6 +401,8 @@ ATR% > 5.5% → skip (unpredictable price action, SL gets blown frequently).
 
 ## 4. RSI Divergence
 
+> **RETIRED — 2026-09-03 (phase 9, selection-bias rule).** On ATOM/INJ over 2.25 years the honest harness gives +0.03R (the +0.48R quoted in Aug 2026 was the last 11 months only, and 2025 was −0.13R); on the full 40-coin universe −0.13R with a CI95 entirely below zero (T=1207, 11/40 coins positive) and negative under +15 bps slippage on every list. File kept for research (`server/strategies/rsi-divergence.ts`).
+
 **File**: `server/strategies/rsi-divergence.ts`  
 **Timeframe**: 1H  
 **Philosophy**: When price makes a new extreme but RSI does not confirm it, momentum is weakening. This hidden divergence between price and oscillator precedes reversals. Only trade divergence in the direction of the macro trend (EMA200).
@@ -466,8 +470,22 @@ ATR% > 5.5% → skip (unpredictable price action, SL gets blown frequently).
 **TP1**: Nearest opposite-side structural level (≥ 2R from the real entry, enforced internally).  
 **TP2**: Opposing liquidity pool (previous low for a high-sweep, previous high for a low-sweep).  
 **Confidence floor**: 68 (60 between 2026-08-14 and 2026-09-01; the 60–67 band went 5 wins in 32 real trades).  
+**Regime gate (2026-09-03)**: `regimeGate: { long: [], short: ["up"] }` — LONG is never traded; SHORT only while the BTC daily trend (EMA50 ±1% on closed daily candles) is UP. Honest 2.3-year book without the gate: exp −0.09R, PF 0.89 (LONG·BTC-up is the worst cell at −0.57R). With the gate: T=559, exp +0.26R, PF 1.37, 29/40 coins positive — **but** the pattern was formed on the last 11 months; on the prior 17 months alone it is +0.09R with one negative half, so it is a forward paper hypothesis, not a validated edge (`script/audit/phase9-report-regime.md` and the review verdicts in `AUDIT-NOTES.md`).  
 **Cooldown**: 12h per symbol.  
 **Min candles**: 220.
+
+---
+
+## 6. Trend Breakout 1D (TSMOM)
+
+**File**: `server/strategies/tsmom.ts` (strategy id: `tsmom-daily`)  
+**Timeframe**: 1D (closed daily candles)  
+**Philosophy**: time-series momentum — a close beyond the prior 55-day Donchian channel tends to continue for weeks. Specified in the Aug-2026 audit (Fase 6) before any run and never tuned; re-evaluated in phase 9 once the Liquidity Sweep stopped occupying every slot.
+
+**Entry**: daily close above the highest high of the PRIOR 55 days → LONG; below the lowest low → SHORT (the lookback excludes the signal day — no look-ahead). Entry price = that close.  
+**SL**: 2.0 × ATR(20d). **TP1**: 1.75 × stop distance. **TP2**: 3.5 × stop distance. Production exits (TP1 60% → break-even → 2R trail).  
+**Confidence**: fixed 70. **Cooldown**: 72h. **Max hold**: 200 days. **Universe**: the same 40 coins as LS (no new coin picking).  
+**Honest numbers** (1d × 1500 ≈ 4 years, engine gates, real fees): standalone T=403, exp +0.18R, PF 1.32, 24/40 coins positive, avg hold 28 days — **with the engine's actual scan order as tie-break exp +0.07R, PF 1.12** (all daily signals share one timestamp; with maxOpen binding, the order decides which are taken; the edge lives in holds longer than 10 bars). Funding drag on multi-week holds ≈ −0.05R/trade. Verdict of record after adversarial review: REJECT standalone, PAPER-CANDIDATE only inside the book with the gated LS.
 
 See `server/strategies/liquidity-sweep.ts` for the exact thresholds and reclaim logic.
 
@@ -517,18 +535,18 @@ These filters run in the paper and live engines **after** a strategy returns a s
 | Symbol exposure | Any position already open on the symbol | One position per symbol, no averaging in |
 | Cooldown | Closed < cooldownHours ago | Avoid re-entering same zone |
 | Preferred symbols | Signal not in strategy's symbol list | Only trade proven edge |
-| Weekly trend (4H only) | 4H signal against weekly direction | Saved ~45R in 2026 — multi-day holds need weekly alignment |
+| Weekly trend (4H only) | 4H signal against weekly direction | Multi-day holds need weekly alignment (honest value +8R over 2.3y — the "+45R" once quoted was a stale-entry number); no 4H strategy is active today |
+| Regime gate (2026-09-03) | Strategy's `regimeGate` excludes the direction for the current BTC daily trend | LS: LONG never, SHORT only in BTC-up; declared on the strategy, applied identically by both engines and the harness |
+| Signal freshness (2026-09-01) | Candle closed > 10 min ago | A sweep reversal is a moment; restarts/un-halts no longer enter stale setups |
 | Funding rate | Funding > +0.1% for LONG, < −0.1% for SHORT | Avoid crowded side (live market state, unmodelable in backtest) |
 | Min SL distance | SL closer than 0.6% | Fees would dominate the risk |
-| R:R gate | reward / risk < 1.5 | Minimum acceptable trade |
-| Volume | 24h volume < $30M USDT | Avoid illiquid markets |
-| Spread | Bid/ask > 0.20% | Bad fills |
-| Correlation | Group already has 3 open positions | Avoid overconcentration (raised 2→3 with the 43-coin universe; at 2 the expansion bottlenecked) |
-| Daily drawdown | Today's P&L < −4R | Circuit breaker |
-| Rolling 7d drawdown | 7-day P&L < −6R | Cuts genuine loss streaks (+18R in final config) |
-| Per-strategy kill-switch | Strategy 7d netR < −3R over ≥4 trades | Pauses a strategy whose regime broke |
-| Max positions | 10 open positions reached | Capacity A/B Jul 2026: 10 beat 6 on R *and* maxDD; 12 = saturation |
-| Max hold | Age > 200h (1H) / 240h (4H) → close at market | Backtest parity; frees the symbol slot (a stale trade once blocked XRP 5 weeks) |
+| R:R gate | reward / risk < 1.5 | Minimum acceptable trade — re-checked on the real fill (paper: MEXC ticker; live: Kraken fill) |
+| Spread | Bid/ask > 0.20% on the executing venue (Kraken for live, MEXC for paper) | Bad fills. The $30M volume gate was removed 2026-09-03: it never fired |
+| Correlation | Group already has 3 open positions | Avoid overconcentration (neutral in the honest harness; kept) |
+| Drawdown guard (2026-09-03) | Realized equity in trade-R ≥ 12R below its 30-day peak → halt; resume ≤ 6R; halt ≤ 24h then the peak is re-based | ONE circuit breaker replacing daily −4R / rolling-7d −6R / kill-switch, which measured the same losses three times and kept both engines halted ~10 of 18 days in Aug 2026 |
+| Max positions | 10 open positions reached | Capacity A/B Jul 2026: 10 beat 6 on R *and* maxDD; 12 = saturation (stale-entry numbers; kept) |
+| Max hold | Age > 200h (1H) / 240h (4H) / 200 days (1D) → close at market | Backtest parity; frees the symbol slot |
+| Lot feasibility (live, 2026-09-03) | Entry lot, TP1 lot or runner lot rounds to zero, or entry under-sized > 25% at the venue's precision | A position that cannot be split at TP1 or protected is not opened |
 
 **Removed Jul 2026** — each was A/B-tested in `script/validate-pipeline.ts` (full portfolio, ALL + 2026 windows) and cost money in both:
 
