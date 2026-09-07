@@ -6,7 +6,7 @@ Automated crypto futures trading bot with paper trading, live execution (Kraken 
 
 ## Overview
 
-The bot scans its coin universe on a 3-minute cycle, applies the active strategies, and opens positions when a high-confidence setup passes every engine gate. Paper trading runs in parallel with live trading — both use identical signal logic, gates and exit management, so results are directly comparable.
+The bot scans its coin universe at every candle close (+30s, one retry at +3.5 min), applies the active strategies, and opens positions when a setup passes every engine gate, including the per-strategy regime gate and the portfolio drawdown guard. Paper trading runs in parallel with live trading — both use identical signal logic, gates and exit management, so results are directly comparable.
 
 ### Architecture
 
