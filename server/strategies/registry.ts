@@ -38,6 +38,16 @@ import { tsmomStrategy } from "./tsmom";
 //   as PAPER-FIRST because the margins are thin and the regime pattern was
 //   formed on recent data. Live stays paused (defaultPaused.live) until the
 //   standing gate is met: ≥ +0.3R over ≥ 120 honest paper trades.
+//
+// 2026-09-23 (Fase 10, real fills): the Liquidity Sweep cell above did NOT
+//   survive contact with the venue — LIVE −0.23R over 53 trades, PAPER −0.51R
+//   over 20, engine feed in the harness −0.12R over 108; only Binance spot said
+//   +0.26R. It is PAUSED in both modes by policy (defaultPaused, rev 2) and
+//   stays in the registry for research and the Settings toggle. The paper book
+//   is TSMOM alone from here; TSMOM stays paused on live until the gate is met.
+//   Pause defaults are applied per strategy and per revision at boot
+//   (server/engine-lifecycle.ts) — the previous "only when no list exists"
+//   rule let both strategies trade live from the first scan after the deploy.
 const ALL_STRATEGIES: Strategy[] = [
   liquiditySweepStrategy,
   tsmomStrategy,

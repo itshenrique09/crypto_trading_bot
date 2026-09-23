@@ -28,6 +28,7 @@ import { planLiveReconciliation } from "./live-reconciliation";
 import { buildAdapter, isExchangeId, venueSymbol, exitPriceFromFills, EXCHANGES, type ExchangeId, type ExchangePosition, type ExchangeFill, type ExchangeAdapter, type ResolvedExit } from "./exchange";
 import { buildLiveTp1JournalUpdate } from "./live-protection";
 import { validateLiveStartConnection } from "./live-start";
+import { applyPausePolicy, decideEnginesToStart, parseGuardState, serializeGuardState, parseAppliedPolicy, parseIdList, ENGINE_MODES, ENGINE_RUNNING_KEYS, GUARD_STATE_KEYS, PAUSE_POLICY_APPLIED_KEY } from "./engine-lifecycle";
 import { applyPartialClose, estimateOpenTradePnl, finalizeTradeAccounting, roundPriceForJournal, TRADE_COSTS } from "./trade-accounting";
 import { simulateManagedExit } from "./trade-exits";
 import crypto from "crypto";
@@ -2030,8 +2031,15 @@ export async function registerRoutes(server: Server, app: Express) {
   const MAX_SPREAD_PCT = 0.002;
 
   // ── Portfolio drawdown-guard state, one per engine (transitions happen in the scans) ──
+  // Loaded from bot_settings at boot and written on every transition: an
+  // in-memory-only state lost its re-base at each restart and re-halted the
+  // engine 24h per boot while the raw 30-day drawdown was ≥ 12R (Fase 10).
   let paperGuardState: DrawdownGuardState = emptyDrawdownGuardState();
   let liveGuardState: DrawdownGuardState = emptyDrawdownGuardState();
+  async function persistGuardState(mode: "paper" | "live", state: DrawdownGuardState): Promise<void> {
+    try { await setSetting(GUARD_STATE_KEYS[mode], serializeGuardState(state)); }
+    catch (err) { console.error(`[guards] could not persist ${mode} guard state:`, err); }
+  }
   /** Status-endpoint view of the guard. `rolling` mirrors the drawdown guard so the existing UI keeps working; `daily` is retired. */
   function guardsPayload(state: DrawdownGuardState, view: DrawdownGuardEval, overrideUntilMs: number | null) {
     const endsAt = state.halted && state.haltedSinceMs != null ? new Date(state.haltedSinceMs + GUARD_OPTS.maxHaltMs).toISOString() : null;
@@ -2155,12 +2163,15 @@ export async function registerRoutes(server: Server, app: Express) {
     paper: "disabled_strategies_paper",
     live: "disabled_strategies_live",
   } as const;
-  // Pause defaults live in the REGISTRY (Strategy.defaultPaused) and are written
-  // to storage once, at boot, when a mode has no pause list yet. The previous
-  // scheme — a DEFAULT list applied only when no settings row existed, with a
-  // legacy single-list fallback — silently kept RSI Divergence trading for 18
-  // days on an install that already had a row (audit Fase 8). Reading is now
-  // parse-only: what is stored is what runs.
+  // Pause defaults live in the REGISTRY (Strategy.defaultPaused) and are applied
+  // PER STRATEGY AND PER POLICY REVISION at boot (server/engine-lifecycle.ts
+  // applyPausePolicy). Two earlier schemes failed the same way: a DEFAULT list
+  // applied only when no settings row existed (kept RSI Divergence trading live
+  // for 18 days, Fase 8) and a per-mode list materialised only when the mode had
+  // no list yet (the 2026-09-07 redesign shipped `defaultPaused.live = true` for
+  // both strategies, the VPS already had a list, and both traded live from the
+  // first scan after the deploy — Fase 10). Reading stays parse-only: what is
+  // stored is what runs.
   async function getDisabledStrategyIds(mode: "paper" | "live"): Promise<Set<string>> {
     const raw = await getSetting(DISABLED_STRATEGIES_KEYS[mode]);
     if (raw == null) return new Set();
@@ -2172,14 +2183,22 @@ export async function registerRoutes(server: Server, app: Express) {
       return new Set();
     }
   }
-  /** Boot-time: materialise registry defaults for any mode that has no pause list yet. */
-  async function materialiseStrategyDefaults(): Promise<void> {
-    for (const mode of ["paper", "live"] as const) {
-      const existing = await getSetting(DISABLED_STRATEGIES_KEYS[mode]);
-      if (existing != null) continue;
-      const paused = getAllStrategies().filter(s => s.defaultPaused?.[mode]).map(s => s.id);
-      await setSetting(DISABLED_STRATEGIES_KEYS[mode], JSON.stringify(paused));
-      console.log(`[strategies] ${mode}: no pause list found — materialised registry defaults: ${paused.length ? paused.join(", ") : "(none paused)"}`);
+  /** Boot-time: apply each strategy's registry default pause once per policy revision. */
+  async function applyStrategyPausePolicy(): Promise<void> {
+    const applied = parseAppliedPolicy(await getSetting(PAUSE_POLICY_APPLIED_KEY));
+    const lists = {
+      paper: parseIdList(await getSetting(DISABLED_STRATEGIES_KEYS.paper)),
+      live: parseIdList(await getSetting(DISABLED_STRATEGIES_KEYS.live)),
+    };
+    const result = applyPausePolicy(getAllStrategies(), applied, lists);
+    if (result.changes.length === 0 && JSON.stringify(result.applied) === JSON.stringify(applied)) return;
+    for (const mode of ENGINE_MODES) {
+      await setSetting(DISABLED_STRATEGIES_KEYS[mode], JSON.stringify(Array.from(result.lists[mode])));
+    }
+    await setSetting(PAUSE_POLICY_APPLIED_KEY, JSON.stringify(result.applied));
+    for (const c of result.changes) {
+      console.log(`[strategies] pause policy rev ${c.rev}: ${c.id} ${c.paused ? "PAUSED" : "un-paused"} on ${c.mode}`);
+      logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: c.id, result: "filtered", reason: `Política de pausa (rev ${c.rev}) aplicada no arranque: ${c.id} ${c.paused ? "pausada" : "activa"} em ${c.mode}` });
     }
   }
   async function getEnabledStrategies(mode: "paper" | "live"): Promise<Strategy[]> {
@@ -2497,8 +2516,11 @@ export async function registerRoutes(server: Server, app: Express) {
 
   async function paperScan() {
     try {
-      const mode = await getSetting("mode");
-      if (mode !== "paper" || !paperStatus.running) return;
+      // Only the engine's own running flag gates the scan. Until 2026-09-23 this
+      // also required the shared `mode` setting to be "paper" — and pressing
+      // Start on LIVE wrote mode="live", muting paper entries for 11 days while
+      // paperCheck kept managing positions (Fase 10). The engines are independent.
+      if (!paperStatus.running) return;
 
       const strategies = await getEnabledStrategies("paper");
       if (strategies.length === 0) return;
@@ -2532,6 +2554,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (guardEval.transition !== "none") {
         logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `Drawdown guard ${guardEval.transition}: dd ${guardEval.ddR.toFixed(1)}R from 30d peak (halt ≥ ${GUARD.haltR}R, resume ≤ ${GUARD.resumeR}R, max ${GUARD.maxHaltHours}h)` });
         console.log(`[paper-scan] drawdown guard ${guardEval.transition} (dd ${guardEval.ddR.toFixed(1)}R)`);
+        await persistGuardState("paper", paperGuardState);
       }
       if (paperGuardState.halted && !(await ddOverrideUntil("paper", "rolling"))) return;
 
@@ -2971,12 +2994,14 @@ export async function registerRoutes(server: Server, app: Express) {
   }
 
   app.post("/api/paper/start", async (_req, res) => {
-    await setSetting("mode", "paper");
+    await setSetting("mode", "paper"); // legacy UI hint only — engines no longer read it
+    await setSetting(ENGINE_RUNNING_KEYS.paper, "true");
     startPaperEngine();
     res.json({ running: true });
   });
 
   app.post("/api/paper/stop", async (_req, res) => {
+    await setSetting(ENGINE_RUNNING_KEYS.paper, "false");
     stopPaperEngine();
     res.json({ running: false });
   });
@@ -3680,6 +3705,7 @@ export async function registerRoutes(server: Server, app: Express) {
       if (liveGuardEval.transition !== "none") {
         logScan({ time: new Date().toISOString(), symbol: "PORTFOLIO", strategy: "guards", result: "filtered", reason: `LIVE drawdown guard ${liveGuardEval.transition}: dd ${liveGuardEval.ddR.toFixed(1)}R from 30d peak (halt ≥ ${GUARD.haltR}R, resume ≤ ${GUARD.resumeR}R, max ${GUARD.maxHaltHours}h)` });
         console.log(`[live-scan] drawdown guard ${liveGuardEval.transition} (dd ${liveGuardEval.ddR.toFixed(1)}R)`);
+        await persistGuardState("live", liveGuardState);
       }
       if (liveGuardState.halted && !(await ddOverrideUntil("live", "rolling"))) return;
 
@@ -4272,12 +4298,14 @@ export async function registerRoutes(server: Server, app: Express) {
       const client = await buildLiveAdapter();
       validateLiveStartConnection(await client.testConnection());
       startLiveEngine();
-      await setSetting("mode", "live");
+      await setSetting("mode", "live"); // legacy UI hint only — engines no longer read it
+      await setSetting(ENGINE_RUNNING_KEYS.live, "true");
       res.json({ running: true });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   app.post("/api/live/stop", async (_req, res) => {
+    await setSetting(ENGINE_RUNNING_KEYS.live, "false");
     stopLiveEngine();
     res.json({ running: false });
   });
@@ -4388,20 +4416,38 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // ── AUTO-START on server boot ──────────────────────────────────────
-  // If the mode was "paper" before the server restarted (PM2 restart etc.),
-  // resume scanning automatically — no need to click "Start" after every deploy.
-  // Awaited so that registerRoutes doesn't return before the engine is armed:
+  // Every engine that was running before the restart comes back (per-engine
+  // persisted flags; server/engine-lifecycle.ts decideEnginesToStart). Until
+  // 2026-09-23 only the engine named by the single `mode` flag was restarted,
+  // so a deploy or pm2 restart silently left the other one off — the paper
+  // benchmark for 11 days, or (with mode="paper") live positions unmanaged.
+  // Legacy installs without the flags are migrated once from `mode` plus the
+  // open positions per mode (an engine with open positions must run).
+  // Awaited so that registerRoutes doesn't return before the engines are armed:
   // prevents any early /api/paper/start request from racing against this and
   // double-registering the interval (which would double-fire every scan).
   try {
-    await materialiseStrategyDefaults();
-    const mode = await getSetting("mode");
-    if (mode === "paper") {
-      console.log("[auto-start] mode=paper detected — starting paper engine");
-      startPaperEngine();
-    } else if (mode === "live") {
-      console.log("[auto-start] mode=live detected — starting live engine");
-      startLiveEngine();
+    await applyStrategyPausePolicy();
+    paperGuardState = parseGuardState(await getSetting(GUARD_STATE_KEYS.paper));
+    liveGuardState = parseGuardState(await getSetting(GUARD_STATE_KEYS.live));
+    const bootJournal = await getJournal(10_000);
+    let liveConfigured = false;
+    try { await buildLiveAdapter(); liveConfigured = true; } catch { /* no venue configured */ }
+    const decision = decideEnginesToStart({
+      paperRunning: await getSetting(ENGINE_RUNNING_KEYS.paper),
+      liveRunning: await getSetting(ENGINE_RUNNING_KEYS.live),
+      mode: await getSetting("mode"),
+      openPaper: bootJournal.filter(e => e.mode === "paper" && e.outcome === "open").length,
+      openLive: bootJournal.filter(e => e.mode === "live" && e.outcome === "open").length,
+      liveConfigured,
+    });
+    console.log(`[auto-start] ${decision.reason} → paper=${decision.paper} live=${decision.live}`);
+    for (const w of decision.warnings) console.warn(`[auto-start] WARNING: ${w}`);
+    if (decision.migrated) {
+      await setSetting(ENGINE_RUNNING_KEYS.paper, String(decision.paper));
+      await setSetting(ENGINE_RUNNING_KEYS.live, String(decision.live));
     }
+    if (decision.paper) startPaperEngine();
+    if (decision.live) startLiveEngine();
   } catch (err) { console.error("[auto-start] failed:", err); }
 }

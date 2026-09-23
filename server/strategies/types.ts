@@ -43,11 +43,14 @@ export interface Strategy {
    */
   regimeGate?: { long?: BtcDailyTrend[]; short?: BtcDailyTrend[] };
   /**
-   * Whether the strategy starts paused in each mode on a fresh install. The
-   * engine materialises this into bot_settings at boot when no pause list
-   * exists yet; the Settings UI can flip it afterwards.
+   * Whether the strategy starts paused in each mode. Applied to bot_settings at
+   * boot ONCE per `pausePolicyRev` (server/engine-lifecycle.ts) — for a strategy
+   * never seen by this install, or whenever the revision is bumped because the
+   * registry re-decided. Between revisions the Settings UI toggles rule.
    */
   defaultPaused?: { paper?: boolean; live?: boolean };
+  /** Bump when `defaultPaused` is re-decided so existing installs pick it up. Defaults to 1. */
+  pausePolicyRev?: number;
   /**
    * Maximum concurrent open positions for THIS strategy (a slot sleeve inside
    * the portfolio cap). Multi-week strategies otherwise occupy every slot and

@@ -34,7 +34,9 @@ async function buildAll() {
   ];
   const externals = allDeps.filter((dep) => !allowlist.includes(dep));
   const buildCommit = readGit(["rev-parse", "--short", "HEAD"], "unknown");
-  const buildDirty = readGit(["status", "--porcelain"], "").length > 0;
+  // Tracked modifications only: untracked files (data.db, .env, backups) live
+  // next to the code on the VPS and made every production build read "+dirty".
+  const buildDirty = readGit(["status", "--porcelain", "--untracked-files=no"], "").length > 0;
   const buildTime = new Date().toISOString();
 
   await esbuild({

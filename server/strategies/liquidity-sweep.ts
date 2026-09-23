@@ -106,7 +106,16 @@ export const liquiditySweepStrategy: Strategy = {
   // it is +0.09R with one negative half, so this is PAPER-FIRST under the
   // standing gate (≥ +0.3R over ≥ 120 honest paper trades) before any live.
   regimeGate: { long: [], short: ["up"] },
-  defaultPaused: { paper: false, live: true },
+  // PAUSED IN BOTH MODES since 2026-09-23 (pause policy rev 2). The one cell the
+  // redesign kept — SHORT while BTC daily is up, conf ≥ 68 — has now been
+  // measured on real fills: LIVE −0.23R over 53 trades (Aug 17 → Sep 21, Kraken),
+  // PAPER −0.51R over 20, and the engine's own feed in the harness −0.12R over
+  // 108 (script/audit/validate-pipeline-report-mexc.md). The +0.26R that
+  // justified the cell came from Binance spot only. Pre-registered rule: a
+  // sleeve that is negative on the engine feed AND on real fills does not trade.
+  // Kept in the registry (research, Settings toggle) — see AUDIT-NOTES Fase 10.
+  defaultPaused: { paper: true, live: true },
+  pausePolicyRev: 2,
 
   analyze(candles: OHLCV[]): StrategySignal | null {
     const sig = liquiditySweepSignal(candles);
