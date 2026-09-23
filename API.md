@@ -100,7 +100,7 @@ The **real constants the engines run with** — same identifiers the scan/check 
 
 ### `GET /api/strategies`
 Active registry: `[{ id, name, description, interval, preferredSymbols: string[], minCandles, cooldownHours, enabled, paperEnabled, liveEnabled, killSwitchPaused: { paper, live } }]`.
-`paperEnabled`/`liveEnabled` are the **manual pause switches per mode** (Settings UI; persisted in `bot_settings.disabled_strategies_paper` / `disabled_strategies_live`). On first boot with no pause list for a mode, the engine materialises the registry's `defaultPaused` (2026-09-03: both active strategies start paused on LIVE and active on PAPER); the legacy single-list fallback was removed. `enabled` = enabled on at least one mode (backward compat). `killSwitchPaused` is always empty since 2026-09-03 (the per-strategy kill-switch was retired in favour of the portfolio drawdown guard); the field is kept for old clients. Signal selection among enabled strategies stays automatic.
+`paperEnabled`/`liveEnabled` are the **manual pause switches per mode** (Settings UI; persisted in `bot_settings.disabled_strategies_paper` / `disabled_strategies_live`). At boot the engine applies each strategy's registry `defaultPaused` **once per `pausePolicyRev`** (`bot_settings.strategy_pause_policy_applied` records what was applied; 2026-09-23: Liquidity Sweep paused on both modes at rev 2, TSMOM paused on live), whatever the lists already contain — the earlier "only when the mode has no list" rule left both strategies enabled on live after the 2026-09-07 deploy. Between revisions the Settings toggles rule; the legacy single-list fallback was removed. `enabled` = enabled on at least one mode (backward compat). `killSwitchPaused` is always empty since 2026-09-03 (the per-strategy kill-switch was retired in favour of the portfolio drawdown guard); the field is kept for old clients. Signal selection among enabled strategies stays automatic.
 Default: `rsi-divergence` starts paused on both modes (Aug 2026 audit — negative marginal portfolio contribution in both harness windows).
 
 ### `PUT /api/strategies/:id/toggle`
@@ -171,7 +171,7 @@ Row shape (all endpoints):
 
 | Method & path | Purpose |
 |---|---|
-| `POST /api/paper/start` / `POST /api/paper/stop` | Engine control → `{ running }` (start also sets persisted mode to `paper`) |
+| `POST /api/paper/start` / `POST /api/paper/stop` | Engine control → `{ running }`; persists `bot_settings.paper_engine_running` so the engine comes back after a restart (start also writes the legacy `mode = paper`, which nothing reads any more) |
 | `GET /api/paper/status` | `{ running, lastCheck, lastScan, coinsScanned, intelligence: { btcRegime, maxOpen, direction, pausedStrategies, … } \| null, openTrades, totalPaperTrades, strategyCounts, capital: { initial, balance, totalPnlUsd, riskPct, leverage, oneR, todayPnlUsd, todayR } }` |
 | `POST /api/paper/capital` | `{ capital? ≤1e6, riskPct? ≤5, leverage? 1–20 }` — recomputes balance from historical P&L |
 | `GET /api/paper/prices` | Server-computed marks for open paper trades: `[{ id, symbol, currentPrice, unrealizedPnl (%), unrealizedUsd, realizedPnlUsd, tp1Hit, progressPct, slProgress, … }]` |
@@ -188,7 +188,7 @@ Cadence: position management every **30s**, scan every **3min**; auto-starts on 
 |---|---|
 | `POST /api/live/config` | `{ exchange: "kraken"\|"mexc", apiKey, apiSecret, riskPct ≤3, leverage 1–20 }`. Sentinel `"__keep__"` (or omission) preserves stored credentials so risk/leverage can change alone. Keys stored AES-256-CBC encrypted. |
 | `POST /api/live/test` | Connection test → `{ ok, balance?, error? }` |
-| `POST /api/live/start` / `POST /api/live/stop` | Engine control; start throws if the connection test fails and sets mode `live` |
+| `POST /api/live/start` / `POST /api/live/stop` | Engine control; start throws if the connection test fails; persists `bot_settings.live_engine_running` so the engine comes back after a restart (independently of paper) |
 | `POST /api/live/close/:id` | Close a live position **on the venue** at market, cancel its resting stop/TP, then reconcile → `{ ok, closedOnVenue, exitPrice }` |
 | `GET /api/live/status` | Full venue snapshot (below) |
 
@@ -219,7 +219,7 @@ Venue notes: Kraken Futures is the default (perpetuals `PF_<BASE>USD`, BTC→XBT
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/settings/mode` / `PUT` | Persisted mode `signal\|auto\|paper` (drives engine auto-start on boot; `live` is set internally by `/api/live/start` and rejected here) |
+| `GET /api/settings/mode` / `PUT` | Legacy persisted mode `signal\|auto\|paper` (`live` is written by `/api/live/start` and rejected here). **Since 2026-09-23 it drives nothing**: auto-start uses the per-engine running flags (a one-time migration derives them from `mode` plus the open positions per mode), and paper scans no longer require `mode = paper` — the flag once muted paper entries for 11 days after a live Start (AUDIT-NOTES Fase 10) |
 | `GET /api/settings/feature-flags` | `{ regime_filter_enabled, short_macro_filter_enabled, btc_regime_gate_enabled, trailing_mode, trailing_r_multiple }` — ALL display-only. Trailing frozen at `r_multiple 2R` since Aug 2026 (validated optimum; the engines ignore the old settings, so paper and live cannot silently diverge) |
 | `PUT /api/settings/feature-flags` | No-op kept so stale clients don't 404 — exits and intelligence are frozen by validation; changes go through the pipeline harness. Trailing is also reported in `GET /api/engine/config` → `exits.trailingMode/trailingRMultiple` |
 

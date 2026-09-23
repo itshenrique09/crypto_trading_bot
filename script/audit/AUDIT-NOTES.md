@@ -625,3 +625,33 @@ Diferenças dentro do ruído (Δ ≈ 0.01R/trade; SE da média ≈ 0.05R) e o br
 Leitura: o livro continua PAPER-CANDIDATE. O sleeve LS SHORT·BTC-up é **negativo no feed do engine** (−0.12R, 108 trades) e ≈ 0 com slip realista; o que sustenta o livro é o TSMOM (+0.10R a +0.15R consoante o feed). O gate para live não muda: ≥ +0.3R em ≥ 120 trades paper honestos após 2026-09-02, com bootstrap por blocos.
 
 **Não alterado (baixo, registado):** exit_reason estruturado no journal (paper-006); pricing do undo com fills reais (live-08); flag de trades truncados no fim da janela do harness (harness-10).
+
+## Fase 10 — evidência real após o redesenho (exports de 2026-09-23)
+
+**Dados**: `trades-paper-2026-09-23.json` (45 linhas) e `trades-live-2026-09-23.json` (129 linhas), fornecidos pelo utilizador; preços actuais MEXC para marcar posições abertas; candles diários BTC (MEXC) para reconstruir o regime.
+
+**Resultado do engine redesenhado (linhas com `engine_version = 1.0.0@6385eb8`):**
+| | Fechados | R realizado | Abertos (marcados 2026-09-23 08:17Z) |
+|---|---|---|---|
+| Live (desde 2026-09-08T00:00Z) | 36 | −5.4R (−$3.14; equity ≈ $112, risco 0.5%) | 10 longs TSMOM ≈ +6.0R |
+| Paper | 1 | −1.1R | 10 longs TSMOM ≈ +9.5R |
+Live LS: 32 SHORTs, −1.3R, WR 25%, PF 0.95. Live TSMOM: 4 stops (−4.1R) + 10 abertos. Slippage real de entrada: mediana 9 bps, média 10.8 (`--slip=15` é conservador).
+
+**A célula LS que o redesenho manteve (SHORT · BTC diário up · conf ≥ 68) medida com fills reais:**
+| Fonte | T | exp |
+|---|---|---|
+| Live pré-deploy (17 Ago → 7 Set) | 21 | −0.52R |
+| Live pós-deploy (8 → 21 Set) | 32 | −0.04R |
+| **Live combinado** | **53** | **−0.23R** |
+| Paper (17 Ago → 20 Set) | 20 | −0.51R |
+| Harness feed MEXC (2.3y) | 108 | −0.12R |
+| Harness Binance spot (2.3y) — a única fonte positiva | 146 | +0.08R (a célula "aceite" na Fase 9 dava +0.26R) |
+As células que o gate de regime EXCLUIU eram as que faziam dinheiro live em Agosto (amostras pequenas): LONG·BTC-up +18.7R/19 (conf ≥ 68: +19.9R/18), SHORT·BTC-neutral +16.8R/11. Não é evidência para as reintroduzir (o harness honesto dá LONG·up −0.57R em 2.3y), mas é evidência suficiente contra a célula mantida. **Decisão (regra pré-registada — sleeve negativo no feed do engine E em fills reais não negoceia): LS pausado nos dois modos por política (rev 2).** O livro paper passa a ser o TSMOM sozinho; TSMOM live pausado por defeito até ao gate (≥ +0.3R em ≥ 120 trades paper honestos).
+
+**Três falhas operacionais confirmadas (workflow adversarial, 5 agentes, veredictos CONFIRMED):**
+1. **Live ligado desde 8 Set sem acção do utilizador.** `materialiseStrategyDefaults()` só escrevia os defaults quando o modo não tinha lista de pausa; a lista live existia (RSI pausado desde Agosto — e negociou live mesmo assim, o que prova a existência da linha), logo `defaultPaused.live = true` nunca chegou à BD e LS+TSMOM entraram live no primeiro scan (2026-09-08T00:00:33Z). Correcção: `applyPausePolicy` por estratégia e por revisão (`Strategy.pausePolicyRev`, `bot_settings.strategy_pause_policy_applied`).
+2. **Paper mudo de 8 a 18 Set.** `paperScan` começava por `if (mode !== "paper" || !paperStatus.running) return;` e `POST /api/live/start` escrevia `mode = live`. Carregar Start no live silenciou as entradas paper (paperCheck continuou a gerir posições: ADA #411 fechada em 8 Set 15:13). O mesmo padrão existe de 26 Ago a 6 Set. Voltou quando o utilizador carregou Start no paper (~18 Set). Correcção: gate de `mode` removido; flags de arranque por engine (`paper_engine_running`, `live_engine_running`); no boot arrancam TODOS os engines que estavam a correr (migração única a partir de `mode` + posições abertas por modo).
+3. **Estado do guard de drawdown em memória.** Cada restart perdia o re-base e voltava a parar o engine 24h enquanto a perda a 30 dias fosse ≥ 12R (replay: o paper teria re-parado em cada boot até 2026-09-18T15:07Z). Correcção: estado serializado em `bot_settings.guard_state_<mode>` a cada transição e carregado no boot.
+Menor: `BUILD_DIRTY` contava ficheiros não seguidos (data.db, .env) — passa a `--untracked-files=no`.
+
+**Pendente / próximo**: `FIXED_MAX_OPEN = 10` ficou vinculativo para o TSMOM (o paper falhou 4 entradas a 22 Set por estar cheio) — avaliar com A/B pré-registado (`CAP maxOpen=12` já existe no harness) antes de mexer. A/B de paridade harness-vs-live na mesma janela (17 Ago → 23 Set, feed MEXC) como validação contínua do harness.
